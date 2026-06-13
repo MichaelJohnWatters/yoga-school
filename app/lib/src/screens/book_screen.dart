@@ -13,6 +13,22 @@ import 'booking_sheet.dart';
 import 'checkin_sheet.dart';
 import 'enrollments_tab.dart';
 
+/// Caches the set of days within a given Monday-anchored week that have at
+/// least one scheduled class. The day strip uses this to render the activity
+/// dot under each day.
+final _weekDaysWithClassesProvider = FutureProvider.autoDispose
+    .family<Set<DateTime>, DateTime>((ref, monday) async {
+  final classes = await ref.watch(apiClientProvider).classesInRange(
+        from: monday,
+        to: monday.add(const Duration(days: 7)),
+      );
+  return {
+    for (final c in classes)
+      DateTime(c.startsAt.toLocal().year, c.startsAt.toLocal().month,
+          c.startsAt.toLocal().day)
+  };
+});
+
 class BookScreen extends ConsumerStatefulWidget {
   const BookScreen({super.key});
 
@@ -241,6 +257,7 @@ class _DayStrip extends StatelessWidget {
                 Expanded(
                   child: _DayChip(
                     date: week[i],
+                    monday: monday,
                     selected: _sameDay(week[i], selected),
                     onTap: () => onPick(week[i]),
                   ),
@@ -259,17 +276,24 @@ class _DayStrip extends StatelessWidget {
 
 class _DayChip extends ConsumerWidget {
   final DateTime date;
+  final DateTime monday;
   final bool selected;
   final VoidCallback onTap;
-  const _DayChip({required this.date, required this.selected, required this.onTap});
+  const _DayChip({
+    required this.date,
+    required this.monday,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    // Dot logic: ask the API if this day has classes. To avoid a flood of
-    // requests, we just show a dot for every day except Sunday in the seeded
-    // schedule. A future iteration can fetch a month-level summary.
-    final hasClasses = date.weekday != DateTime.sunday;
+    final days = ref.watch(_weekDaysWithClassesProvider(monday));
+    final hasClasses = days.maybeWhen(
+      data: (set) => set.contains(date),
+      orElse: () => false,
+    );
     const dows = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     final dow = dows[(date.weekday + 6) % 7];
 
