@@ -1,0 +1,464 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+// AdminProduct extends the public Product with manager-only fields.
+type AdminProduct struct {
+	Product
+	IsArchived  bool   `json:"is_archived"`
+	DisplayOrder int   `json:"display_order"`
+	Usage       AdminProductUsage `json:"usage"`
+}
+
+type AdminProductUsage struct {
+	ActivePasses   int     `json:"active_passes"`
+	RevenueMinor   int     `json:"revenue_minor"`
+	LastSale       *string `json:"last_sale,omitempty"`
+}
+
+// ListAdminProducts returns every product (including archived) with usage stats.
+func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]AdminProduct, error) {
+	const q = `
+		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
+		       s.currency, p.billing_type, p.pass_kind,
+		       p.credits, p.validity_days, p.is_hero,
+		       p.is_archived, p.display_order
+		  FROM products p
+		  JOIN studios s ON s.id = p.studio_id
+		 WHERE p.studio_id = ?
+		 ORDER BY p.is_archived ASC, p.is_hero DESC, p.display_order ASC, p.created_at ASC`
+	rows, err := s.db.QueryContext(ctx, q, studioID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AdminProduct, 0)
+	for rows.Next() {
+		var (
+			p          AdminProduct
+			credits    sql.NullInt64
+			validity   sql.NullInt64
+			heroInt    int
+			archInt    int
+		)
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
+			&p.Currency, &p.BillingType, &p.PassKind,
+			&credits, &validity, &heroInt, &archInt, &p.DisplayOrder,
+		); err != nil {
+			return nil, err
+		}
+		if credits.Valid {
+			n := int(credits.Int64)
+			p.Credits = &n
+		}
+		if validity.Valid {
+			n := int(validity.Int64)
+			p.ValidityDays = &n
+		}
+		p.IsHero = heroInt != 0
+		p.IsArchived = archInt != 0
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateAdminProductExtras(ctx, studioID, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) hydrateAdminProductExtras(ctx context.Context, studioID string, products []AdminProduct) error {
+	if len(products) == 0 {
+		return nil
+	}
+	const jq = `
+		SELECT pct.product_id, ct.id, COALESCE(ct.discipline,'')
+		  FROM product_class_types pct
+		  JOIN class_types ct ON ct.id = pct.class_type_id
+		 WHERE pct.product_id IN (SELECT id FROM products WHERE studio_id = ?)`
+	jrows, err := s.db.QueryContext(ctx, jq, studioID)
+	if err != nil {
+		return err
+	}
+	defer jrows.Close()
+	covers := map[string][]string{}
+	disc := map[string]map[string]struct{}{}
+	for jrows.Next() {
+		var pid, ctID, discipline string
+		if err := jrows.Scan(&pid, &ctID, &discipline); err != nil {
+			return err
+		}
+		covers[pid] = append(covers[pid], ctID)
+		if discipline != "" {
+			if disc[pid] == nil {
+				disc[pid] = map[string]struct{}{}
+			}
+			disc[pid][discipline] = struct{}{}
+		}
+	}
+
+	const uq = `
+		SELECT product_id,
+		       COUNT(*) AS purchases,
+		       COALESCE(SUM(amount_minor), 0) AS revenue,
+		       MAX(created_at) AS last_sale
+		  FROM purchases
+		 WHERE studio_id = ? AND status = 'completed'
+		 GROUP BY product_id`
+	urows, err := s.db.QueryContext(ctx, uq, studioID)
+	if err != nil {
+		return err
+	}
+	defer urows.Close()
+	usage := map[string]AdminProductUsage{}
+	for urows.Next() {
+		var (
+			pid        string
+			purchases  int
+			revenue    int
+			lastSale   sql.NullString
+		)
+		if err := urows.Scan(&pid, &purchases, &revenue, &lastSale); err != nil {
+			return err
+		}
+		u := AdminProductUsage{
+			ActivePasses: purchases, // proxy until we track active entitlements per product
+			RevenueMinor: revenue,
+		}
+		if lastSale.Valid {
+			s := lastSale.String
+			u.LastSale = &s
+		}
+		usage[pid] = u
+	}
+
+	// Refine ActivePasses to count only currently-active entitlements.
+	const eq = `
+		SELECT source_product_id, COUNT(*)
+		  FROM entitlements
+		 WHERE studio_id = ? AND status = 'active' AND source_product_id IS NOT NULL
+		 GROUP BY source_product_id`
+	erows, err := s.db.QueryContext(ctx, eq, studioID)
+	if err != nil {
+		return err
+	}
+	defer erows.Close()
+	active := map[string]int{}
+	for erows.Next() {
+		var pid string
+		var n int
+		if err := erows.Scan(&pid, &n); err != nil {
+			return err
+		}
+		active[pid] = n
+	}
+
+	for i := range products {
+		products[i].ClassTypeIDs = covers[products[i].ID]
+		for d := range disc[products[i].ID] {
+			products[i].DisciplineSet = append(products[i].DisciplineSet, d)
+		}
+		u := usage[products[i].ID]
+		if a, ok := active[products[i].ID]; ok {
+			u.ActivePasses = a
+		} else {
+			u.ActivePasses = 0
+		}
+		products[i].Usage = u
+	}
+	return nil
+}
+
+// AdminProductInput is the body for POST + PATCH /admin/products.
+type AdminProductInput struct {
+	Name         *string  `json:"name,omitempty"`
+	Description  *string  `json:"description,omitempty"`
+	PriceMinor   *int     `json:"price_minor,omitempty"`
+	BillingType  *string  `json:"billing_type,omitempty"`
+	PassKind     *string  `json:"pass_kind,omitempty"`
+	Credits      *int     `json:"credits,omitempty"`
+	ValidityDays *int     `json:"validity_days,omitempty"`
+	IsHero       *bool    `json:"is_hero,omitempty"`
+	DisplayOrder *int     `json:"display_order,omitempty"`
+	ClassTypeIDs []string `json:"class_type_ids,omitempty"`
+}
+
+func (s *Store) CreateAdminProduct(ctx context.Context, studioID string, in AdminProductInput) (string, error) {
+	required := []struct {
+		name string
+		ok   bool
+	}{
+		{"name", in.Name != nil && strings.TrimSpace(*in.Name) != ""},
+		{"price_minor", in.PriceMinor != nil},
+		{"billing_type", in.BillingType != nil},
+		{"pass_kind", in.PassKind != nil},
+	}
+	for _, r := range required {
+		if !r.ok {
+			return "", fmt.Errorf("%s is required", r.name)
+		}
+	}
+	if *in.BillingType != "one_time" && *in.BillingType != "recurring" {
+		return "", errors.New("billing_type must be one_time|recurring")
+	}
+	if *in.PassKind != "credit" && *in.PassKind != "unlimited" {
+		return "", errors.New("pass_kind must be credit|unlimited")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	id := uuid.NewString()
+	hero := 0
+	if in.IsHero != nil && *in.IsHero {
+		hero = 1
+	}
+	order := 0
+	if in.DisplayOrder != nil {
+		order = *in.DisplayOrder
+	}
+	var description any
+	if in.Description != nil {
+		description = *in.Description
+	}
+	var credits any
+	if *in.PassKind == "credit" && in.Credits != nil {
+		credits = *in.Credits
+	}
+	var validity any
+	if in.ValidityDays != nil {
+		validity = *in.ValidityDays
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO products
+		  (id, studio_id, name, description, price_minor, billing_type, pass_kind,
+		   credits, validity_days, is_hero, display_order, is_archived)
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		id, studioID, *in.Name, description, *in.PriceMinor, *in.BillingType, *in.PassKind,
+		credits, validity, hero, order,
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := s.replaceProductClassTypes(ctx, tx, id, in.ClassTypeIDs); err != nil {
+		return "", err
+	}
+	return id, tx.Commit()
+}
+
+func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, productID string, in AdminProductInput) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	set := []string{}
+	args := []any{}
+	if in.Name != nil {
+		set = append(set, "name = ?")
+		args = append(args, *in.Name)
+	}
+	if in.Description != nil {
+		set = append(set, "description = ?")
+		args = append(args, *in.Description)
+	}
+	if in.PriceMinor != nil {
+		set = append(set, "price_minor = ?")
+		args = append(args, *in.PriceMinor)
+	}
+	if in.BillingType != nil {
+		if *in.BillingType != "one_time" && *in.BillingType != "recurring" {
+			return errors.New("billing_type must be one_time|recurring")
+		}
+		set = append(set, "billing_type = ?")
+		args = append(args, *in.BillingType)
+	}
+	if in.PassKind != nil {
+		if *in.PassKind != "credit" && *in.PassKind != "unlimited" {
+			return errors.New("pass_kind must be credit|unlimited")
+		}
+		set = append(set, "pass_kind = ?")
+		args = append(args, *in.PassKind)
+		// Null out credits when switching to unlimited.
+		if *in.PassKind == "unlimited" {
+			set = append(set, "credits = NULL")
+		}
+	}
+	if in.Credits != nil {
+		set = append(set, "credits = ?")
+		args = append(args, *in.Credits)
+	}
+	if in.ValidityDays != nil {
+		set = append(set, "validity_days = ?")
+		args = append(args, *in.ValidityDays)
+	}
+	if in.IsHero != nil {
+		v := 0
+		if *in.IsHero {
+			v = 1
+		}
+		set = append(set, "is_hero = ?")
+		args = append(args, v)
+	}
+	if in.DisplayOrder != nil {
+		set = append(set, "display_order = ?")
+		args = append(args, *in.DisplayOrder)
+	}
+	if len(set) > 0 {
+		args = append(args, productID, studioID)
+		q := "UPDATE products SET "
+		for i, sq := range set {
+			if i > 0 {
+				q += ", "
+			}
+			q += sq
+		}
+		q += " WHERE id = ? AND studio_id = ?"
+		res, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrNotFound
+		}
+	}
+	if in.ClassTypeIDs != nil {
+		if err := s.replaceProductClassTypes(ctx, tx, productID, in.ClassTypeIDs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) replaceProductClassTypes(ctx context.Context, tx *sql.Tx, productID string, ids []string) error {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM product_class_types WHERE product_id = ?`, productID,
+	); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO product_class_types (product_id, class_type_id)
+			    VALUES (?, ?)`, productID, id,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ArchiveProduct soft-deletes — existing entitlements untouched.
+func (s *Store) ArchiveProduct(ctx context.Context, studioID, productID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE products SET is_archived = 1 WHERE id = ? AND studio_id = ?`,
+		productID, studioID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+type ClassType struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Discipline string `json:"discipline"`
+}
+
+func (s *Store) ListClassTypes(ctx context.Context, studioID string) ([]ClassType, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, COALESCE(discipline,'')
+		  FROM class_types
+		 WHERE studio_id = ?
+		 ORDER BY name ASC`,
+		studioID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ClassType, 0)
+	for rows.Next() {
+		var c ClassType
+		if err := rows.Scan(&c.ID, &c.Name, &c.Discipline); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+type ClassTypeInput struct {
+	Name       string `json:"name"`
+	Discipline string `json:"discipline"`
+}
+
+func (s *Store) CreateClassType(ctx context.Context, studioID, actorID string, in ClassTypeInput) (string, error) {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	id := uuid.NewString()
+	disc := sql.NullString{String: strings.TrimSpace(in.Discipline), Valid: in.Discipline != ""}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO class_types (id, studio_id, name, discipline)
+		     VALUES (?, ?, ?, ?)`,
+		id, studioID, name, disc,
+	); err != nil {
+		return "", err
+	}
+	_ = s.WriteAudit(ctx, studioID, actorID, "class_type_create", "class_type", id, map[string]any{
+		"name":       name,
+		"discipline": in.Discipline,
+	})
+	return id, nil
+}
+
+func (s *Store) UpdateClassType(ctx context.Context, studioID, actorID, id string, in ClassTypeInput) error {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return fmt.Errorf("name is required")
+	}
+	disc := sql.NullString{String: strings.TrimSpace(in.Discipline), Valid: in.Discipline != ""}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE class_types
+		   SET name = ?, discipline = ?
+		 WHERE id = ? AND studio_id = ?`,
+		name, disc, id, studioID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	_ = s.WriteAudit(ctx, studioID, actorID, "class_type_update", "class_type", id, map[string]any{
+		"name":       name,
+		"discipline": in.Discipline,
+	})
+	return nil
+}
+
+// (Keep this import used.)
+var _ = json.Marshal

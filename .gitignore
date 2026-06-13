@@ -1,0 +1,33 @@
+# OS
+.DS_Store
+
+# Editor / IDE
+.idea/
+*.iml
+.vscode/
+
+# Flutter / Dart
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.metadata
+app/build/
+app/.packages
+app/pubspec_overrides.yaml
+app/coverage/
+app/**/.flutter-plugins
+app/**/.flutter-plugins-dependencies
+app/.fvm/
+
+# Generated Firebase config that pulls live API keys
+app/lib/firebase_options.dart.local
+
+# Go
+server/dev.db
+server/dev.db-*
+server/*.test
+server/coverage.out
+server/coverage.html
+
+# Local Claude state
+.claude/
