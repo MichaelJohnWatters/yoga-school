@@ -89,37 +89,158 @@ class _AdminSettingsScreenState extends ConsumerState<AdminSettingsScreen> {
 
 // ============================== STUDIO CARD ==============================
 
-class _StudioCard extends StatelessWidget {
+class _StudioCard extends ConsumerStatefulWidget {
   final StudioConfig studio;
   const _StudioCard({required this.studio});
 
   @override
+  ConsumerState<_StudioCard> createState() => _StudioCardState();
+}
+
+class _StudioCardState extends ConsumerState<_StudioCard> {
+  late final TextEditingController _welcomeCtrl;
+  bool _saving = false;
+  String? _saved;
+
+  @override
+  void initState() {
+    super.initState();
+    _welcomeCtrl = TextEditingController(text: widget.studio.welcomeMessage);
+  }
+
+  @override
+  void dispose() {
+    _welcomeCtrl.dispose();
+    super.dispose();
+  }
+
+  bool get _dirty =>
+      _welcomeCtrl.text.trim() != widget.studio.welcomeMessage.trim();
+
+  Future<void> _save() async {
+    setState(() {
+      _saving = true;
+      _saved = null;
+    });
+    try {
+      await ref.read(apiClientProvider).adminUpdateStudioConfig(
+            welcomeMessage: _welcomeCtrl.text.trim(),
+          );
+      ref.invalidate(bootstrapProvider);
+      if (mounted) setState(() => _saved = 'Saved');
+    } catch (e) {
+      if (mounted) setState(() => _saved = 'Save failed: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final y = context.yoga;
     return ManagerCard(
       title: 'Studio',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _ReadField(label: 'DISPLAY NAME', value: studio.name),
+          _ReadField(label: 'DISPLAY NAME', value: widget.studio.name),
           const SizedBox(height: 12),
-          _ReadField(
+          _SettingsField(
             label: 'WELCOME MESSAGE',
-            value: studio.welcomeMessage,
+            controller: _welcomeCtrl,
+            onChanged: (_) => setState(() {}),
           ),
           const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
-                child: _ReadField(label: 'TIMEZONE', value: studio.timezone),
+                child:
+                    _ReadField(label: 'TIMEZONE', value: widget.studio.timezone),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: _ReadField(label: 'CURRENCY', value: studio.currency),
+                child:
+                    _ReadField(label: 'CURRENCY', value: widget.studio.currency),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              if (_saved != null) ...[
+                Text(
+                  _saved!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: _saved!.startsWith('Save failed')
+                        ? const Color(0xFFA33B2E)
+                        : y.muted,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              const Spacer(),
+              YButton(
+                label: _saving ? 'Saving…' : 'Save changes',
+                small: true,
+                onTap: (_dirty && !_saving) ? _save : null,
               ),
             ],
           ),
         ],
       ),
+    );
+  }
+}
+
+class _SettingsField extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+  final ValueChanged<String>? onChanged;
+  const _SettingsField({
+    required this.label,
+    required this.controller,
+    this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: y.muted,
+            letterSpacing: 0.6,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: y.borderStrong),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: TextField(
+            controller: controller,
+            onChanged: onChanged,
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+              color: y.text,
+            ),
+            decoration: const InputDecoration(
+              contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              isDense: true,
+              border: InputBorder.none,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
