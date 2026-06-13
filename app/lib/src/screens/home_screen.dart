@@ -1,6 +1,6 @@
 // Home — populated state. Mirrors yoga-home.jsx (YHomeScreen).
-// "Upcoming" reads /bookings?scope=upcoming; "This week" is still seeded
-// content until a /classes?from=&to= summary endpoint exists.
+// "Upcoming" reads /bookings?scope=upcoming; "This week" reads
+// /classes?from=&to= filtered to upcoming non-booked classes.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
