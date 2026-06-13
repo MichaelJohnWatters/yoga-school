@@ -120,16 +120,30 @@ class _TopBar extends StatelessWidget {
                 ],
                 const Spacer(),
                 _BellButton(),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 GestureDetector(
                   onTap: () => onSelect(DesktopSection.profile),
-                  child: YAvatar(
-                    name: me.fullName,
-                    size: 36,
-                    tone: YAvatarTone.accent,
+                  child: Row(
+                    children: [
+                      YAvatar(
+                        name: me.fullName,
+                        photoUrl: me.photoUrl,
+                        size: 34,
+                        tone: YAvatarTone.accent,
+                      ),
+                      const SizedBox(width: 9),
+                      Text(
+                        me.firstName,
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w700,
+                          color: y.text,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 _MoreButton(
                   active: active == DesktopSection.more,
                   onTap: () => onSelect(DesktopSection.more),
@@ -192,7 +206,7 @@ class _BellButton extends StatelessWidget {
             shape: BoxShape.circle,
             border: Border.all(color: y.borderStrong),
           ),
-          child: Icon(Icons.notifications_none_rounded, size: 18, color: y.text),
+          child: Icon(Icons.notifications_outlined, size: 18, color: y.text),
         ),
         Positioned(
           top: 7,

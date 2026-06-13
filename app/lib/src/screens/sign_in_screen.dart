@@ -119,6 +119,17 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                       color: y.text,
                     ),
                   ),
+                  const SizedBox(height: 5),
+                  Text(
+                    'Sign in to book classes and manage your passes.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                      height: 1.45,
+                    ),
+                  ),
                   const SizedBox(height: 24),
                   if (kDebugMode) ...[
                     _DevPicker(onPick: _useDevAccount),
@@ -174,14 +185,25 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                     label: _busy ? 'Signing in…' : 'Sign in',
                     onTap: _busy ? null : _signIn,
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 22),
                   Center(
-                    child: Text(
-                      "Create an account",
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.muted,
+                    child: RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: y.muted,
+                        ),
+                        children: [
+                          const TextSpan(text: 'New to the studio? '),
+                          TextSpan(
+                            text: 'Create an account',
+                            style: TextStyle(
+                              color: y.primary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
