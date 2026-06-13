@@ -1,0 +1,143 @@
+// Yoga School entrypoint.
+//
+// Boot order:
+//   1. Init Firebase + point at the local Auth emulator (dev only).
+//   2. Watch FirebaseAuth state. Signed out → SignInScreen.
+//   3. Signed in → bootstrap (studio config + /me) → ManagerShell or RootShell
+//      based on the resolved server-side role.
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'src/api/api_client.dart';
+import 'src/firebase_options.dart';
+import 'src/screens/customer_display.dart';
+import 'src/screens/desktop/desktop_shell.dart';
+import 'src/screens/desktop/responsive.dart';
+import 'src/screens/manager/manager_shell.dart';
+import 'src/screens/root_shell.dart';
+import 'src/screens/sign_in_screen.dart';
+import 'src/screens/splash_screen.dart';
+import 'src/theme/yoga_theme.dart';
+import 'src/theme/yoga_tokens.dart';
+import 'src/auth/auth_state.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+  if (kDebugMode) {
+    // Dev: route Firebase Auth at the local emulator on :9099.
+    await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
+  }
+  runApp(const ProviderScope(child: YogaApp()));
+}
+
+class YogaApp extends ConsumerWidget {
+  const YogaApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // `?desk=1` flips the app into customer-display mode for the desk
+    // tablet — themed by the live studio config, no normal app shell.
+    final deskMode = Uri.base.queryParameters['desk'] != null;
+    if (deskMode) {
+      return const ProviderScope(child: CustomerDisplay());
+    }
+    final user = ref.watch(firebaseUserProvider);
+    final boot = ref.watch(bootstrapProvider);
+
+    // Theme defaults to Warm Clay light until we have studio config in hand.
+    final defaultTokens = YogaTokens.derive(
+      yogaPresets['clay']!.light,
+      dark: false,
+    );
+    final studioTokens = boot.maybeWhen(
+      data: (b) {
+        final semantic =
+            YogaSemanticTokens.fromHexMap(b.studio.activeThemeTokens);
+        return YogaTokens.derive(
+          semantic,
+          dark: b.studio.activeThemeMode == 'dark',
+        );
+      },
+      orElse: () => defaultTokens,
+    );
+
+    return MaterialApp(
+      title: 'Studio 52',
+      debugShowCheckedModeBanner: false,
+      theme: buildYogaTheme(studioTokens),
+      home: user.when(
+        data: (u) {
+          if (u == null) return const SignInScreen();
+          return _SignedInRoot(boot: boot);
+        },
+        loading: () => const SplashScreen(),
+        error: (e, _) => const SignInScreen(),
+      ),
+    );
+  }
+}
+
+class _SignedInRoot extends ConsumerWidget {
+  final AsyncValue<Bootstrap> boot;
+  const _SignedInRoot({required this.boot});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return boot.when(
+      data: (b) {
+        // Staff (instructor) and manager both land in the ManagerShell —
+        // the shell's sidebar filter hides tier-C sections for instructors.
+        if (b.me.isStaff) {
+          return ManagerShell(me: b.me, studio: b.studio);
+        }
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            if (constraints.maxWidth >= kDesktopBreakpoint) {
+              return DesktopShell(me: b.me, studio: b.studio);
+            }
+            return RootShell(me: b.me, studio: b.studio);
+          },
+        );
+      },
+      loading: () => const SplashScreen(),
+      error: (e, _) => Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    "Can't reach the studio",
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '$e',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 16),
+                  TextButton(
+                    onPressed: () =>
+                        ref.read(authServiceProvider).signOut(),
+                    child: const Text('Sign out'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

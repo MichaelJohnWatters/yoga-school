@@ -1,0 +1,3 @@
+-- Seeding moved to server/internal/store/seed.go (SeedDev) so we can compute
+-- class times relative to "this week" instead of going stale on fixed dates.
+-- This file is intentionally empty; the -seed flag in main.go now calls Go.
