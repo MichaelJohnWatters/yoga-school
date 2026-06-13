@@ -94,10 +94,15 @@ class _AdminScheduleScreenState extends ConsumerState<AdminScheduleScreen> {
         builder: (context, snap) {
           final rows = snap.data ?? const <ClassRow>[];
           final rooms = <String>{for (final r in rows) r.roomName};
+          final classCount = rows.length;
+          final roomCount = rooms.length;
           final subText = rows.isEmpty
               ? label
-              : '$label · ${rows.length} class${rows.length == 1 ? '' : 'es'}'
-                  '${isWeek ? '' : ' · ${rooms.length} room${rooms.length == 1 ? '' : 's'}'}';
+              : isWeek
+                  ? '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+                      ' across $roomCount room${roomCount == 1 ? '' : 's'}'
+                  : '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+                      ' · $roomCount room${roomCount == 1 ? '' : 's'}';
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [

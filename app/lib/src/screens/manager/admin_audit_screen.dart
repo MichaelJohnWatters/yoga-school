@@ -40,6 +40,14 @@ class _AdminAuditScreenState extends ConsumerState<AdminAuditScreen> {
     'cash_grant': 'Cash grants',
     'credit_adjust': 'Credit adjusts',
     'void': 'Voids',
+    'staff_create': 'Staff added',
+    'staff_update': 'Staff updated',
+    'promotion_create': 'New promos',
+    'promotion_update': 'Promo edits',
+    'promotion_archive': 'Promo archived',
+    'class_type_create': 'New class types',
+    'class_type_update': 'Class type edits',
+    'attendance_scan': 'Scan check-ins',
   };
 
   @override
@@ -271,6 +279,14 @@ class _AuditRow extends StatelessWidget {
       'class_cancel' => 'Class cancelled',
       'template_create' => 'Template created',
       'template_revert' => 'Template undone',
+      'staff_create' => 'Staff added',
+      'staff_update' => 'Staff updated',
+      'promotion_create' => 'New promotion',
+      'promotion_update' => 'Promotion edited',
+      'promotion_archive' => 'Promotion archived',
+      'class_type_create' => 'New class type',
+      'class_type_update' => 'Class type edited',
+      'attendance_scan' => 'Scan check-in',
       _ => e.action,
     };
     final reasonOrNote = e.detail['reason'] ?? e.detail['note'];
@@ -377,6 +393,14 @@ class _AuditRow extends StatelessWidget {
       'class_cancel' => const Color(0xFFA33B2E),
       'template_create' => y.primary,
       'template_revert' => const Color(0xFFA33B2E),
+      'staff_create' => y.primary,
+      'staff_update' => y.accent,
+      'promotion_create' => y.primary,
+      'promotion_update' => y.accent,
+      'promotion_archive' => const Color(0xFFA33B2E),
+      'class_type_create' => y.primary,
+      'class_type_update' => y.accent,
+      'attendance_scan' => y.primary,
       _ => y.text,
     };
   }
