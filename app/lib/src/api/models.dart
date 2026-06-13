@@ -70,6 +70,7 @@ class Me {
   final String fullName;
   final String? photoUrl;
   final AccessTier tier;
+  final DateTime? createdAt;
 
   Me({
     required this.id,
@@ -79,6 +80,7 @@ class Me {
     required this.fullName,
     required this.photoUrl,
     required this.tier,
+    required this.createdAt,
   });
 
   factory Me.fromJson(Map<String, dynamic> j) => Me(
@@ -89,6 +91,9 @@ class Me {
         fullName: j['full_name'] as String,
         photoUrl: j['photo_url'] as String?,
         tier: _parseTier(j['tier'] as String?),
+        createdAt: (j['created_at'] as String?) != null
+            ? DateTime.tryParse(j['created_at'] as String)
+            : null,
       );
 
   String get firstName => fullName.split(' ').first;
@@ -113,6 +118,7 @@ class ClassRow {
   final int durationMinutes;
   final int capacity;
   final int bookedCount;
+  final int waitlistCount;
   final BookingState bookingState;
   final String? bookingId;
 
@@ -130,6 +136,7 @@ class ClassRow {
     required this.durationMinutes,
     required this.capacity,
     required this.bookedCount,
+    required this.waitlistCount,
     required this.bookingState,
     required this.bookingId,
   });
@@ -148,6 +155,7 @@ class ClassRow {
         durationMinutes: j['duration_minutes'] as int,
         capacity: j['capacity'] as int,
         bookedCount: j['booked_count'] as int,
+        waitlistCount: (j['waitlist_count'] as int?) ?? 0,
         bookingState: switch (j['booking_state'] as String) {
           'booked' => BookingState.booked,
           'full' => BookingState.full,

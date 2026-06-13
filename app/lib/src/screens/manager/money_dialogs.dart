@@ -471,6 +471,7 @@ class _AdjustDialogState extends ConsumerState<_AdjustDialog> {
             child: Row(
               children: [
                 _Stepper(
+                  delta: _delta,
                   onMinus: () => setState(() => _delta -= 1),
                   onPlus: () => setState(() => _delta += 1),
                 ),
@@ -529,42 +530,79 @@ class _AdjustDialogState extends ConsumerState<_AdjustDialog> {
   }
 }
 
+/// Unified inline stepper pill — `[−|+1|+]` with single outer border and
+/// internal dividers. Matches yoga-admin-c.jsx:75-83. Plus button uses
+/// primary color; minus button uses muted.
 class _Stepper extends StatelessWidget {
+  final int delta;
   final VoidCallback onMinus;
   final VoidCallback onPlus;
-  const _Stepper({required this.onMinus, required this.onPlus});
+  const _Stepper({
+    required this.delta,
+    required this.onMinus,
+    required this.onPlus,
+  });
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    Widget btn(String label, VoidCallback tap) => GestureDetector(
-          onTap: tap,
-          child: Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: y.surface2,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: y.borderStrong),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-                color: y.text,
-                height: 1.0,
+    final centerLabel = delta > 0 ? '+$delta' : '$delta';
+    Widget tapBox({
+      required String glyph,
+      required Color color,
+      required VoidCallback onTap,
+    }) =>
+        GestureDetector(
+          onTap: onTap,
+          child: SizedBox(
+            width: 42,
+            height: 40,
+            child: Center(
+              child: Text(
+                glyph,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: color,
+                  height: 1.0,
+                ),
               ),
             ),
           ),
         );
-    return Row(
-      children: [
-        btn('−', onMinus),
-        const SizedBox(width: 6),
-        btn('+', onPlus),
-      ],
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: y.borderStrong),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            tapBox(glyph: '−', color: y.muted, onTap: onMinus),
+            Container(width: 1, height: 40, color: y.border),
+            SizedBox(
+              width: 56,
+              height: 40,
+              child: Center(
+                child: Text(
+                  centerLabel,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: y.text,
+                    height: 1.0,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ),
+            Container(width: 1, height: 40, color: y.border),
+            tapBox(glyph: '+', color: y.primary, onTap: onPlus),
+          ],
+        ),
+      ),
     );
   }
 }

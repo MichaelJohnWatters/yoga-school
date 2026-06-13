@@ -28,6 +28,7 @@ type ClassRow struct {
 	DurationMinutes     int     `json:"duration_minutes"`
 	Capacity            int     `json:"capacity"`
 	BookedCount         int     `json:"booked_count"`
+	WaitlistCount       int     `json:"waitlist_count"`
 	BookingState        string  `json:"booking_state"` // booked|available|full
 	BookingID           string  `json:"booking_id,omitempty"`
 }
@@ -52,6 +53,8 @@ func (s *Store) ClassesInRange(ctx context.Context, studioID, userID string, fro
 			c.starts_at, c.ends_at, c.capacity,
 			(SELECT COUNT(*) FROM bookings b
 			    WHERE b.class_id = c.id AND b.status = 'booked') AS booked_count,
+			(SELECT COUNT(*) FROM waitlist_entries w
+			    WHERE w.class_id = c.id) AS waitlist_count,
 			(SELECT b.id FROM bookings b
 			    WHERE b.class_id = c.id AND b.user_id = ? AND b.status = 'booked'
 			    LIMIT 1) AS my_booking_id
@@ -87,7 +90,7 @@ func (s *Store) ClassesInRange(ctx context.Context, studioID, userID string, fro
 			&r.InstructorID, &r.InstructorName, &photoURL,
 			&r.RoomID, &r.RoomName,
 			&r.StartsAt, &r.EndsAt, &r.Capacity,
-			&r.BookedCount, &myBookingID,
+			&r.BookedCount, &r.WaitlistCount, &myBookingID,
 		); err != nil {
 			return nil, err
 		}

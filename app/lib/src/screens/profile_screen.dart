@@ -96,7 +96,7 @@ class _Header extends StatelessWidget {
                     ),
                     const SizedBox(height: 1),
                     Text(
-                      'Member since March 2026',
+                      _memberSinceLabel(me.createdAt),
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
@@ -608,6 +608,16 @@ String _d(DateTime d) {
   const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   final l = d.toLocal();
   return '${l.day} ${mons[l.month - 1]}';
+}
+
+String _memberSinceLabel(DateTime? createdAt) {
+  if (createdAt == null) return 'Studio member';
+  const monthsFull = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  final l = createdAt.toLocal();
+  return 'Member since ${monthsFull[l.month - 1]} ${l.year}';
 }
 
 class _WalletBody extends ConsumerWidget {

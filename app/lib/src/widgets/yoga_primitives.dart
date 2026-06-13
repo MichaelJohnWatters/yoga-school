@@ -350,3 +350,83 @@ class YDateTile extends StatelessWidget {
     );
   }
 }
+
+/// Paints a rounded-rect dashed border around a child. The design uses this
+/// for the Home milestones strip and the Series roster "upcoming" cells.
+class YDashedBorder extends StatelessWidget {
+  final Color color;
+  final double radius;
+  final double dashLength;
+  final double gapLength;
+  final double strokeWidth;
+  final Widget child;
+  const YDashedBorder({
+    super.key,
+    required this.color,
+    required this.radius,
+    this.dashLength = 4,
+    this.gapLength = 3,
+    this.strokeWidth = 1,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _DashedRectPainter(
+        color: color,
+        radius: radius,
+        dashLength: dashLength,
+        gapLength: gapLength,
+        strokeWidth: strokeWidth,
+      ),
+      child: child,
+    );
+  }
+}
+
+class _DashedRectPainter extends CustomPainter {
+  final Color color;
+  final double radius;
+  final double dashLength;
+  final double gapLength;
+  final double strokeWidth;
+  _DashedRectPainter({
+    required this.color,
+    required this.radius,
+    required this.dashLength,
+    required this.gapLength,
+    required this.strokeWidth,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Radius.circular(radius),
+    );
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth;
+    final path = Path()..addRRect(rrect);
+    final dashed = Path();
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = (distance + dashLength).clamp(0.0, metric.length);
+        dashed.addPath(metric.extractPath(distance, next), Offset.zero);
+        distance = next + gapLength;
+      }
+    }
+    canvas.drawPath(dashed, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedRectPainter old) =>
+      old.color != color ||
+      old.radius != radius ||
+      old.dashLength != dashLength ||
+      old.gapLength != gapLength ||
+      old.strokeWidth != strokeWidth;
+}
