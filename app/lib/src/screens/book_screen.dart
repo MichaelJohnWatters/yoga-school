@@ -70,7 +70,7 @@ class _BookScreenState extends ConsumerState<BookScreen> {
                   return _LoadError(error: snap.error!, onRetry: _reload);
                 }
                 final rows = snap.data ?? const <ClassRow>[];
-                if (rows.isEmpty) return _EmptyDay(day: _selected);
+                if (rows.isEmpty) return _EmptyDay(day: _selected, onJumpTo: _pick);
                 return _ClassList(rows: rows, onBookingChanged: _reload);
               },
             ),
@@ -459,10 +459,13 @@ class _ClassListRow extends StatelessWidget {
           leadingCheck: true,
         );
       case BookingState.full:
+        final fullLabel = row.waitlistCount > 0
+            ? 'Full · ${row.waitlistCount} waiting'
+            : 'Full';
         return Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            YChip(kind: YChipKind.full, label: 'Full · ${row.bookedCount}/${row.capacity}'),
+            YChip(kind: YChipKind.full, label: fullLabel),
             const SizedBox(height: 5),
             Text(
               'Join waitlist',
@@ -500,13 +503,18 @@ class _ClassListRow extends StatelessWidget {
 
 class _EmptyDay extends StatelessWidget {
   final DateTime day;
-  const _EmptyDay({required this.day});
+  final ValueChanged<DateTime>? onJumpTo;
+  const _EmptyDay({required this.day, this.onJumpTo});
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     const dowFull = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     final label = '${dowFull[(day.weekday + 6) % 7]} ${day.day}';
+    final nextDay = day.add(const Duration(days: 1));
+    const dowShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final nextLabel =
+        '${dowShort[(nextDay.weekday + 6) % 7]} ${nextDay.day}';
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
       child: Column(
@@ -541,6 +549,13 @@ class _EmptyDay extends StatelessWidget {
               color: y.muted,
               height: 1.45,
             ),
+          ),
+          const SizedBox(height: 16),
+          YButton(
+            label: 'Next classes · $nextLabel →',
+            variant: YButtonVariant.soft,
+            small: true,
+            onTap: onJumpTo == null ? null : () => onJumpTo!(nextDay),
           ),
         ],
       ),

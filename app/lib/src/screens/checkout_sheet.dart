@@ -283,14 +283,7 @@ class _GooglePayBtn extends StatelessWidget {
         child: const Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(
-              'G',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF4285F4),
-              ),
-            ),
+            _GoogleGGradient(),
             SizedBox(width: 5),
             Text(
               'Pay',
@@ -301,6 +294,35 @@ class _GooglePayBtn extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Renders a Google-brand "G" with the official 4-color gradient
+/// (blue → red → yellow → green) via ShaderMask.
+class _GoogleGGradient extends StatelessWidget {
+  const _GoogleGGradient();
+
+  @override
+  Widget build(BuildContext context) {
+    return ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (rect) => const LinearGradient(
+        colors: [
+          Color(0xFF4285F4), // blue
+          Color(0xFFEA4335), // red
+          Color(0xFFFBBC05), // yellow
+          Color(0xFF34A853), // green
+        ],
+      ).createShader(rect),
+      child: const Text(
+        'G',
+        style: TextStyle(
+          fontSize: 17,
+          fontWeight: FontWeight.w800,
+          color: Colors.white, // masked by the shader
         ),
       ),
     );
@@ -343,21 +365,15 @@ class _SavedCard extends StatelessWidget {
       ),
       child: Row(
         children: [
+          // Donut radio — thick primary ring with surface center, matching
+          // yoga-checkout.jsx:44 (5px primary border + surface fill).
           Container(
             width: 18,
             height: 18,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(color: y.primary, width: 1.5),
-            ),
-            alignment: Alignment.center,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: y.primary,
-              ),
+              color: y.surface,
+              border: Border.all(color: y.primary, width: 5),
             ),
           ),
           const SizedBox(width: 12),

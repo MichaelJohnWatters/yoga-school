@@ -70,6 +70,9 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                 title: r.klass.title,
                 sub: _subline(r.klass),
                 actions: [
+                  // Cancel class lives here as well as in Schedule; useful
+                  // when a manager is already looking at the roster and
+                  // realizes the class can't run.
                   YButton(
                     label: 'Cancel class',
                     variant: YButtonVariant.outline,

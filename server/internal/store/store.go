@@ -76,12 +76,13 @@ type Studio struct {
 }
 
 type User struct {
-	ID       string  `json:"id"`
-	StudioID string  `json:"studio_id"`
-	Role     string  `json:"role"`
-	Email    string  `json:"email"`
-	FullName string  `json:"full_name"`
-	PhotoURL *string `json:"photo_url,omitempty"`
+	ID        string  `json:"id"`
+	StudioID  string  `json:"studio_id"`
+	Role      string  `json:"role"`
+	Email     string  `json:"email"`
+	FullName  string  `json:"full_name"`
+	PhotoURL  *string `json:"photo_url,omitempty"`
+	CreatedAt string  `json:"created_at"`
 }
 
 // ---- queries --------------------------------------------------------------
@@ -128,7 +129,7 @@ func (s *Store) StudioConfig(ctx context.Context, studioID string) (*Studio, err
 
 func (s *Store) UserByFirebaseUID(ctx context.Context, uid string) (*User, error) {
 	const q = `
-		SELECT id, studio_id, role, email, full_name, photo_url
+		SELECT id, studio_id, role, email, full_name, photo_url, created_at
 		  FROM users
 		 WHERE firebase_uid = ?`
 	var (
@@ -136,7 +137,7 @@ func (s *Store) UserByFirebaseUID(ctx context.Context, uid string) (*User, error
 		photoURL sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, q, uid).Scan(
-		&out.ID, &out.StudioID, &out.Role, &out.Email, &out.FullName, &photoURL,
+		&out.ID, &out.StudioID, &out.Role, &out.Email, &out.FullName, &photoURL, &out.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -154,7 +155,7 @@ func (s *Store) UserByFirebaseUID(ctx context.Context, uid string) (*User, error
 // the token's email claim is what links the external identity to our row.
 func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 	const q = `
-		SELECT id, studio_id, role, email, full_name, photo_url
+		SELECT id, studio_id, role, email, full_name, photo_url, created_at
 		  FROM users
 		 WHERE email = ?`
 	var (
@@ -162,7 +163,7 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 		photoURL sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, q, email).Scan(
-		&out.ID, &out.StudioID, &out.Role, &out.Email, &out.FullName, &photoURL,
+		&out.ID, &out.StudioID, &out.Role, &out.Email, &out.FullName, &photoURL, &out.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

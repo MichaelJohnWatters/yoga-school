@@ -44,17 +44,9 @@ class _AdminStudentsScreenState extends ConsumerState<AdminStudentsScreen> {
                   '${d.total} student${d.total == 1 ? '' : 's'} · ${d.withActivePass} with an active pass',
               orElse: () => '',
             ),
-            actions: [
-              YButton(
-                label: '+ Grant a pass',
-                small: true,
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Pick a student row first.'),
-                  ));
-                },
-              ),
-            ],
+            // Top "Grant a pass" action removed — the flow needs a student
+            // selected first and per-row "Grant pass" already covers it.
+            // Re-add via a student picker dialog when one exists.
           ),
           Padding(
             padding: const EdgeInsets.only(bottom: 14),
