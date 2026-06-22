@@ -513,7 +513,10 @@ class _StatusChip extends StatelessWidget {
     final start = row.startsAt.toLocal();
     final end = row.endsAt.toLocal();
     if (row.bookingState == BookingState.full) {
-      return const YChip(kind: YChipKind.full, label: 'Full');
+      final label = row.waitlistCount > 0
+          ? 'Full · ${row.waitlistCount} waiting'
+          : 'Full';
+      return YChip(kind: YChipKind.full, label: label);
     }
     if (now.isAfter(end)) {
       return const YChip(kind: YChipKind.neutral, label: 'Done');

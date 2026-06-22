@@ -1,6 +1,9 @@
-// Buy screen — grouped layout (Memberships block, then Class packs list).
-// Mirrors yoga-buy.jsx YBuyGrouped. The studio.buyLayout field will let us
-// flip to Grid/List for studios that prefer them; grouped is the default.
+// Buy screen — three layouts (Grid / List / Grouped) per studio.buyLayout.
+// Mirrors yoga-buy.jsx YBuyGrid / YBuyList / YBuyGrouped.
+//
+// The studio's choice in Settings determines which body renders. Each body
+// shares the same _BuyHeader, _MembershipCard, _PackRow + _GateChip widgets;
+// only the arrangement differs.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,7 +30,12 @@ final productsProvider = FutureProvider
       .listProducts(coversClassTypeId: coversClassTypeId);
 });
 
-class BuyScreen extends ConsumerWidget {
+/// Buy filter — student's chosen discipline. `all` shows everything;
+/// specific filters keep only products whose discipline set contains the
+/// selected value (or is empty = covers everything).
+enum _BuyFilter { all, yoga, reformer }
+
+class BuyScreen extends ConsumerStatefulWidget {
   /// When non-null, the list is narrowed to passes that cover this class
   /// type — set by the BookingSheet "Buy a pass" CTA so students don't
   /// see passes that wouldn't unlock the class they wanted.
@@ -43,9 +51,9 @@ class BuyScreen extends ConsumerWidget {
   /// the right day after the auto-book completes.
   final DateTime? bookAfterPurchaseDay;
 
-  /// One of 'grouped' (default), 'grid', 'list'. Set per-studio in the
-  /// manager settings; rendered here so each studio can pick the layout
-  /// that suits their catalogue.
+  /// Overrides the studio's configured layout. Null = read the layout
+  /// off the bootstrap. The CheckoutSheet push-route passes a specific
+  /// value when it wants a particular shape.
   final String? buyLayout;
 
   /// User + studio so the screen can render the shared YStudioTopBar
@@ -71,52 +79,86 @@ class BuyScreen extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final products = ref.watch(productsProvider(coversClassTypeId));
+  ConsumerState<BuyScreen> createState() => _BuyScreenState();
+}
+
+class _BuyScreenState extends ConsumerState<BuyScreen> {
+  _BuyFilter _filter = _BuyFilter.all;
+
+  @override
+  Widget build(BuildContext context) {
+    final products =
+        ref.watch(productsProvider(widget.coversClassTypeId));
+    // Layout precedence: explicit override (push-route) → studio's
+    // configured default → 'grouped' fallback. Reading the bootstrap
+    // for the studio side keeps the manager's setting live without
+    // requiring every caller to plumb it through.
+    final boot = ref.watch(bootstrapProvider);
+    final String layout = widget.buyLayout ??
+        boot.maybeWhen<String>(
+          data: (b) => b.studio.buyLayout,
+          orElse: () => 'grouped',
+        );
     return RefreshOnMount(
-      onMount: () => ref.invalidate(productsProvider(coversClassTypeId)),
+      onMount: () =>
+          ref.invalidate(productsProvider(widget.coversClassTypeId)),
       child: _BookAfterPurchaseScope(
-      classId: bookAfterPurchaseClassId,
-      day: bookAfterPurchaseDay,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (me != null && studio != null) ...[
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
-              child: YStudioTopBar(
-                studioName: studio!.name,
-                userFullName: me!.fullName,
-                userPhotoUrl: me!.photoUrl,
-                onAvatarTap: onTapProfile,
+        classId: widget.bookAfterPurchaseClassId,
+        day: widget.bookAfterPurchaseDay,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (widget.me != null && widget.studio != null) ...[
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+                child: YStudioTopBar(
+                  studioName: widget.studio!.name,
+                  userFullName: widget.me!.fullName,
+                  userPhotoUrl: widget.me!.photoUrl,
+                  onAvatarTap: widget.onTapProfile,
+                ),
+              ),
+              const SizedBox(height: 18),
+            ],
+            _BuyHeader(
+              filter: _filter,
+              onFilter: (f) => setState(() => _filter = f),
+            ),
+            Expanded(
+              child: products.when(
+                data: (list) => _bodyFor(layout, _applyFilter(list)),
+                loading: () => const Center(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                error: (e, _) => Center(
+                  child: Text(
+                    "Can't load products: ${ApiError.fromAny(e).message}",
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 18),
           ],
-          const _BuyHeader(),
-          Expanded(
-            child: products.when(
-              data: (list) {
-                switch (buyLayout) {
-                  case 'grid':
-                    return _GridBody(products: list);
-                  case 'list':
-                    return _ListBody(products: list);
-                  default:
-                    return _GroupedBody(products: list);
-                }
-              },
-              loading: () =>
-                  const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              error: (e, _) => Center(child: Text("Can't load products: ${ApiError.fromAny(e).message}")),
-            ),
-          ),
-        ],
+        ),
       ),
-    ),
     );
   }
+
+  List<Product> _applyFilter(List<Product> all) {
+    if (_filter == _BuyFilter.all) return all;
+    final target = _filter == _BuyFilter.yoga ? 'yoga' : 'reformer';
+    return all.where((p) {
+      // Products with no declared disciplines (or with 'all') cover everything.
+      if (p.disciplines.isEmpty) return true;
+      return p.disciplines.contains(target);
+    }).toList();
+  }
+
+  Widget _bodyFor(String layout, List<Product> products) => switch (layout) {
+        'grid' => _GridBody(products: products),
+        'list' => _ListBody(products: products),
+        _ => _GroupedBody(products: products),
+      };
 }
 
 /// Threads the "auto-book this class after purchase" intent from BuyScreen
@@ -139,7 +181,15 @@ class _BookAfterPurchaseScope extends InheritedWidget {
 }
 
 class _BuyHeader extends StatelessWidget {
-  const _BuyHeader();
+  final _BuyFilter filter;
+  final ValueChanged<_BuyFilter> onFilter;
+  const _BuyHeader({required this.filter, required this.onFilter});
+
+  static const _options = [
+    (_BuyFilter.all, 'All'),
+    (_BuyFilter.yoga, 'Yoga'),
+    (_BuyFilter.reformer, 'Reformer'),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -168,15 +218,16 @@ class _BuyHeader extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          // Filter chips are visual-only for now; products are seeded with
-          // explicit class type coverage. Filter logic comes when there are
-          // enough products to warrant it.
           Row(
             children: [
-              for (final (i, label) in const [(0, 'All'), (1, 'Yoga'), (2, 'Reformer')].indexed)
+              for (final (value, label) in _options)
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
-                  child: _FilterChip(label: label.$2, active: i == 0),
+                  child: _FilterChip(
+                    label: label,
+                    active: value == filter,
+                    onTap: () => onFilter(value),
+                  ),
                 ),
             ],
           ),
@@ -189,24 +240,32 @@ class _BuyHeader extends StatelessWidget {
 class _FilterChip extends StatelessWidget {
   final String label;
   final bool active;
-  const _FilterChip({required this.label, required this.active});
+  final VoidCallback onTap;
+  const _FilterChip({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-      decoration: BoxDecoration(
-        color: active ? y.text : y.surface,
-        borderRadius: BorderRadius.circular(y.radiusChip),
-        border: Border.all(color: active ? Colors.transparent : y.borderStrong),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-          color: active ? y.background : y.muted,
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? y.text : y.surface,
+          borderRadius: BorderRadius.circular(y.radiusChip),
+          border: Border.all(color: active ? Colors.transparent : y.borderStrong),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: active ? y.background : y.muted,
+          ),
         ),
       ),
     );
@@ -488,7 +547,7 @@ class _MembershipCard extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(bottom: 3, left: 1),
                     child: Text(
-                      '/mo',
+                      '/month',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -636,6 +695,7 @@ class _GateChip extends StatelessWidget {
     );
   }
 }
+
 
 Future<void> _openCheckout(BuildContext context, Product product) async {
   final scope = _BookAfterPurchaseScope.of(context);

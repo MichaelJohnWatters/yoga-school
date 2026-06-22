@@ -26,14 +26,18 @@ type ClassRow struct {
 	// Optional `#rrggbb` accent set on the room. Lets cards tint per
 	// room without a second fetch / cross-reference. Omitted when the
 	// room has no colour configured.
-	RoomColor *string `json:"room_color,omitempty"`
-	StartsAt           string  `json:"starts_at"`
-	EndsAt             string  `json:"ends_at"`
-	DurationMinutes    int     `json:"duration_minutes"`
-	Capacity           int     `json:"capacity"`
-	BookedCount        int     `json:"booked_count"`
-	BookingState       string  `json:"booking_state"` // booked|available|full
-	BookingID          string  `json:"booking_id,omitempty"`
+	RoomColor       *string `json:"room_color,omitempty"`
+	StartsAt        string  `json:"starts_at"`
+	EndsAt          string  `json:"ends_at"`
+	DurationMinutes int     `json:"duration_minutes"`
+	Capacity        int     `json:"capacity"`
+	BookedCount     int     `json:"booked_count"`
+	// Number of users currently on the waitlist for this class. Used by
+	// the "Full · N waiting" chip on the student book screen and the
+	// manager dashboard's full-class indicator.
+	WaitlistCount int    `json:"waitlist_count"`
+	BookingState  string `json:"booking_state"` // booked|available|full
+	BookingID     string `json:"booking_id,omitempty"`
 	// Set when the caller's booking on this class includes a +1 guest.
 	// Lets the UI show a "+1 friend" chip on the card and "Booked with
 	// <name>" inside the booking sheet without a follow-up request.
@@ -75,6 +79,8 @@ func (s *Store) ClassesInRange(ctx context.Context, studioID, userID string, fro
 			c.starts_at, c.ends_at, c.capacity,
 			(SELECT COUNT(*) FROM bookings b
 			    WHERE b.class_id = c.id AND b.status = 'booked') AS booked_count,
+			(SELECT COUNT(*) FROM waitlist_entries w
+			    WHERE w.class_id = c.id) AS waitlist_count,
 			(SELECT b.id FROM bookings b
 			    WHERE b.class_id = c.id AND b.user_id = ? AND b.status = 'booked'
 			      AND b.is_plus_one = 0
@@ -125,7 +131,8 @@ func (s *Store) ClassesInRange(ctx context.Context, studioID, userID string, fro
 			&r.InstructorID, &r.InstructorName, &photoURL,
 			&r.RoomID, &r.RoomName, &roomColor,
 			&r.StartsAt, &r.EndsAt, &r.Capacity,
-			&r.BookedCount, &myBookingID, &myWaitPos, &enrollmentID,
+			&r.BookedCount, &r.WaitlistCount,
+			&myBookingID, &myWaitPos, &enrollmentID,
 			&myPlusOneName,
 		); err != nil {
 			return nil, err

@@ -8,7 +8,8 @@ import '../../api/models.dart';
 import '../../api/api_error.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
-import '../home_screen.dart' show upcomingBookingsProvider;
+import '../home_screen.dart'
+    show upcomingBookingsProvider, thisWeekClassesProvider;
 
 class DesktopHome extends ConsumerWidget {
   final Me me;
@@ -355,92 +356,149 @@ class _MilestonesStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(y.radiusCard),
-        border: Border.all(color: y.borderStrong),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.star_border_rounded, size: 18, color: y.accent),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '24 classes · 3-week streak',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: y.muted,
+    return YDashedBorder(
+      color: y.borderStrong,
+      radius: y.radiusCard,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(Icons.star_border_rounded, size: 18, color: y.accent),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                '24 classes · 3-week streak',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
+                ),
               ),
             ),
-          ),
-          Icon(Icons.chevron_right, size: 16, color: y.muted),
-        ],
+            Icon(Icons.chevron_right, size: 14, color: y.muted),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _WeekRailCard extends StatelessWidget {
-  static const _rows = [
-    ('Yin & Restore', 'Today · 19:00', 'Mara Kovac'),
-    ('Power Vinyasa', 'Fri · 17:45', 'Asha Patel'),
-    ('Vinyasa Flow', 'Sat · 11:00', 'Asha Patel'),
-  ];
-
+class _WeekRailCard extends ConsumerWidget {
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
+    final classes = ref.watch(thisWeekClassesProvider);
     return Container(
       decoration: BoxDecoration(
         color: y.surface,
         borderRadius: BorderRadius.circular(y.radiusCard),
         border: Border.all(color: y.border),
       ),
-      child: Column(
-        children: [
-          for (var i = 0; i < _rows.length; i++) ...[
-            if (i > 0) Divider(height: 1, color: y.border),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  YAvatar(name: _rows[i].$3, size: 34),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _rows[i].$1,
-                          style: TextStyle(
-                            fontSize: 14.5,
-                            fontWeight: FontWeight.w700,
-                            color: y.text,
-                          ),
-                        ),
-                        const SizedBox(height: 1),
-                        Text(
-                          '${_rows[i].$2} · ${_rows[i].$3}',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w500,
-                            color: y.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const YButton(
-                    label: 'Book',
-                    variant: YButtonVariant.soft,
-                    small: true,
-                  ),
-                ],
+      child: classes.when(
+        data: (rows) {
+          final now = DateTime.now();
+          final upcoming = rows.where((r) =>
+              r.startsAt.isAfter(now) &&
+              r.bookingState != BookingState.booked).toList();
+          if (upcoming.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+              child: Text(
+                'No more classes this week.',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
+                ),
               ),
+            );
+          }
+          final picks = upcoming.take(3).toList();
+          return Column(
+            children: [
+              for (var i = 0; i < picks.length; i++) ...[
+                if (i > 0) Divider(height: 1, color: y.border),
+                _WeekRailRow(row: picks[i]),
+              ],
+            ],
+          );
+        },
+        loading: () => const Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        ),
+        error: (_, __) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+          child: Text(
+            "Can't load this week's classes.",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: y.muted,
             ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WeekRailRow extends StatelessWidget {
+  final ClassRow row;
+  const _WeekRailRow({required this.row});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final local = row.startsAt.toLocal();
+    final today = DateTime.now();
+    const dowShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final isToday = local.year == today.year &&
+        local.month == today.month &&
+        local.day == today.day;
+    final dayLabel =
+        isToday ? 'Today' : dowShort[(local.weekday + 6) % 7];
+    final time = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
+    final meta = '$dayLabel · $time · ${row.instructorName}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          YAvatar(
+            name: row.instructorName,
+            photoUrl: row.instructorPhotoUrl,
+            size: 34,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  row.title,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    color: y.text,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  meta,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: y.muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const YButton(
+            label: 'Book',
+            variant: YButtonVariant.soft,
+            small: true,
+          ),
         ],
       ),
     );

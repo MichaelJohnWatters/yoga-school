@@ -1,6 +1,6 @@
 // Home — populated state. Mirrors yoga-home.jsx (YHomeScreen).
-// "Upcoming" reads /bookings?scope=upcoming; "This week" is still seeded
-// content until a /classes?from=&to= summary endpoint exists.
+// "Upcoming" reads /bookings?scope=upcoming; "This week" reads
+// /classes?from=&to= filtered to upcoming non-booked classes.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +12,7 @@ import '../theme/yoga_tokens.dart';
 import '../widgets/polling.dart';
 import '../widgets/yoga_primitives.dart';
 import 'achievements_screen.dart';
+import 'profile_screen.dart' show entitlementsProvider;
 
 final upcomingBookingsProvider =
     // Session-scoped — see notification provider notes. Home is the
@@ -19,6 +20,19 @@ final upcomingBookingsProvider =
     // and refresh silently rather than spinner-flashing every visit.
     FutureProvider<List<UpcomingBooking>>((ref) async {
   return ref.watch(apiClientProvider).upcomingBookings();
+});
+
+/// Classes for the next 7 days, used by Home's "This week at the studio" rail.
+/// Lives in Home for now; promote to a shared file if Book starts using a
+/// month-level summary too.
+final thisWeekClassesProvider =
+    FutureProvider.autoDispose<List<ClassRow>>((ref) async {
+  final now = DateTime.now();
+  final from = DateTime(now.year, now.month, now.day);
+  return ref.watch(apiClientProvider).classesInRange(
+        from: from,
+        to: from.add(const Duration(days: 7)),
+      );
 });
 
 class HomeScreen extends ConsumerWidget {
@@ -35,11 +49,33 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final upcoming = ref.watch(upcomingBookingsProvider);
+    final entitlements = ref.watch(entitlementsProvider);
+
+    // First-run inviting empty state: zero upcoming bookings AND zero active
+    // passes. Anything else (bookings present, or passes present) falls
+    // through to the populated layout below. (yoga-home.jsx:127-159)
+    final isFirstRun = upcoming.maybeWhen(
+          data: (b) => b.isEmpty,
+          orElse: () => false,
+        ) &&
+        entitlements.maybeWhen(
+          data: (e) => e.where((p) => p.isActive).isEmpty,
+          orElse: () => false,
+        );
+
+    // PollingRefresh outside the RefreshIndicator so the periodic tick
+    // keeps firing even when the user isn't pulling to refresh. The
+    // explicit refresh pulls all three providers, matching what the
+    // populated state actually reads from.
     return PollingRefresh(
       surface: PollingSurface.upcomingBookings,
       onPoll: () => ref.invalidate(upcomingBookingsProvider),
       child: RefreshIndicator(
-      onRefresh: () async => ref.invalidate(upcomingBookingsProvider),
+      onRefresh: () async {
+        ref.invalidate(upcomingBookingsProvider);
+        ref.invalidate(entitlementsProvider);
+        ref.invalidate(thisWeekClassesProvider);
+      },
       child: ListView(
         padding: const EdgeInsets.only(top: 16, bottom: 24),
         children: [
@@ -47,37 +83,157 @@ class HomeScreen extends ConsumerWidget {
           const SizedBox(height: 16),
           const _PromoBanner(),
           const SizedBox(height: 20),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: const YSectionHead(title: 'Upcoming', action: 'All bookings'),
-          ),
-          upcoming.when(
-            data: (list) => list.isEmpty
-                ? const _NoUpcomingCard()
-                : _UpcomingList(items: list),
-            loading: () => const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-            ),
-            error: (e, _) => Padding(
+          if (isFirstRun) ...[
+            const _FirstRunCard(),
+            const SizedBox(height: 14),
+            const _BeginnersTip(),
+          ] else ...[
+            Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text("Can't load bookings: ${ApiError.fromAny(e).message}"),
+              child: const YSectionHead(title: 'Upcoming', action: 'All bookings'),
             ),
-          ),
-          const SizedBox(height: 18),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: const YSectionHead(
-              title: 'This week at the studio',
-              action: 'Full schedule',
+            upcoming.when(
+              data: (list) => list.isEmpty
+                  ? const _NoUpcomingCard()
+                  : _UpcomingList(items: list),
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  "Can't load bookings: ${ApiError.fromAny(e).message}",
+                ),
+              ),
             ),
-          ),
-          const _WeekRailCard(),
-          const SizedBox(height: 14),
-          const _MilestonesStrip(),
+            const SizedBox(height: 18),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: const YSectionHead(
+                title: 'This week at the studio',
+                action: 'Full schedule',
+              ),
+            ),
+            const _WeekRailCard(),
+            const SizedBox(height: 14),
+            const _MilestonesStrip(),
+          ],
         ],
       ),
     ),
+    );
+  }
+}
+
+/// First-run welcome card shown when the student has no upcoming bookings
+/// AND no active passes. Mirrors yoga-home.jsx YHomeEmptyScreen.
+class _FirstRunCard extends StatelessWidget {
+  const _FirstRunCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 28, 20, 20),
+        decoration: BoxDecoration(
+          color: y.surface,
+          borderRadius: BorderRadius.circular(y.radiusCard),
+          border: Border.all(color: y.border),
+          boxShadow: y.shadow,
+        ),
+        child: Column(
+          children: [
+            Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                color: y.primarySoft,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Icon(
+                Icons.calendar_month_outlined,
+                size: 24,
+                color: y.primaryStrong,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Your week is wide open',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.3,
+                color: y.text,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              "Browse the schedule and book your first class — we'll keep your spot here.",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w500,
+                color: y.muted,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const YButton(label: 'Browse classes'),
+                const SizedBox(width: 8),
+                YButton(
+                  label: 'See passes',
+                  variant: YButtonVariant.outline,
+                  onTap: () {},
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Quiet beginners tip strip shown below the first-run card.
+class _BeginnersTip extends StatelessWidget {
+  const _BeginnersTip();
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: y.surface2,
+          borderRadius: BorderRadius.circular(y.radiusCard),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.schedule_outlined, size: 17, color: y.muted),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "New here? Most students start with Yin & Restore or Beginners' Vinyasa.",
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -366,17 +522,13 @@ class _CompactBookingCard extends StatelessWidget {
   }
 }
 
-class _WeekRailCard extends StatelessWidget {
+class _WeekRailCard extends ConsumerWidget {
   const _WeekRailCard();
 
-  static const _rows = [
-    ('Yin & Restore', 'Today · 19:00 · Mara Kovac', 'Mara Kovac'),
-    ('Power Vinyasa', 'Fri · 17:45 · Asha Patel', 'Asha Patel'),
-  ];
-
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
+    final classes = ref.watch(thisWeekClassesProvider);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Container(
@@ -385,50 +537,52 @@ class _WeekRailCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(y.radiusCard),
           border: Border.all(color: y.border),
         ),
-        child: Column(
-          children: [
-            for (var i = 0; i < _rows.length; i++) ...[
-              if (i > 0) Divider(height: 1, color: y.border),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                child: Row(
-                  children: [
-                    YAvatar(name: _rows[i].$3, size: 34),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _rows[i].$1,
-                            style: TextStyle(
-                              fontSize: 14.5,
-                              fontWeight: FontWeight.w700,
-                              color: y.text,
-                            ),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(
-                            _rows[i].$2,
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w500,
-                              color: y.muted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const YButton(
-                      label: 'Book',
-                      variant: YButtonVariant.soft,
-                      small: true,
-                    ),
-                  ],
+        child: classes.when(
+          data: (rows) {
+            // Show up to 3 classes the student isn't booked into, skipping
+            // ones already past. Lightly curated rail.
+            final now = DateTime.now();
+            final upcoming = rows.where((r) =>
+                r.startsAt.isAfter(now) &&
+                r.bookingState != BookingState.booked).toList();
+            if (upcoming.isEmpty) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                child: Text(
+                  'No more classes this week.',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: y.muted,
+                  ),
                 ),
+              );
+            }
+            final picks = upcoming.take(3).toList();
+            return Column(
+              children: [
+                for (var i = 0; i < picks.length; i++) ...[
+                  if (i > 0) Divider(height: 1, color: y.border),
+                  _WeekRailRow(row: picks[i]),
+                ],
+              ],
+            );
+          },
+          loading: () => const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+          error: (_, __) => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+            child: Text(
+              "Can't load this week's classes.",
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
               ),
-            ],
-          ],
+            ),
+          ),
         ),
       ),
     );
@@ -438,6 +592,69 @@ class _WeekRailCard extends StatelessWidget {
 final achievementsProvider = FutureProvider<List<Achievement>>((ref) async {
   return ref.watch(apiClientProvider).myAchievements();
 });
+
+class _WeekRailRow extends StatelessWidget {
+  final ClassRow row;
+  const _WeekRailRow({required this.row});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final local = row.startsAt.toLocal();
+    final today = DateTime.now();
+    const dowShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final isToday = local.year == today.year &&
+        local.month == today.month &&
+        local.day == today.day;
+    final dayLabel = isToday
+        ? 'Today'
+        : dowShort[(local.weekday + 6) % 7];
+    final time = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
+    final meta = '$dayLabel · $time · ${row.instructorName}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      child: Row(
+        children: [
+          YAvatar(
+            name: row.instructorName,
+            photoUrl: row.instructorPhotoUrl,
+            size: 34,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  row.title,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    color: y.text,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  meta,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: y.muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const YButton(
+            label: 'Book',
+            variant: YButtonVariant.soft,
+            small: true,
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// Cosmetic strip on Home that surfaces the latest badge. Per the spec
 /// achievements are intentionally secondary, not a hero — when the user
@@ -470,47 +687,50 @@ class _MilestonesStrip extends ConsumerWidget {
         : '${earned.length} badges · latest';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
+      // Both behaviours: dashed border (per the design spec) AND tap to
+      // open the full achievements wall.
       child: InkWell(
         borderRadius: BorderRadius.circular(y.radiusCard),
         onTap: () => Navigator.of(context).push(MaterialPageRoute(
           builder: (_) => const AchievementsScreen(),
         )),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(y.radiusCard),
-            border: Border.all(color: y.borderStrong, style: BorderStyle.solid),
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.star_border_rounded, size: 16, color: y.accent),
-              const SizedBox(width: 10),
-              Expanded(
-                child: RichText(
-                  text: TextSpan(
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: y.muted,
-                    ),
-                    children: [
-                      TextSpan(text: '$tail · '),
-                      TextSpan(
-                        text: latest.title,
-                        style: TextStyle(
-                          color: y.text,
-                          fontWeight: FontWeight.w800,
-                        ),
+        child: YDashedBorder(
+          color: y.borderStrong,
+          radius: y.radiusCard,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              children: [
+                Icon(Icons.star_border_rounded, size: 16, color: y.accent),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: RichText(
+                    text: TextSpan(
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: y.muted,
                       ),
-                    ],
+                      children: [
+                        TextSpan(text: '$tail · '),
+                        TextSpan(
+                          text: latest.title,
+                          style: TextStyle(
+                            color: y.text,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              Icon(Icons.chevron_right, size: 14, color: y.muted),
-            ],
+                Icon(Icons.chevron_right, size: 14, color: y.muted),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 }
+
