@@ -17,6 +17,8 @@ type EntitlementWalletItem struct {
 	ExpiresAt        string   `json:"expires_at,omitempty"`
 	CreatedAt        string   `json:"created_at"`
 	Disciplines      []string `json:"disciplines"`
+	// Lets the buy flow detect "you already own this pass" warnings.
+	SourceProductID *string `json:"source_product_id,omitempty"`
 }
 
 // MyEntitlements returns the caller's entitlements, freshest first.
@@ -25,7 +27,8 @@ func (s *Store) MyEntitlements(ctx context.Context, userID string) ([]Entitlemen
 	const q = `
 		SELECT e.id, e.label, e.pass_kind, e.status,
 		       e.credits_total, e.credits_remaining,
-		       COALESCE(e.expires_at,''), e.created_at
+		       COALESCE(e.expires_at,''), e.created_at,
+		       e.source_product_id
 		  FROM entitlements e
 		 WHERE e.user_id = ?
 		 ORDER BY (e.status = 'active') DESC, e.created_at DESC`
@@ -42,10 +45,15 @@ func (s *Store) MyEntitlements(ctx context.Context, userID string) ([]Entitlemen
 			it       EntitlementWalletItem
 			creditsT sql.NullInt64
 			creditsR sql.NullInt64
+			srcProd  sql.NullString
 		)
 		if err := rows.Scan(&it.ID, &it.Label, &it.PassKind, &it.Status,
-			&creditsT, &creditsR, &it.ExpiresAt, &it.CreatedAt); err != nil {
+			&creditsT, &creditsR, &it.ExpiresAt, &it.CreatedAt, &srcProd); err != nil {
 			return nil, err
+		}
+		if srcProd.Valid {
+			s := srcProd.String
+			it.SourceProductID = &s
 		}
 		if creditsT.Valid {
 			n := int(creditsT.Int64)
@@ -167,7 +175,17 @@ type AttendanceSummary struct {
 // In the absence of a roster check-in flow yet, "attended" is implied for
 // any non-cancelled, non-no_show booking on a class that's already past.
 func (s *Store) MyAttendance(ctx context.Context, userID string) (*AttendanceSummary, error) {
-	now := time.Now().UTC()
+	// Resolve the user's studio so we can compute "this month" and "this
+	// week" in studio time. A user without a studio (shouldn't happen) or
+	// an unparseable timezone falls back to UTC inside StudioLocation.
+	var studioID string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT studio_id FROM users WHERE id = ?`, userID,
+	).Scan(&studioID); err != nil {
+		return nil, err
+	}
+	loc := s.StudioLocation(ctx, studioID)
+	now := time.Now()
 
 	// All-time count.
 	out := &AttendanceSummary{WeeklyCounts: make([]int, 12)}
@@ -182,21 +200,21 @@ func (s *Store) MyAttendance(ctx context.Context, userID string) (*AttendanceSum
 		return nil, err
 	}
 
-	// This month.
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	// This month — boundary is the 1st of the month in studio time.
+	monthStart := startOfMonthIn(now, loc)
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM bookings b
 		  JOIN classes c ON c.id = b.class_id
 		 WHERE b.user_id = ?
 		   AND b.status IN ('booked','attended')
 		   AND c.starts_at >= ? AND c.starts_at < strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
-		userID, monthStart.Format(time.RFC3339),
+		userID, monthStart.UTC().Format(time.RFC3339),
 	).Scan(&out.ThisMonth); err != nil {
 		return nil, err
 	}
 
-	// Per-week histogram, last 12 ISO-ish weeks anchored on Monday.
-	monday := mondayOf(now)
+	// Per-week histogram, last 12 weeks anchored on Monday in studio time.
+	monday := mondayOfIn(now, loc)
 	for i := 0; i < 12; i++ {
 		weekStart := monday.AddDate(0, 0, -7*(11-i))
 		weekEnd := weekStart.AddDate(0, 0, 7)
@@ -209,8 +227,8 @@ func (s *Store) MyAttendance(ctx context.Context, userID string) (*AttendanceSum
 			   AND c.starts_at >= ? AND c.starts_at < ?
 			   AND c.starts_at <  strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
 			userID,
-			weekStart.Format(time.RFC3339),
-			weekEnd.Format(time.RFC3339),
+			weekStart.UTC().Format(time.RFC3339),
+			weekEnd.UTC().Format(time.RFC3339),
 		).Scan(&n); err != nil {
 			return nil, err
 		}

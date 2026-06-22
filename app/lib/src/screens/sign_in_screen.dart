@@ -5,6 +5,7 @@
 // of the seeded test users (Maya, Priya). It only renders in debug builds.
 
 import 'package:firebase_auth/firebase_auth.dart';
+import '../api/api_error.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,9 +21,52 @@ class _DevAccount {
   const _DevAccount(this.label, this.email, this.password);
 }
 
+// Test accounts that exercise different wallet / pass shapes — keep this
+// list in sync with scripts/seed-firebase-users.sh. Each label describes
+// what the student's wallet looks like after the seed, so picking a row
+// puts you straight into a known scenario.
 const _devAccounts = <_DevAccount>[
-  _DevAccount('Maya · student',  'maya@studio52.dev',  'dev123456'),
   _DevAccount('Priya · manager', 'priya@studio52.dev', 'dev123456'),
+  _DevAccount(
+    'Maya · unlimited (basic student)',
+    'maya@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Aria · 10-pack + new unlimited',
+    'aria.lin@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Ben · unlimited + reformer pack',
+    'ben.carter@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Chen · reformer-only (2/5 credits)',
+    'chen.wei@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Diego · no credits left',
+    'diego.rivera@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Grace · yoga 5-pack (4/5)',
+    'grace.okoye@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Ivy · 10-pack + reformer pack',
+    'ivy.nakamura@studio52.dev',
+    'dev123456',
+  ),
+  _DevAccount(
+    'Kira · current + depleted history',
+    'kira.walker@studio52.dev',
+    'dev123456',
+  ),
 ];
 
 class SignInScreen extends ConsumerStatefulWidget {
@@ -32,29 +76,63 @@ class SignInScreen extends ConsumerStatefulWidget {
   ConsumerState<SignInScreen> createState() => _SignInScreenState();
 }
 
+enum _AuthMode { signIn, signUp }
+
 class _SignInScreenState extends ConsumerState<SignInScreen> {
   final _email = TextEditingController();
   final _password = TextEditingController();
+  final _fullName = TextEditingController();
+  _AuthMode _mode = _AuthMode.signIn;
   bool _busy = false;
   String? _error;
+
+  bool get _isSignUp => _mode == _AuthMode.signUp;
 
   @override
   void dispose() {
     _email.dispose();
     _password.dispose();
+    _fullName.dispose();
     super.dispose();
   }
 
-  Future<void> _signIn() async {
+  void _toggleMode() {
+    setState(() {
+      _mode = _isSignUp ? _AuthMode.signIn : _AuthMode.signUp;
+      _error = null;
+    });
+  }
+
+  Future<void> _submit() async {
+    // Pre-flight validation — Firebase's own errors are useful but slow
+    // (network roundtrip). Catch the obvious cases up front.
+    if (_email.text.trim().isEmpty || _password.text.isEmpty) {
+      setState(() => _error = 'Email and password are required.');
+      return;
+    }
+    if (_isSignUp && _fullName.text.trim().isEmpty) {
+      setState(() => _error = 'Tell us your name so we can greet you.');
+      return;
+    }
+    if (_isSignUp && _password.text.length < 6) {
+      setState(() => _error = 'Password must be at least 6 characters.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await ref.read(authServiceProvider).signIn(
-            email: _email.text,
-            password: _password.text,
-          );
+      final auth = ref.read(authServiceProvider);
+      if (_isSignUp) {
+        await auth.createAccount(
+          email: _email.text,
+          password: _password.text,
+          fullName: _fullName.text,
+        );
+      } else {
+        await auth.signIn(email: _email.text, password: _password.text);
+      }
       // auth state stream will fire and root will rebuild; nothing more to do.
     } on FirebaseAuthException catch (e) {
       setState(() {
@@ -64,7 +142,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     } catch (e) {
       setState(() {
         _busy = false;
-        _error = 'Something went wrong: $e';
+        _error = 'Something went wrong: ${ApiError.fromAny(e).message}';
       });
     }
   }
@@ -77,6 +155,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       case 'invalid-credential':
       case 'wrong-password':
         return "Email and password don't match.";
+      case 'email-already-in-use':
+        return 'An account with that email already exists. Try signing in.';
+      case 'weak-password':
+        return 'Password is too weak — use at least 6 characters.';
       case 'network-request-failed':
         return 'Network error — is the auth emulator running?';
       default:
@@ -110,7 +192,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                   Center(child: const YLogo(size: 52)),
                   const SizedBox(height: 24),
                   Text(
-                    'Welcome to Studio 52',
+                    _isSignUp ? 'Create your account' : 'Welcome to Studio 52',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 27,
@@ -120,44 +202,56 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-                  if (kDebugMode) ...[
+                  // Dev picker only makes sense for sign-in — the seeded
+                  // users already exist on the emulator.
+                  if (kDebugMode && !_isSignUp) ...[
                     _DevPicker(onPick: _useDevAccount),
                     const SizedBox(height: 14),
+                  ],
+                  if (_isSignUp) ...[
+                    _LabeledField(
+                      label: 'FULL NAME',
+                      controller: _fullName,
+                      keyboardType: TextInputType.name,
+                    ),
+                    const SizedBox(height: 10),
                   ],
                   _LabeledField(
                     label: 'EMAIL',
                     controller: _email,
                     keyboardType: TextInputType.emailAddress,
-                    onSubmitted: (_) => _signIn(),
+                    onSubmitted: (_) => _submit(),
                   ),
                   const SizedBox(height: 10),
                   _LabeledField(
                     label: 'PASSWORD',
                     controller: _password,
                     obscure: true,
-                    onSubmitted: (_) => _signIn(),
+                    onSubmitted: (_) => _submit(),
                   ),
-                  const SizedBox(height: 6),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: GestureDetector(
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Password reset not wired in dev.'),
+                  if (!_isSignUp) ...[
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: GestureDetector(
+                        onTap: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Password reset not wired in dev.'),
+                            ),
+                          );
+                        },
+                        child: Text(
+                          'Forgot password?',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: y.primary,
                           ),
-                        );
-                      },
-                      child: Text(
-                        'Forgot password?',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: y.primary,
                         ),
                       ),
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 18),
                   if (_error != null) ...[
                     Text(
@@ -171,17 +265,40 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                     const SizedBox(height: 12),
                   ],
                   YButton(
-                    label: _busy ? 'Signing in…' : 'Sign in',
-                    onTap: _busy ? null : _signIn,
+                    label: _busy
+                        ? (_isSignUp ? 'Creating…' : 'Signing in…')
+                        : (_isSignUp ? 'Create account' : 'Sign in'),
+                    onTap: _busy ? null : _submit,
                   ),
                   const SizedBox(height: 18),
                   Center(
-                    child: Text(
-                      "Create an account",
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.muted,
+                    child: GestureDetector(
+                      key: const Key('auth-toggle-mode'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _busy ? null : _toggleMode,
+                      child: RichText(
+                        textAlign: TextAlign.center,
+                        text: TextSpan(
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: y.muted,
+                          ),
+                          children: [
+                            TextSpan(
+                              text: _isSignUp
+                                  ? 'Already have an account? '
+                                  : 'New here? ',
+                            ),
+                            TextSpan(
+                              text: _isSignUp ? 'Sign in' : 'Create an account',
+                              style: TextStyle(
+                                color: y.primary,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),

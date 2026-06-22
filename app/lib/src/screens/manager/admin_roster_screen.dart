@@ -7,13 +7,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import 'class_dialogs.dart';
 import 'manager_shell.dart';
+import 'scan_checkin_sheet.dart';
 
-enum _Filter { all, unmarked, present, noShow }
+const double _kNarrow = 700;
+
+enum _Filter { all, unmarked, present, noShow, lateCancel }
 
 class AdminRosterScreen extends ConsumerStatefulWidget {
   final String classId;
@@ -40,85 +44,112 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
   }
 
   void _reload() {
-    setState(() => _roster = _fetch());
+    setState(() {
+      _roster = _fetch();
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(30, 26, 30, 26),
-      child: FutureBuilder<Roster>(
-        future: _roster,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-          }
-          if (snap.hasError) {
-            return Center(
-              child: Text(
-                "Can't load roster: ${snap.error}",
-                style: TextStyle(color: y.muted),
-              ),
-            );
-          }
-          final r = snap.data!;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ManagerPageHeader(
-                title: r.klass.title,
-                sub: _subline(r.klass),
-                actions: [
-                  YButton(
-                    label: 'Cancel class',
-                    variant: YButtonVariant.outline,
-                    small: true,
-                    onTap: () async {
-                      final cancelled = await showCancelClassDialog(
-                        context: context,
-                        classId: r.klass.id,
-                        classTitle: r.klass.title,
-                        bookedCount: r.counts.booked,
-                      );
-                      if (cancelled == true) _reload();
-                    },
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < _kNarrow;
+        final padH = isNarrow ? 14.0 : 30.0;
+        final padV = isNarrow ? 18.0 : 26.0;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+          child: FutureBuilder<Roster>(
+            future: _roster,
+            builder: (context, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const Center(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                );
+              }
+              if (snap.hasError) {
+                return Center(
+                  child: Text(
+                    "Can't load roster: ${snap.error}",
+                    style: TextStyle(color: y.muted),
                   ),
-                  const YButton(label: 'Scan check-in', small: true),
+                );
+              }
+              final r = snap.data!;
+              final booked = _BookedCard(
+                roster: r,
+                filter: _filter,
+                query: _query,
+                busy: _busy,
+                isNarrow: isNarrow,
+                onFilter: (f) => setState(() => _filter = f),
+                onQuery: (q) => setState(() => _query = q),
+                onMark: _mark,
+                onMarkAllPresent: _markAllPresent,
+                onAddStudent: _addStudent,
+                onRemove: _remove,
+              );
+              final waitlist =
+                  _WaitlistCard(roster: r, onPromote: _promote);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ManagerPageHeader(
+                    title: r.klass.title,
+                    sub: _subline(r.klass),
+                    actions: [
+                      YButton(
+                        label: 'Cancel class',
+                        variant: YButtonVariant.outline,
+                        small: true,
+                        onTap: () async {
+                          final cancelled = await showCancelClassDialog(
+                            context: context,
+                            classId: r.klass.id,
+                            classTitle: r.klass.title,
+                            bookedCount: r.counts.booked,
+                            startsAt: r.klass.startsAt,
+                          );
+                          if (cancelled == true) _reload();
+                        },
+                      ),
+                      YButton(
+                        label: 'Scan check-in',
+                        small: true,
+                        onTap: () async {
+                          final any = await showScanCheckinSheet(context);
+                          if (any == true && mounted) _reload();
+                        },
+                      ),
+                    ],
+                  ),
+                  Expanded(
+                    child: isNarrow
+                        // Stack the cards on mobile and scroll the page so
+                        // long rosters + the waitlist both stay reachable.
+                        ? ListView(
+                            padding: EdgeInsets.zero,
+                            children: [
+                              booked,
+                              const SizedBox(height: 12),
+                              waitlist,
+                            ],
+                          )
+                        : Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(flex: 7, child: booked),
+                              const SizedBox(width: 16),
+                              Expanded(flex: 4, child: waitlist),
+                            ],
+                          ),
+                  ),
                 ],
-              ),
-              Expanded(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 7,
-                      child: _BookedCard(
-                        roster: r,
-                        filter: _filter,
-                        query: _query,
-                        busy: _busy,
-                        onFilter: (f) => setState(() => _filter = f),
-                        onQuery: (q) => setState(() => _query = q),
-                        onMark: _mark,
-                        onMarkAllPresent: _markAllPresent,
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      flex: 4,
-                      child: _WaitlistCard(
-                        roster: r,
-                        onPromote: _promote,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          );
-        },
-      ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
@@ -131,7 +162,7 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
           );
       _reload();
     } catch (e) {
-      _toast('Could not mark: $e');
+      _toast('Could not mark: ${ApiError.fromAny(e).message}');
     } finally {
       setState(() => _busy.remove(row.bookingId));
     }
@@ -148,7 +179,7 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
       ));
       _reload();
     } catch (e) {
-      _toast('Some rows failed: $e');
+      _toast('Some rows failed: ${ApiError.fromAny(e).message}');
     } finally {
       setState(() => _busy.removeAll(unmarked.map((r) => r.bookingId)));
     }
@@ -160,7 +191,38 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
       _toast('${r.promotedName} promoted off the waitlist');
       _reload();
     } catch (e) {
-      _toast('Promote failed: $e');
+      _toast('Promote failed: ${ApiError.fromAny(e).message}');
+    }
+  }
+
+  Future<void> _addStudent(String classTitle) async {
+    final booked = await showAddStudentToClassDialog(
+      context: context,
+      classId: widget.classId,
+      classTitle: classTitle,
+    );
+    if (booked == true && mounted) {
+      _toast('Student added to class');
+      _reload();
+    }
+  }
+
+  Future<void> _remove(RosterBookingRow row, String classTitle) async {
+    // For a +1 cancel the visible label is the friend (the parent row
+    // owns the pass), but the booking id we send is the row clicked.
+    final shown = row.isPlusOne
+        ? (row.plusOneName.isEmpty ? 'Guest' : row.plusOneName)
+        : row.fullName;
+    final removed = await showRemoveFromClassDialog(
+      context: context,
+      bookingId: row.bookingId,
+      studentName: shown,
+      classTitle: classTitle,
+      passKind: row.passKind,
+    );
+    if (removed == true && mounted) {
+      _toast('Booking removed');
+      _reload();
     }
   }
 
@@ -182,53 +244,91 @@ class _BookedCard extends StatelessWidget {
   final _Filter filter;
   final String query;
   final Set<String> busy;
+  final bool isNarrow;
   final ValueChanged<_Filter> onFilter;
   final ValueChanged<String> onQuery;
   final Future<void> Function(RosterBookingRow, String) onMark;
   final Future<void> Function(List<RosterBookingRow>) onMarkAllPresent;
+  final Future<void> Function(String classTitle) onAddStudent;
+  final Future<void> Function(RosterBookingRow, String classTitle) onRemove;
   const _BookedCard({
     required this.roster,
     required this.filter,
     required this.query,
     required this.busy,
+    required this.isNarrow,
     required this.onFilter,
     required this.onQuery,
     required this.onMark,
     required this.onMarkAllPresent,
+    required this.onAddStudent,
+    required this.onRemove,
   });
 
   @override
   Widget build(BuildContext context) {
     final c = roster.counts;
     final filtered = _filterRows(roster.booked);
+    // "All" includes the late-cancelled rows so managers can see them in
+    // context — the count below adds them back in.
+    final allCount = c.booked + c.lateCancelled;
+    final filterPills = Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        _FilterPill(label: 'All $allCount', active: filter == _Filter.all, onTap: () => onFilter(_Filter.all)),
+        _FilterPill(label: 'Unmarked ${c.unmarked}', active: filter == _Filter.unmarked, onTap: () => onFilter(_Filter.unmarked)),
+        _FilterPill(label: 'Present ${c.present}', active: filter == _Filter.present, onTap: () => onFilter(_Filter.present)),
+        _FilterPill(label: 'No-show ${c.noShow}', active: filter == _Filter.noShow, onTap: () => onFilter(_Filter.noShow)),
+        if (c.lateCancelled > 0)
+          _FilterPill(
+            label: 'Late cancel ${c.lateCancelled}',
+            active: filter == _Filter.lateCancel,
+            onTap: () => onFilter(_Filter.lateCancel),
+          ),
+      ],
+    );
+    final searchPill = _SearchPill(onChanged: onQuery);
+    final actionsRow = Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        YButton(
+          label: 'Add student',
+          variant: YButtonVariant.outline,
+          small: true,
+          onTap: () => onAddStudent(roster.klass.title),
+        ),
+        const SizedBox(width: 8),
+        YButton(
+          label: 'Mark all present',
+          variant: YButtonVariant.soft,
+          small: true,
+          onTap: () => onMarkAllPresent(roster.booked),
+        ),
+      ],
+    );
     return ManagerCard(
       title: 'Booked · ${c.booked} of ${roster.klass.capacity}',
-      action: 'Mark all present',
-      onAction: () => onMarkAllPresent(roster.booked),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    _FilterPill(label: 'All ${c.booked}', active: filter == _Filter.all, onTap: () => onFilter(_Filter.all)),
-                    _FilterPill(label: 'Unmarked ${c.unmarked}', active: filter == _Filter.unmarked, onTap: () => onFilter(_Filter.unmarked)),
-                    _FilterPill(label: 'Present ${c.present}', active: filter == _Filter.present, onTap: () => onFilter(_Filter.present)),
-                    _FilterPill(label: 'No-show ${c.noShow}', active: filter == _Filter.noShow, onTap: () => onFilter(_Filter.noShow)),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              SizedBox(
-                width: 200,
-                child: _SearchPill(onChanged: onQuery),
-              ),
-            ],
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: actionsRow,
           ),
+          if (isNarrow) ...[
+            // Stack on mobile: pills first, then full-width search.
+            filterPills,
+            const SizedBox(height: 10),
+            searchPill,
+          ] else
+            Row(
+              children: [
+                Expanded(child: filterPills),
+                const SizedBox(width: 12),
+                SizedBox(width: 200, child: searchPill),
+              ],
+            ),
           const SizedBox(height: 14),
           if (filtered.isEmpty)
             Padding(
@@ -243,20 +343,60 @@ class _BookedCard extends StatelessWidget {
               ),
             )
           else
-            for (var i = 0; i < filtered.length; i++)
-              _StudentRow(
-                row: filtered[i],
-                isLast: i == filtered.length - 1,
-                busy: busy.contains(filtered[i].bookingId),
-                onMark: (status) => onMark(filtered[i], status),
-              ),
+            // Render each primary booker, then any +1 guests they brought
+            // nested underneath. The +1 row has its own booking + status so
+            // managers can mark the guest separately from the member.
+            for (var i = 0; i < filtered.length; i++) ...[
+              () {
+                final primary = filtered[i];
+                final children = _plusOnesOf(primary);
+                final blockIsLast = i == filtered.length - 1;
+                return Column(
+                  children: [
+                    _StudentRow(
+                      row: primary,
+                      // If there are children, the primary itself never owns
+                      // the bottom border — the last child does.
+                      isLast: blockIsLast && children.isEmpty,
+                      busy: busy.contains(primary.bookingId),
+                      isNarrow: isNarrow,
+                      onMark: (status) => onMark(primary, status),
+                      onRemove: () => onRemove(primary, roster.klass.title),
+                    ),
+                    for (var j = 0; j < children.length; j++)
+                      _PlusOneSubRow(
+                        parent: primary,
+                        row: children[j],
+                        isLast: blockIsLast && j == children.length - 1,
+                        busy: busy.contains(children[j].bookingId),
+                        isNarrow: isNarrow,
+                        onMark: (status) => onMark(children[j], status),
+                        onRemove: () =>
+                            onRemove(children[j], roster.klass.title),
+                      ),
+                  ],
+                );
+              }(),
+            ],
         ],
       ),
     );
   }
 
+  /// +1 children for a given primary booking — match on parent_booking_id.
+  /// Returns rows in their original insertion order (which is creation
+  /// order, since the roster query orders by created_at).
+  List<RosterBookingRow> _plusOnesOf(RosterBookingRow primary) {
+    return roster.booked
+        .where((r) =>
+            r.isPlusOne && r.parentBookingId == primary.bookingId)
+        .toList();
+  }
+
   List<RosterBookingRow> _filterRows(List<RosterBookingRow> rows) {
-    Iterable<RosterBookingRow> it = rows;
+    // +1 rows always render nested under their primary — exclude them from
+    // the top-level list so they don't appear twice.
+    Iterable<RosterBookingRow> it = rows.where((r) => !r.isPlusOne);
     switch (filter) {
       case _Filter.all:
         break;
@@ -268,6 +408,9 @@ class _BookedCard extends StatelessWidget {
         break;
       case _Filter.noShow:
         it = it.where((r) => r.status == 'no_show');
+        break;
+      case _Filter.lateCancel:
+        it = it.where((r) => r.status == 'late_cancelled');
         break;
     }
     if (query.trim().isNotEmpty) {
@@ -353,17 +496,112 @@ class _StudentRow extends StatelessWidget {
   final RosterBookingRow row;
   final bool isLast;
   final bool busy;
+  final bool isNarrow;
   final Future<void> Function(String status) onMark;
+  final VoidCallback onRemove;
   const _StudentRow({
     required this.row,
     required this.isLast,
     required this.busy,
+    required this.isNarrow,
     required this.onMark,
+    required this.onRemove,
   });
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    final isLateCancel = row.status == 'late_cancelled';
+    final isNoShow = row.status == 'no_show';
+    final passConsumedNote = isLateCancel
+        ? 'Cancelled late · pass still consumed'
+        : isNoShow
+            ? 'No-show · pass still consumed'
+            : null;
+    final nameBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Flexible(
+              child: Text(
+                row.fullName,
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: isLateCancel ? y.muted : y.text,
+                  decoration:
+                      isLateCancel ? TextDecoration.lineThrough : null,
+                  decorationColor: y.muted,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (row.attendanceVia == 'scan') ...[
+              const SizedBox(width: 8),
+              Text(
+                '· scanned',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: y.accent,
+                ),
+              ),
+            ],
+            if (row.isPlusOne) ...[
+              const SizedBox(width: 8),
+              const YChip(kind: YChipKind.neutral, label: '+1'),
+            ],
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          row.passLabel,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: y.muted,
+          ),
+        ),
+        if (passConsumedNote != null) ...[
+          const SizedBox(height: 3),
+          Text(
+            passConsumedNote,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              color: y.accent,
+              letterSpacing: 0.1,
+            ),
+          ),
+        ],
+      ],
+    );
+    final trailing = isLateCancel
+        ? Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              'Cancelled late',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+                color: y.muted,
+                letterSpacing: 0.4,
+              ),
+            ),
+          )
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _AttendanceToggle(
+                status: row.status,
+                busy: busy,
+                onMark: onMark,
+              ),
+              const SizedBox(width: 6),
+              _RowRemoveButton(busy: busy, onTap: onRemove),
+            ],
+          );
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 11),
       decoration: BoxDecoration(
@@ -371,60 +609,147 @@ class _StudentRow extends StatelessWidget {
             ? null
             : Border(bottom: BorderSide(color: y.border)),
       ),
-      child: Row(
-        children: [
-          YAvatar(name: row.fullName, size: 26),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: isNarrow
+          // On mobile, attendance toggle moves to its own row below the
+          // name — the segmented control is too wide to share an inline
+          // row with a name + chips.
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Row(
                   children: [
-                    Text(
-                      row.fullName,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.text,
-                      ),
+                    Opacity(
+                      opacity: isLateCancel ? 0.55 : 1.0,
+                      child: YAvatar(name: row.fullName, size: 26),
                     ),
-                    if (row.attendanceVia == 'scan') ...[
-                      const SizedBox(width: 8),
-                      Text(
-                        '· scanned',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: y.accent,
-                        ),
-                      ),
-                    ],
-                    if (row.isPlusOne) ...[
-                      const SizedBox(width: 8),
-                      const YChip(kind: YChipKind.neutral, label: '+1'),
-                    ],
+                    const SizedBox(width: 10),
+                    Expanded(child: nameBlock),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  row.passLabel,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: y.muted,
-                  ),
+                const SizedBox(height: 10),
+                Align(alignment: Alignment.centerLeft, child: trailing),
+              ],
+            )
+          : Row(
+              children: [
+                Opacity(
+                  opacity: isLateCancel ? 0.55 : 1.0,
+                  child: YAvatar(name: row.fullName, size: 26),
                 ),
+                const SizedBox(width: 10),
+                Expanded(child: nameBlock),
+                trailing,
               ],
             ),
+    );
+  }
+}
+
+/// Compact nested row for a +1 guest under their primary booker.
+/// Indented, smaller avatar, friend's name front and centre with a
+/// "Guest of [member]" caption. Has its own attendance toggle since the
+/// +1 is a separate physical body in the studio and may attend / no-show
+/// independently of the member who brought them.
+class _PlusOneSubRow extends StatelessWidget {
+  final RosterBookingRow parent;
+  final RosterBookingRow row;
+  final bool isLast;
+  final bool busy;
+  final bool isNarrow;
+  final Future<void> Function(String status) onMark;
+  final VoidCallback onRemove;
+  const _PlusOneSubRow({
+    required this.parent,
+    required this.row,
+    required this.isLast,
+    required this.busy,
+    required this.isNarrow,
+    required this.onMark,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final friend =
+        row.plusOneName.isEmpty ? 'Unnamed guest' : row.plusOneName;
+    final nameBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Flexible(
+              child: Text(
+                friend,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: y.text,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 6),
+            const YChip(kind: YChipKind.neutral, label: '+1'),
+          ],
+        ),
+        const SizedBox(height: 1),
+        Text(
+          'Guest of ${parent.fullName}',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            color: y.muted,
           ),
-          _AttendanceToggle(
-            status: row.status,
-            busy: busy,
-            onMark: onMark,
-          ),
-        ],
+        ),
+      ],
+    );
+    final toggle = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _AttendanceToggle(
+          status: row.status,
+          busy: busy,
+          onMark: onMark,
+        ),
+        const SizedBox(width: 6),
+        _RowRemoveButton(busy: busy, onTap: onRemove),
+      ],
+    );
+    // Indent + thinner separator + ↳ marker make the row read as a
+    // visual child of the primary above it.
+    return Container(
+      padding: const EdgeInsets.fromLTRB(34, 9, 0, 9),
+      decoration: BoxDecoration(
+        border: isLast
+            ? null
+            : Border(bottom: BorderSide(color: y.border)),
       ),
+      child: isNarrow
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.subdirectory_arrow_right,
+                        size: 14, color: y.muted),
+                    const SizedBox(width: 6),
+                    Expanded(child: nameBlock),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Align(alignment: Alignment.centerLeft, child: toggle),
+              ],
+            )
+          : Row(
+              children: [
+                Icon(Icons.subdirectory_arrow_right,
+                    size: 14, color: y.muted),
+                const SizedBox(width: 6),
+                Expanded(child: nameBlock),
+                toggle,
+              ],
+            ),
     );
   }
 }
@@ -475,6 +800,41 @@ class _AttendanceToggle extends StatelessWidget {
                   : () => onMark(isNoShow ? 'booked' : 'no_show'),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Small icon button rendered alongside the attendance toggle. Opens
+/// the remove-from-class modal where the manager picks refund vs
+/// consume. Disabled while a sibling mutation is in flight so the
+/// row state stays coherent.
+class _RowRemoveButton extends StatelessWidget {
+  final bool busy;
+  final VoidCallback onTap;
+  const _RowRemoveButton({required this.busy, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Opacity(
+      opacity: busy ? 0.4 : 1.0,
+      child: InkWell(
+        onTap: busy ? null : onTap,
+        borderRadius: BorderRadius.circular(y.radiusChip),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: y.surface2,
+            borderRadius: BorderRadius.circular(y.radiusChip),
+            border: Border.all(color: y.border),
+          ),
+          child: Icon(
+            Icons.person_remove_outlined,
+            size: 16,
+            color: y.muted,
+          ),
         ),
       ),
     );

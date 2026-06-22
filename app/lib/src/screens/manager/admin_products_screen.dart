@@ -5,15 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import 'manager_shell.dart';
 
 final adminProductsProvider =
-    FutureProvider.autoDispose<List<AdminProduct>>((ref) async {
+    FutureProvider<List<AdminProduct>>((ref) async {
   return ref.watch(apiClientProvider).adminListProducts();
 });
+
+const double _kNarrow = 700;
 
 class AdminProductsScreen extends ConsumerWidget {
   final VoidCallback onNew;
@@ -27,33 +30,45 @@ class AdminProductsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final data = ref.watch(adminProductsProvider);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(30, 26, 30, 26),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ManagerPageHeader(
-            title: 'Products',
-            sub: 'Passes & memberships available to students',
-            actions: [
-              YButton(label: '+ New product', small: true, onTap: onNew),
-            ],
-          ),
-          Expanded(
-            child: data.when(
-              data: (rows) => _ProductList(rows: rows, onEdit: onEdit),
-              loading: () =>
-                  const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              error: (e, _) => Center(
-                child: Text(
-                  "Can't load products: $e",
-                  style: TextStyle(color: context.yoga.muted),
+    return RefreshOnMount(
+      onMount: () => ref.invalidate(adminProductsProvider),
+      child: LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < _kNarrow;
+        final padH = isNarrow ? 14.0 : 30.0;
+        final padV = isNarrow ? 18.0 : 26.0;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ManagerPageHeader(
+                title: 'Products',
+                sub: 'Passes & memberships available to students',
+                actions: [
+                  YButton(label: '+ New product', small: true, onTap: onNew),
+                ],
+              ),
+              Expanded(
+                child: data.when(
+                  data: (rows) =>
+                      _ProductList(rows: rows, onEdit: onEdit, isNarrow: isNarrow),
+                  loading: () => const Center(
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  error: (e, _) => Center(
+                    child: Text(
+                      "Can't load products: ${ApiError.fromAny(e).message}",
+                      style: TextStyle(color: context.yoga.muted),
+                    ),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
+    ),
     );
   }
 }
@@ -61,7 +76,12 @@ class AdminProductsScreen extends ConsumerWidget {
 class _ProductList extends StatelessWidget {
   final List<AdminProduct> rows;
   final void Function(String productId) onEdit;
-  const _ProductList({required this.rows, required this.onEdit});
+  final bool isNarrow;
+  const _ProductList({
+    required this.rows,
+    required this.onEdit,
+    required this.isNarrow,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -81,15 +101,128 @@ class _ProductList extends StatelessWidget {
             )
           : Column(
               children: [
-                _Head(),
+                if (!isNarrow) _Head(),
                 for (var i = 0; i < rows.length; i++)
-                  _Row(
-                    p: rows[i],
-                    isLast: i == rows.length - 1,
-                    onEdit: () => onEdit(rows[i].id),
-                  ),
+                  if (isNarrow)
+                    _MobileRow(
+                      p: rows[i],
+                      isLast: i == rows.length - 1,
+                      onEdit: () => onEdit(rows[i].id),
+                    )
+                  else
+                    _Row(
+                      p: rows[i],
+                      isLast: i == rows.length - 1,
+                      onEdit: () => onEdit(rows[i].id),
+                    ),
               ],
             ),
+    );
+  }
+}
+
+/// Mobile shape — name + badges on top with price aligned right,
+/// pass type and metrics underneath, Edit link bottom-right.
+class _MobileRow extends StatelessWidget {
+  final AdminProduct p;
+  final bool isLast;
+  final VoidCallback onEdit;
+  const _MobileRow({
+    required this.p,
+    required this.isLast,
+    required this.onEdit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final passSummary = p.passKind == 'unlimited'
+        ? 'Unlimited'
+        : '${p.credits ?? 0} credit${(p.credits ?? 0) == 1 ? '' : 's'}';
+    final billing = p.billingType == 'recurring' ? '/month' : '';
+    return InkWell(
+      onTap: onEdit,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast
+              ? null
+              : Border(bottom: BorderSide(color: y.border)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        p.name,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w800,
+                          color: y.text,
+                        ),
+                      ),
+                      if (p.isHero) _SmallBadge(label: 'Hero', accent: false),
+                      if (p.isArchived)
+                        _SmallBadge(label: 'Archived', accent: true),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text.rich(
+                  TextSpan(
+                    text: p.formattedPrice(),
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w800,
+                      color: y.text,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                    children: [
+                      TextSpan(
+                        text: billing,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: y.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$passSummary · ${p.usage.activePasses} active · '
+              '${p.formattedPriceFromMinor(p.usage.revenueMinor)} revenue',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                'Edit ›',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: y.primary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

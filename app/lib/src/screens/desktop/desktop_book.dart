@@ -20,11 +20,14 @@ class DesktopBook extends ConsumerStatefulWidget {
   ConsumerState<DesktopBook> createState() => _DesktopBookState();
 }
 
+enum _DayView { sections, timeline }
+
 class _DesktopBookState extends ConsumerState<DesktopBook> {
   late DateTime _selected;
   int _tab = 0;
   ClassRow? _activeRow;
   late Future<List<ClassRow>> _classes;
+  _DayView _view = _DayView.sections;
 
   @override
   void initState() {
@@ -88,7 +91,9 @@ class _DesktopBookState extends ConsumerState<DesktopBook> {
                   day: _selected,
                   classes: _classes,
                   active: _activeRow,
+                  view: _view,
                   onPickDay: _pick,
+                  onPickView: (v) => setState(() => _view = v),
                   onPickRow: (r) => setState(() => _activeRow = r),
                   onReload: _reload,
                 )
@@ -172,14 +177,18 @@ class _DesktopBookBody extends StatelessWidget {
   final DateTime day;
   final Future<List<ClassRow>> classes;
   final ClassRow? active;
+  final _DayView view;
   final void Function(DateTime) onPickDay;
+  final void Function(_DayView) onPickView;
   final void Function(ClassRow) onPickRow;
   final VoidCallback onReload;
   const _DesktopBookBody({
     required this.day,
     required this.classes,
     required this.active,
+    required this.view,
     required this.onPickDay,
+    required this.onPickView,
     required this.onPickRow,
     required this.onReload,
   });
@@ -201,7 +210,9 @@ class _DesktopBookBody extends StatelessWidget {
                 rows: rows,
                 active: active,
                 loading: loading,
+                view: view,
                 onPickDay: onPickDay,
+                onPickView: onPickView,
                 onPickRow: onPickRow,
               ),
             ),
@@ -225,14 +236,18 @@ class _LeftColumn extends StatelessWidget {
   final List<ClassRow> rows;
   final ClassRow? active;
   final bool loading;
+  final _DayView view;
   final void Function(DateTime) onPickDay;
+  final void Function(_DayView) onPickView;
   final void Function(ClassRow) onPickRow;
   const _LeftColumn({
     required this.day,
     required this.rows,
     required this.active,
     required this.loading,
+    required this.view,
     required this.onPickDay,
+    required this.onPickView,
     required this.onPickRow,
   });
 
@@ -289,7 +304,9 @@ class _LeftColumn extends StatelessWidget {
             ],
           ],
         ),
-        const SizedBox(height: 18),
+        const SizedBox(height: 14),
+        _DayViewPill(view: view, onChanged: onPickView),
+        const SizedBox(height: 14),
         if (loading)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 40),
@@ -297,21 +314,238 @@ class _LeftColumn extends StatelessWidget {
           )
         else if (rows.isEmpty)
           _EmptyDay(day: day)
+        else if (view == _DayView.sections)
+          _SectionsLayout(rows: rows, active: active, onPickRow: onPickRow)
         else
-          for (var i = 0; i < rows.length; i++) ...[
-            if (i > 0) const SizedBox(height: 8),
-            _ClassRow(
-              row: rows[i],
-              active: active?.id == rows[i].id,
-              onTap: () => onPickRow(rows[i]),
-            ),
-          ],
+          _TimelineLayout(rows: rows, active: active, onPickRow: onPickRow),
       ],
     );
   }
 
   static bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+}
+
+/// Small Sections/Timeline pill — twin of the mobile BookScreen control.
+class _DayViewPill extends StatelessWidget {
+  final _DayView view;
+  final ValueChanged<_DayView> onChanged;
+  const _DayViewPill({required this.view, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    Widget seg(_DayView v, IconData icon, String label) {
+      final active = v == view;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => onChanged(v),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: active ? y.surface : Colors.transparent,
+              borderRadius: BorderRadius.circular(y.radiusChip),
+              border: Border.all(
+                color: active ? y.border : Colors.transparent,
+              ),
+              boxShadow: active ? y.shadow : null,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 14, color: active ? y.text : y.muted),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: active ? y.text : y.muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: y.surface2,
+        borderRadius: BorderRadius.circular(y.radiusChip),
+      ),
+      child: Row(
+        children: [
+          seg(_DayView.sections, Icons.view_agenda_outlined, 'Sections'),
+          const SizedBox(width: 4),
+          seg(_DayView.timeline, Icons.schedule_rounded, 'Timeline'),
+        ],
+      ),
+    );
+  }
+}
+
+/// Time-of-day grouping (Morning <12, Afternoon 12-17, Evening 17+) —
+/// only buckets with classes render. Mirrors the mobile layout.
+class _SectionsLayout extends StatelessWidget {
+  final List<ClassRow> rows;
+  final ClassRow? active;
+  final void Function(ClassRow) onPickRow;
+  const _SectionsLayout({
+    required this.rows,
+    required this.active,
+    required this.onPickRow,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final morning = <ClassRow>[];
+    final afternoon = <ClassRow>[];
+    final evening = <ClassRow>[];
+    for (final r in rows) {
+      final h = r.startsAt.toLocal().hour;
+      if (h < 12) {
+        morning.add(r);
+      } else if (h < 17) {
+        afternoon.add(r);
+      } else {
+        evening.add(r);
+      }
+    }
+    final groups = <(String, List<ClassRow>)>[
+      ('MORNING', morning),
+      ('AFTERNOON', afternoon),
+      ('EVENING', evening),
+    ].where((g) => g.$2.isNotEmpty).toList();
+
+    Widget head(String label) => Row(
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                color: y.muted,
+                letterSpacing: 1.4,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Container(height: 1, color: y.border)),
+          ],
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var gi = 0; gi < groups.length; gi++) ...[
+          if (gi > 0) const SizedBox(height: 18),
+          head(groups[gi].$1),
+          const SizedBox(height: 10),
+          for (var i = 0; i < groups[gi].$2.length; i++) ...[
+            if (i > 0) const SizedBox(height: 8),
+            _ClassRow(
+              row: groups[gi].$2[i],
+              active: active?.id == groups[gi].$2[i].id,
+              onTap: () => onPickRow(groups[gi].$2[i]),
+            ),
+          ],
+        ],
+      ],
+    );
+  }
+}
+
+/// Hour-ruler layout — Y-axis is the hour, class cards anchored at their
+/// start hour, empty hours render as a label + thin divider.
+class _TimelineLayout extends StatelessWidget {
+  final List<ClassRow> rows;
+  final ClassRow? active;
+  final void Function(ClassRow) onPickRow;
+  const _TimelineLayout({
+    required this.rows,
+    required this.active,
+    required this.onPickRow,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final byHour = <int, List<ClassRow>>{};
+    for (final r in rows) {
+      final h = r.startsAt.toLocal().hour;
+      (byHour[h] ??= []).add(r);
+    }
+    final firstHour = rows
+        .map((r) => r.startsAt.toLocal().hour)
+        .reduce((a, b) => a < b ? a : b);
+    final lastHour = rows.map((r) {
+      final end = r.endsAt.toLocal();
+      return end.minute == 0 ? end.hour - 1 : end.hour;
+    }).reduce((a, b) => a > b ? a : b);
+    final hours = [for (var h = firstHour; h <= lastHour; h++) h];
+
+    String hourLabel(int h) =>
+        '${h.toString().padLeft(2, '0')}:00';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < hours.length; i++)
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 48,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      hourLabel(hours[i]),
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ),
+                Container(width: 1, color: y.border),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                        bottom: i == hours.length - 1 ? 0 : 12),
+                    child: (byHour[hours[i]] == null)
+                        ? const SizedBox(height: 28)
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              for (var ci = 0;
+                                  ci < byHour[hours[i]]!.length;
+                                  ci++) ...[
+                                if (ci > 0) const SizedBox(height: 8),
+                                _ClassRow(
+                                  row: byHour[hours[i]]![ci],
+                                  active: active?.id ==
+                                      byHour[hours[i]]![ci].id,
+                                  onTap: () =>
+                                      onPickRow(byHour[hours[i]]![ci]),
+                                ),
+                              ],
+                            ],
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
 }
 
 class _DayChip extends StatelessWidget {
@@ -652,19 +886,15 @@ class _DockedSheetWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // BookingSheet's _BookingSheetState calls Navigator.pop(true) after a
-    // booking. To avoid actually popping the page, host it inside a Navigator
-    // whose root route is the sheet itself — when it pops, we rebuild and
-    // fire onChanged.
-    return Navigator(
-      onGenerateRoute: (_) => PageRouteBuilder(
-        opaque: false,
-        pageBuilder: (_, __, ___) => BookingSheet(classRow: classRow),
-        transitionsBuilder: (_, __, ___, child) => child,
-      ),
-      onDidRemovePage: (_) {
-        onChanged();
-      },
+    // Use BookingSheet's onClose callback directly — that fires on every
+    // successful mutation (book / cancel / waitlist) and is the desktop
+    // signal to reload the day. The earlier nested-Navigator approach
+    // didn't work because popping the only route in a one-route
+    // navigator is a no-op and onDidRemovePage never fired, leaving the
+    // class list (and the active row's chip) stale after a cancel.
+    return BookingSheet(
+      classRow: classRow,
+      onClose: onChanged,
     );
   }
 }

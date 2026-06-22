@@ -11,11 +11,16 @@ import '../widgets/yoga_primitives.dart';
 class PurchaseSuccessScreen extends StatelessWidget {
   final Product product;
   final PurchaseEntitlement entitlement;
+  /// True when the user reached this screen via the "Buy pass and book"
+  /// flow on the booking sheet — we already booked the class they wanted,
+  /// so the messaging and CTAs change to reflect that.
+  final bool autoBooked;
 
   const PurchaseSuccessScreen({
     super.key,
     required this.product,
     required this.entitlement,
+    this.autoBooked = false,
   });
 
   @override
@@ -44,7 +49,7 @@ class PurchaseSuccessScreen extends StatelessWidget {
               const SizedBox(height: 18),
               Center(
                 child: Text(
-                  "You're all set",
+                  autoBooked ? "You're booked" : "You're all set",
                   style: TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
@@ -70,23 +75,25 @@ class PurchaseSuccessScreen extends StatelessWidget {
               _PassCard(product: product, entitlement: entitlement),
               const SizedBox(height: 22),
               YButton(
-                label: 'Book your first class',
+                label: autoBooked ? 'Done' : 'Book your first class',
                 onTap: () => Navigator.of(context).pop(),
               ),
-              const SizedBox(height: 14),
-              Center(
-                child: GestureDetector(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Text(
-                    'Done',
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700,
-                      color: y.muted,
+              if (!autoBooked) ...[
+                const SizedBox(height: 14),
+                Center(
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Text(
+                      'Done',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
               const Spacer(),
               Center(
                 child: Text(
@@ -108,6 +115,9 @@ class PurchaseSuccessScreen extends StatelessWidget {
   }
 
   String _subline() {
+    if (autoBooked) {
+      return 'Your ${entitlement.label} is in your wallet and your spot is confirmed — see you in class.';
+    }
     if (entitlement.passKind == 'unlimited') {
       return 'Your ${entitlement.label} is in your wallet — book classes any time until it expires.';
     }

@@ -7,14 +7,14 @@ import (
 )
 
 type AuditEntry struct {
-	ID         string                 `json:"id"`
-	ActorID    string                 `json:"actor_id"`
-	ActorName  string                 `json:"actor_name"`
-	Action     string                 `json:"action"`
-	TargetType string                 `json:"target_type"`
-	TargetID   string                 `json:"target_id,omitempty"`
-	Detail     map[string]any         `json:"detail"`
-	CreatedAt  string                 `json:"created_at"`
+	ID         string         `json:"id"`
+	ActorID    string         `json:"actor_id"`
+	ActorName  string         `json:"actor_name"`
+	Action     string         `json:"action"`
+	TargetType string         `json:"target_type"`
+	TargetID   string         `json:"target_id,omitempty"`
+	Detail     map[string]any `json:"detail"`
+	CreatedAt  string         `json:"created_at"`
 }
 
 func (s *Store) ListAudit(ctx context.Context, studioID, actionFilter string, limit int) ([]AuditEntry, error) {
