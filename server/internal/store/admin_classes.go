@@ -5,9 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // AdminClassInput is the body for POST/PATCH /admin/classes.
@@ -16,7 +15,7 @@ type AdminClassInput struct {
 	InstructorID *string `json:"instructor_id,omitempty"`
 	RoomID       *string `json:"room_id,omitempty"`
 	Title        *string `json:"title,omitempty"`
-	StartsAt     *string `json:"starts_at,omitempty"`  // ISO 8601 UTC
+	StartsAt     *string `json:"starts_at,omitempty"` // ISO 8601 UTC
 	DurationMins *int    `json:"duration_minutes,omitempty"`
 	Capacity     *int    `json:"capacity,omitempty"`
 }
@@ -27,26 +26,62 @@ func (s *Store) CreateAdminClassWithAudit(ctx context.Context, studioID, actorID
 	if err != nil {
 		return "", err
 	}
+	// Hydrate the human labels for the audit row so the activity log
+	// can render "NEW CLASS · Vinyasa Flow · Priya · Studio A" without
+	// the reader having to follow opaque IDs back to their tables.
+	var instructorName, roomName string
+	if in.InstructorID != nil && *in.InstructorID != "" {
+		_ = s.db.QueryRowContext(ctx,
+			`SELECT full_name FROM users WHERE id = ?`, *in.InstructorID,
+		).Scan(&instructorName)
+	}
+	if in.RoomID != nil && *in.RoomID != "" {
+		_ = s.db.QueryRowContext(ctx,
+			`SELECT name FROM rooms WHERE id = ?`, *in.RoomID,
+		).Scan(&roomName)
+	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "class_create", "class", id, map[string]any{
 		"title":            valOr(in.Title, ""),
 		"starts_at":        valOr(in.StartsAt, ""),
 		"duration_minutes": valOr(in.DurationMins, 0),
 		"capacity":         valOr(in.Capacity, 0),
+		"instructor_id":    valOr(in.InstructorID, ""),
+		"instructor_name":  instructorName,
+		"room_id":          valOr(in.RoomID, ""),
+		"room_name":        roomName,
 	})
 	return id, nil
 }
 
 // CancelAdminClassWithAudit wraps CancelAdminClass with an audit row.
+// The audit detail includes a compact list of affected_users so the
+// manager's Activity-log view can render "released N bookings — Maya,
+// Aria, Ben + 3 more" without having to re-query the roster.
 func (s *Store) CancelAdminClassWithAudit(ctx context.Context, studioID, actorID, classID string) (*CancelClassResult, error) {
 	out, err := s.CancelAdminClass(ctx, studioID, classID)
 	if err != nil {
 		return nil, err
 	}
+	users := make([]map[string]any, 0, len(out.AffectedUsers))
+	for _, u := range out.AffectedUsers {
+		row := map[string]any{
+			"id":        u.ID,
+			"name":      u.Name,
+			"seats":     u.Seats,
+			"pass_kind": u.PassKind,
+		}
+		if u.PlusOneName != "" {
+			row["plus_one_name"] = u.PlusOneName
+		}
+		users = append(users, row)
+	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "class_cancel", "class", classID, map[string]any{
-		"bookings_cancelled":  out.BookingsCancelled,
-		"credits_returned":    out.CreditsReturned,
-		"notifications_sent":  out.NotificationsSent,
-		"waitlist_cleared":    out.WaitlistCleared,
+		"class_title":        out.Title,
+		"bookings_cancelled": out.BookingsCancelled,
+		"credits_returned":   out.CreditsReturned,
+		"notifications_sent": out.NotificationsSent,
+		"waitlist_cleared":   out.WaitlistCleared,
+		"affected_users":     users,
 	})
 	return out, nil
 }
@@ -79,6 +114,9 @@ func (s *Store) CreateAdminClass(ctx context.Context, studioID string, in AdminC
 	if in.Capacity == nil || *in.Capacity <= 0 {
 		missing = append(missing, "capacity")
 	}
+	if in.Title == nil || strings.TrimSpace(*in.Title) == "" {
+		missing = append(missing, "title")
+	}
 	if len(missing) > 0 {
 		return "", fmt.Errorf("missing required fields: %v", missing)
 	}
@@ -87,11 +125,8 @@ func (s *Store) CreateAdminClass(ctx context.Context, studioID string, in AdminC
 		return "", fmt.Errorf("starts_at must be RFC3339: %w", err)
 	}
 	end := start.Add(time.Duration(*in.DurationMins) * time.Minute)
-	title := ""
-	if in.Title != nil {
-		title = *in.Title
-	}
-	id := uuid.NewString()
+	title := strings.TrimSpace(*in.Title)
+	id := NewID()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO classes
 		    (id, studio_id, class_type_id, instructor_id, room_id, title,
@@ -108,10 +143,30 @@ func (s *Store) CreateAdminClass(ctx context.Context, studioID string, in AdminC
 
 // CancelClassResult summarizes what the cancel did for the manager.
 type CancelClassResult struct {
-	BookingsCancelled   int  `json:"bookings_cancelled"`
-	CreditsReturned     int  `json:"credits_returned"`
-	NotificationsSent   int  `json:"notifications_sent"`
-	WaitlistCleared     int  `json:"waitlist_cleared"`
+	BookingsCancelled int                  `json:"bookings_cancelled"`
+	CreditsReturned   int                  `json:"credits_returned"`
+	NotificationsSent int                  `json:"notifications_sent"`
+	WaitlistCleared   int                  `json:"waitlist_cleared"`
+	AffectedUsers     []AffectedUserBrief  `json:"affected_users,omitempty"`
+	// Title is the cancelled class's title, snapshotted at cancel time
+	// so the audit/activity log can render "CANCELLED · Vinyasa Flow"
+	// without re-querying after the row's status flipped.
+	Title string `json:"title,omitempty"`
+}
+
+// AffectedUserBrief describes one person who lost a seat in a class-cancel,
+// aggregated across parent + plus-one rows so the Activity log can render
+// "Ben · 2 credits returned (with friend)" instead of two separate "Ben"
+// chips. Seats is 1 for a solo booking and 2 when a +1 was attached;
+// PassKind is "credit" or "unlimited" so the UI can decide whether to
+// say "credit returned" vs "unlimited pass". PlusOneName is filled when
+// the booking included a friend.
+type AffectedUserBrief struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Seats       int    `json:"seats"`
+	PassKind    string `json:"pass_kind"`
+	PlusOneName string `json:"plus_one_name,omitempty"`
 }
 
 func (s *Store) CancelAdminClass(ctx context.Context, studioID, classID string) (*CancelClassResult, error) {
@@ -138,15 +193,21 @@ func (s *Store) CancelAdminClass(ctx context.Context, studioID, classID string) 
 		return nil, fmt.Errorf("class already cancelled")
 	}
 
-	// Pull live bookings + their credit entitlements.
+	// Pull live bookings + their credit entitlements. is_plus_one /
+	// plus_one_name come along so we can aggregate parent+friend into a
+	// single affected-user entry below (seats=2, with friend's name).
 	type bookingRow struct {
-		ID, UserID, EntitlementID, PassKind string
+		ID, UserID, UserName, EntitlementID, PassKind string
+		IsPlusOne                                     bool
+		PlusOneName                                   sql.NullString
 	}
 	var bookings []bookingRow
 	brows, err := tx.QueryContext(ctx, `
-		SELECT b.id, b.user_id, b.entitlement_id, e.pass_kind
+		SELECT b.id, b.user_id, u.full_name, b.entitlement_id, e.pass_kind,
+		       b.is_plus_one, b.plus_one_name
 		  FROM bookings b
 		  JOIN entitlements e ON e.id = b.entitlement_id
+		  JOIN users u        ON u.id = b.user_id
 		 WHERE b.class_id = ? AND b.status = 'booked'`,
 		classID,
 	)
@@ -154,22 +215,37 @@ func (s *Store) CancelAdminClass(ctx context.Context, studioID, classID string) 
 		return nil, err
 	}
 	for brows.Next() {
-		var b bookingRow
-		if err := brows.Scan(&b.ID, &b.UserID, &b.EntitlementID, &b.PassKind); err != nil {
+		var (
+			b      bookingRow
+			plusOn int
+		)
+		if err := brows.Scan(&b.ID, &b.UserID, &b.UserName, &b.EntitlementID, &b.PassKind,
+			&plusOn, &b.PlusOneName); err != nil {
 			brows.Close()
 			return nil, err
 		}
+		b.IsPlusOne = plusOn != 0
 		bookings = append(bookings, b)
 	}
 	brows.Close()
 
 	out := &CancelClassResult{}
+	if title.Valid {
+		out.Title = title.String
+	}
 
-	// Cancel bookings + return credits + notify each.
+	// Collected post-commit pushes — populated as we walk bookings, fired
+	// after tx.Commit so a rolled-back cancel doesn't produce phantom pings.
+	var pushes []pendingPush
+
+	// Cancel bookings + return credits + notify each. Outcome is always
+	// class_cancelled_returned: it was the studio's call, never the student's
+	// fault, so credits go back regardless of when the cancel happened.
 	for _, b := range bookings {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE bookings
 			   SET status       = 'cancelled',
+			       outcome      = 'class_cancelled_returned',
 			       cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 			 WHERE id = ?`,
 			b.ID,
@@ -185,26 +261,67 @@ func (s *Store) CancelAdminClass(ctx context.Context, studioID, classID string) 
 			}
 			out.CreditsReturned++
 		}
-		// Notify the student.
-		body := "Class cancelled by the studio · your credit has been returned."
-		if b.PassKind != "credit" {
-			body = "Class cancelled by the studio. We'll see you next time."
-		}
-		nTitle := "Class cancelled"
-		if title.Valid && title.String != "" {
-			nTitle = title.String + " — class cancelled"
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO notifications (id, studio_id, user_id, type, title, body, payload)
-			   VALUES (?, ?, ?, 'class_cancelled', ?, ?, ?)`,
-			uuid.NewString(), studioID, b.UserID, nTitle, body,
-			fmt.Sprintf(`{"class_id":"%s","booking_id":"%s"}`, classID, b.ID),
-		); err != nil {
+		// Notify the student — unless they've opted out of class_cancelled.
+		// (A no-op opt-out for credit-pass holders still leaves the
+		// refunded credit in place; this only suppresses the feed entry.)
+		ok, err := userOptedInTx(ctx, tx, b.UserID, "class_cancelled")
+		if err != nil {
 			return nil, err
 		}
-		out.NotificationsSent++
+		if ok {
+			body := "Class cancelled by the studio · your credit has been returned."
+			if b.PassKind != "credit" {
+				body = "Class cancelled by the studio. We'll see you next time."
+			}
+			nTitle := "Class cancelled"
+			if title.Valid && title.String != "" {
+				nTitle = title.String + " — class cancelled"
+			}
+			payloadJSON := fmt.Sprintf(`{"class_id":"%s","booking_id":"%s"}`, classID, b.ID)
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO notifications (id, studio_id, user_id, type, title, body, payload)
+				   VALUES (?, ?, ?, 'class_cancelled', ?, ?, ?)`,
+				NewID(), studioID, b.UserID, nTitle, body, payloadJSON,
+			); err != nil {
+				return nil, err
+			}
+			out.NotificationsSent++
+			pushes = append(pushes, pendingPush{
+				userID:      b.UserID,
+				notifType:   "class_cancelled",
+				title:       nTitle,
+				body:        body,
+				payloadJSON: payloadJSON,
+			})
+		}
 	}
 	out.BookingsCancelled = len(bookings)
+	// Aggregate by user so parent + +1 collapse into one entry with
+	// seats=2. Preserve the queue order — walk bookings in turn and
+	// append a fresh brief the first time we meet each user. The +1
+	// row's plus_one_name is empty (the name lives on the parent), so
+	// we copy it onto the parent's brief.
+	briefByUser := map[string]int{} // userID → index in out.AffectedUsers
+	for _, b := range bookings {
+		if idx, ok := briefByUser[b.UserID]; ok {
+			out.AffectedUsers[idx].Seats++
+			if !b.IsPlusOne && b.PlusOneName.Valid {
+				out.AffectedUsers[idx].PlusOneName = b.PlusOneName.String
+			}
+			continue
+		}
+		brief := AffectedUserBrief{
+			ID:       b.UserID,
+			Name:     b.UserName,
+			Seats:    1,
+			PassKind: b.PassKind,
+		}
+		if !b.IsPlusOne && b.PlusOneName.Valid {
+			brief.PlusOneName = b.PlusOneName.String
+		}
+		briefByUser[b.UserID] = len(out.AffectedUsers)
+		out.AffectedUsers = append(out.AffectedUsers, brief)
+	}
 
 	// Clear waitlist.
 	res, err := tx.ExecContext(ctx,
@@ -223,7 +340,13 @@ func (s *Store) CancelAdminClass(ctx context.Context, studioID, classID string) 
 		return nil, err
 	}
 
-	return out, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, p := range pushes {
+		s.dispatchPush(p.userID, p.notifType, p.title, p.body, p.payloadJSON)
+	}
+	return out, nil
 }
 
 // UpdateAdminClass partially updates a class. Only re-derives ends_at when
@@ -333,11 +456,15 @@ func (s *Store) ListAdminInstructors(ctx context.Context, studioID string) ([]Ad
 type AdminRoom struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Optional `#rrggbb` accent the UI tints class cards with. Omitted
+	// from the response when unset so the client can default to the
+	// theme's neutral border without a special-case "no color" string.
+	Color *string `json:"color,omitempty"`
 }
 
 func (s *Store) ListAdminRooms(ctx context.Context, studioID string) ([]AdminRoom, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name FROM rooms WHERE studio_id = ? ORDER BY name ASC`,
+		SELECT id, name, color FROM rooms WHERE studio_id = ? ORDER BY name ASC`,
 		studioID,
 	)
 	if err != nil {
@@ -346,9 +473,16 @@ func (s *Store) ListAdminRooms(ctx context.Context, studioID string) ([]AdminRoo
 	defer rows.Close()
 	out := []AdminRoom{}
 	for rows.Next() {
-		var r AdminRoom
-		if err := rows.Scan(&r.ID, &r.Name); err != nil {
+		var (
+			r     AdminRoom
+			color sql.NullString
+		)
+		if err := rows.Scan(&r.ID, &r.Name, &color); err != nil {
 			return nil, err
+		}
+		if color.Valid && color.String != "" {
+			c := color.String
+			r.Color = &c
 		}
 		out = append(out, r)
 	}

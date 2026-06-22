@@ -25,15 +25,27 @@ class YogaSemanticTokens {
     required this.textMuted,
   });
 
-  factory YogaSemanticTokens.fromHexMap(Map<String, dynamic> m) =>
-      YogaSemanticTokens(
-        primary: _hex(m['primary'] as String),
-        accent: _hex(m['accent'] as String),
-        background: _hex(m['background'] as String),
-        surface: _hex(m['surface'] as String),
-        text: _hex(m['text'] as String),
-        textMuted: _hex(m['textMuted'] as String),
-      );
+  /// Tolerant of missing / non-string token keys — falls back to a
+  /// transparent placeholder colour rather than throwing "Unexpected
+  /// null value". A theme row with sparse tokens (e.g. one inserted by
+  /// a test fixture as `{"primary":"#000"}`) used to crash the whole
+  /// settings screen by triggering this constructor on every build of
+  /// the editor's contrast meter, which then cascaded into a layout
+  /// failure → render loop → console spam.
+  factory YogaSemanticTokens.fromHexMap(Map<String, dynamic> m) {
+    String? read(String k) {
+      final v = m[k];
+      return v is String ? v : null;
+    }
+    return YogaSemanticTokens(
+      primary: _hex(read('primary')),
+      accent: _hex(read('accent')),
+      background: _hex(read('background')),
+      surface: _hex(read('surface')),
+      text: _hex(read('text')),
+      textMuted: _hex(read('textMuted')),
+    );
+  }
 }
 
 /// Full derived token sheet, attached to ThemeData via ThemeExtension.
@@ -226,10 +238,15 @@ extension YogaContext on BuildContext {
 // ---- color math -----------------------------------------------------------
 // Mirrors yogaHexRgb / yogaLum / yogaMix / yogaOn in yoga-theme.jsx.
 
-Color _hex(String hex) {
+Color _hex(String? hex) {
+  if (hex == null || hex.isEmpty) return const Color(0x00000000);
   var h = hex.replaceFirst('#', '');
   if (h.length == 6) h = 'FF$h';
-  return Color(int.parse(h, radix: 16));
+  try {
+    return Color(int.parse(h, radix: 16));
+  } on FormatException {
+    return const Color(0x00000000);
+  }
 }
 
 double _relativeLuminance(Color c) {

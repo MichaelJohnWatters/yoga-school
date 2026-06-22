@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
@@ -56,7 +57,7 @@ class _EnrollSheetState extends ConsumerState<EnrollSheet> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }

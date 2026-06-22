@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Promotion is one studio promotion. starts_at / ends_at delimit the active
@@ -67,9 +65,9 @@ func (s *Store) queryPromotions(ctx context.Context, q, studioID string) ([]Prom
 	out := make([]Promotion, 0)
 	for rows.Next() {
 		var (
-			p             Promotion
-			starts, ends  sql.NullString
-			archivedInt   int
+			p            Promotion
+			starts, ends sql.NullString
+			archivedInt  int
 		)
 		if err := rows.Scan(&p.ID, &p.Title, &p.Body, &p.ImageURL,
 			&starts, &ends, &archivedInt); err != nil {
@@ -95,7 +93,7 @@ func (s *Store) CreatePromotion(ctx context.Context, studioID, actorID string, i
 	if err := validatePromotionWindow(in.StartsAt, in.EndsAt); err != nil {
 		return "", err
 	}
-	id := uuid.NewString()
+	id := NewID()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO promotions (id, studio_id, title, body, image_url, starts_at, ends_at)
 		     VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -150,6 +148,13 @@ func (s *Store) UpdatePromotion(ctx context.Context, studioID, actorID, id strin
 // from student-facing feeds. Admin listings still surface it with the
 // is_archived flag.
 func (s *Store) ArchivePromotion(ctx context.Context, studioID, actorID, id string) error {
+	// Snapshot title before archiving so the audit row reads as
+	// "PROMOTION ARCHIVED · Spring sale" rather than an opaque id.
+	var title string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT title FROM promotions WHERE id = ? AND studio_id = ?`,
+		id, studioID,
+	).Scan(&title)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE promotions SET is_archived = 1 WHERE id = ? AND studio_id = ?`,
 		id, studioID,
@@ -161,7 +166,8 @@ func (s *Store) ArchivePromotion(ctx context.Context, studioID, actorID, id stri
 	if n == 0 {
 		return ErrNotFound
 	}
-	_ = s.WriteAudit(ctx, studioID, actorID, "promotion_archive", "promotion", id, nil)
+	_ = s.WriteAudit(ctx, studioID, actorID, "promotion_archive", "promotion", id,
+		map[string]any{"title": title})
 	return nil
 }
 

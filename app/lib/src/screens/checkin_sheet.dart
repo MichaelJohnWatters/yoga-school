@@ -75,6 +75,53 @@ class _Loaded extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    // Empty state: no upcoming booking → no token → render a friendly note
+    // pointing at Book instead of an empty QR.
+    if (!payload.hasToken) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Center(
+            child: Container(
+              width: 38,
+              height: 4,
+              decoration: BoxDecoration(
+                color: y.borderStrong,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 28),
+          Icon(Icons.qr_code_2_outlined, size: 56, color: y.muted),
+          const SizedBox(height: 14),
+          Text(
+            'No upcoming class to check in for',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: y.text,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Text(
+              'Book a class first and your single-use QR will appear here when '
+              'the check-in window opens.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+                color: y.muted,
+                height: 1.45,
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+        ],
+      );
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -157,7 +204,8 @@ class _Loaded extends StatelessWidget {
         ],
         const SizedBox(height: 16),
         Text(
-          'Show this at the front desk scanner.\nScreen brightness raised automatically.',
+          'Single-use code · valid from 30 min before class.\n'
+          'Show this at the front desk scanner.',
           textAlign: TextAlign.center,
           style: TextStyle(
             fontSize: 12,

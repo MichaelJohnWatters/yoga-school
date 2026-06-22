@@ -14,7 +14,8 @@ Shared Flutter core package holds models, API client, auth, and entitlement logi
 - `/api/v1` prefix. Auth via **Firebase ID token**; backend verifies and resolves the internal user + studio.
 - **Tenancy:** every request is scoped to one `studio_id` (carried in the resolved session). Every query filters by it. Multi-studio supported but expected to be light.
 - `STUDENT` / `MANAGER` / `BOTH` mark caller. **↺ REUSED** endpoints listed once in Part 3.
-- IDs are UUIDs. Timestamps UTC; "day" boundaries computed in **studio timezone** (a setting). Money is integer minor units; **currency is a studio setting**.
+- IDs are **12-char NanoIDs** (URL-safe alphabet) — chosen over UUIDs for shorter URLs and logs. Timestamps UTC RFC3339; "day" boundaries computed in **studio timezone** (a setting). Money is integer minor units; **currency is a studio setting**.
+- **Storage:** SQLite via `modernc.org/sqlite` (pure-Go, no cgo). The Part 4 schema is the *Postgres-flavoured* contract; the shipped SQLite schema in `server/db/schema.sql` mirrors it with SQLite-native types (`TEXT` for ids/timestamps, `INTEGER` for booleans).
 
 ---
 
@@ -79,7 +80,7 @@ Day-strip calendar (studio-tz days); rows show time, type, instructor+photo, boo
 | Notification prefs | `GET/PATCH /me/notifications` | |
 | Notifications feed | `GET /me/notifications/feed` | Simple select now; FCM later |
 | Register device token | `POST /me/devices` | FCM token store |
-| Check-in barcode | `GET /me/checkin-code` | Rotating token |
+| Check-in barcode | `GET /me/checkin-code` | Per-booking single-use token; returns next upcoming booking's token + class context. Consumed on first successful scan within the -30 / +10 min check-in window. |
 | Feedback / review | `POST /feedback` · `POST /reviews` | |
 | Content pages | `GET /content/{slug}` | |
 | Sign out | `POST /auth/logout` ↺ | |
@@ -450,10 +451,89 @@ CREATE TABLE payment_methods (
 6. **No-shows** are manager-recorded on the roster (no sweep job). **Waitlist promotion** fires on cancel. **Studio class-cancel** batch-returns credits via the `class_cancelled_returned` outcome.
 7. **Stripe** fields present; webhook→entitlement reconciliation and card refunds deferred to the Stripe phase.
 
+## Resolved since v2
+
+- **Waitlist promotion credit timing** — Claim-window picked. `waitlist_offers` table holds a pending 60-min offer; the offered student claims (which mints the booking and burns the credit) or the offer expires and the next waiter is offered. Offers count against capacity while pending.
+- **Check-in token security** — Per-booking single-use tokens replace the rotating per-user approach. `bookings.checkin_token` is UNIQUE; tokens validate only inside a check-in window (-30 / +10 min around `starts_at`) and the row is consumed on the first successful scan. The old `users.checkin_token` column has been dropped.
+- **Achievement earning logic** — 8-badge catalogue with lazy-grant evaluation on read (`first_class`, `regular` at 5, `devotee` at 25, `early_bird` < 08:00, `night_owl` ≥ 19:00, `variety` across disciplines, `streak_3` consecutive weeks, `course_graduate` from a completed enrollment). Granted rows persist; the read path returns the full catalogue with `earned_at: null` for locked badges so the client can render dim variants. Leaderboard table still optional/deferred.
+
+---
+
+# Implementation status (as of 2026-06-19)
+
+## Last session (2026-06-19)
+
+- **First live manual smoke run** — bootstrapped fresh `dev.db` + reseeded Firebase users via `tilt trigger yoga-bootstrap`. Bootstrap script had a race between async `tilt enable` and `tilt trigger`; patched the chained command in `tilt_lib.star` to retry the trigger up to 5 seconds.
+- **Bootstrap cache pattern from kickstand applied** — `yoga-app` now passes `--web-header=Cache-Control=no-store` to `flutter run`, and `yoga-hotreload` swapped `SIGUSR1` (DDC hot reload — flaky on web) for `SIGUSR2` (hot restart) using kickstand's safer PID-file-aware script. Without no-store, every `yoga-bootstrap` left Chrome serving stale Flutter JS bundles even though the DB underneath was wiped, manifesting as "old assertions persist after fix". Need to disable + re-enable `yoga-app` once for the new serve_cmd to take.
+- **Class title now required** — server validates non-empty title in both `CreateAdminClass` and the recurrence branch (trimmed, both return "missing fields: [title]" if blank). Flutter create dialog dropped "(optional)" from the label, replaced the silent `'Class'` fallback with explicit pre-submit guard. Edit dialog gets the same guard.
+- **Schedule day-column padding fix** — `admin_schedule_screen.dart:602` had `left: isFirst ? 0 : 10` but no right padding, so class blocks butted against the next day's divider. Added `right: 10` for symmetry.
+- **Buy-layout picker preview** — replaced the bare segmented control in `admin_settings_screen.dart` Policies card with three tap-able preview tiles. Each tile shows a miniature 70px render of the actual Buy layout (Grouped → hero block + 3 pack rows; Grid → 2×2 tiles; List → 4 stacked rows), labelled with a one-line description. Selected tile gets primary-coloured border + check icon. Tracks theme tokens so it stays consistent with the active palette.
+- **Two settings-page render bugs found + fixed**:
+  - **`Expanded` in vertical Column under `IntrinsicHeight`** — the Grid mini-preview originally used `Column(Expanded(Row(Expanded(_PreviewBox))))`. `IntrinsicHeight` walks children for intrinsic dimensions and `Expanded` has none — assertion fired and the whole Policies subtree rendered blank. Replaced both Expanded(Row(...)) with `SizedBox(height: 24, child: Row(...))`.
+  - **`TextField` without bounded-width ancestor under `IntrinsicHeight`** — the TIMEZONE field was a bare TextField inside a Container with only horizontal padding; no width-bounding parent in the IntrinsicHeight chain. `TextField` can't compute intrinsic width without bounded width, so `box.dart:2251` "RenderBox was not laid out" cascaded (with a flood of "Unexpected null value" cascades downstream). Wrapped in `SizedBox(width: 240)` to match the cutoff field pattern.
+  - **Lesson:** every TextField in a card that lives inside the side-by-side `IntrinsicHeight + Row` settings layout needs a bounded-width ancestor. Audit any new TextField added to Policies / Stripe / Studio cards.
+- **Latent write-side TZ bug flagged (not yet fixed)** — `admin_classes.go:99` writes `start.Format(time.RFC3339)` without `.UTC()`, mirroring the read-side bug fixed in the prior session. If a client sends `starts_at` with a non-Z offset, the row stores that offset literally and the listing's lex-compared UTC bounds may miss it. Also affects `UpdateAdminClass` + recurrence materialisation. ~10 min to sweep + one normalisation UPDATE for already-written rows.
+
+## Last session (2026-06-17)
+
+- **Schema cleanup landed** — dropped `studios.branding`, `users.stripe_customer_id`, `users.checkin_token` from `server/db/schema.sql`. No Go code referenced any of the three. Existing `dev.db` files still hold the columns as ghost data (SQLite `CREATE TABLE IF NOT EXISTS` doesn't drop columns from existing tables); fresh `--migrate` is clean.
+- **Studio-TZ SQL formatting bug found + fixed** — the timezone helpers (`startOfDayIn`, `startOfMonthIn`, `mondayOfIn`) returned correctly-anchored instants in the studio's `*time.Location`, but the 15 call sites that passed those instants to SQL used `.Format(time.RFC3339)`, which serialises with the instant's *location offset* (e.g. `2026-06-15T00:00:00+10:00`). The `bookings` / `classes` `starts_at` columns store UTC (`...Z`), so the lexicographic string comparison inside SQLite silently mismatched at boundaries — a Sydney studio's "today" / "this month" queries were returning the wrong window. **Fix:** added `.UTC()` before every `.Format(time.RFC3339)` at the 15 SQL boundary sites across `classes.go`, `admin.go`, `wallet.go`, `admin_reports.go`. Same instant, canonical UTC byte representation.
+- **New tests** — 4 studio-TZ end-to-end tests (`studio_tz_test.go`) catching the bug above and locking down the call-site wiring; 1 cancel-class push dispatch test (`push_dispatch_test.go`); 2 achievements catalogue-shape tests (`achievements_test.go`). Full server suite green.
+
+## Shipped end-to-end
+
+**Identity + tenancy** — Firebase Auth verification middleware; first-login provisioning (single-studio auto-resolve, multi-studio guarded with `ErrMultipleStudios`); per-request `studio_id` scoping; `LinkFirebaseUID` for pre-seeded invites.
+
+**Studio config** — Timezone (per-studio IANA, cached `*time.Location`, invalidated on update); currency; cancel cutoff; `allow_student_plus_one`; welcome message; `buy_layout` (`grouped` / `grid` / `list`); manager edit screen with dirty-tracking.
+
+**Theming** — Token-based system with derived states; WCAG 4.5:1 contrast guardrail (text-on-surface; text-on-primary uses derived `onPrimary`); 4 seasonal presets (Sage, Warm Clay, Earthen, Bright Bloom) + custom palette editor; per-theme splash override; light + dark modes.
+
+**Classes** — Single + recurring (rule + materialised instances + `is_detached`); `PATCH /admin/classes/{id}?scope=this|future|all`; status `scheduled | cancelled`; manager CRUD; per-day / range listings interpreted in studio TZ.
+
+**Bookings** — `outcome` column with the four states (`cancelled_free`, `cancelled_late_burned`, `no_show_burned`, `class_cancelled_returned`); snapshotted `cancel_cutoff_hours`; +1 gating; per-booking single-use `checkin_token`.
+
+**Check-in** — `/me/checkin-code` returns next booking's token + class. Manager scanner sheet posts `/admin/checkin/scan`; consume-on-success; -30 / +10 min window guards against pre-class screenshots.
+
+**Waitlist** — Join, position assignment, claim-window via `waitlist_offers` (60-min hold), promote-on-cancel, eligibility pre-check before offering, sweep expired offers on next promote.
+
+**Entitlements + purchases** — Snapshotted pass kind / credits / expiry / class-type allowlist; single active pass rule with duplicate-purchase warning; void with audit; intent/confirm split (`pi_stub_*` ids in dev, idempotent re-confirm).
+
+**Stripe credentials storage** — Per-studio encrypted-at-rest secrets via AES-256-GCM (`STRIPE_KEY_ENC_MASTER` env, fresh nonce per call); masked admin UI; server refuses to boot if encrypted rows exist but master key is unset.
+
+**Products** — Builder; archive; class-type coverage; pass kinds; `is_hero` for the Buy hero card; `?covers_class_type=` filter wired into the BookingSheet "No eligible pass → see passes for this class" CTA.
+
+**Enrollments (series)** — `enrollments` + `enrollment_bookings`; child `classes` rows linked by `enrollment_id`; per-session attendance falls out via the booking row's status.
+
+**Roster** — Tabs (booked / late-cancel / cancelled); no-show row shows "pass still consumed"; late-cancel row shows penalty message; promote-into-late-cancelled-seat supported.
+
+**Notifications** — Channel-agnostic `notifications` table; `notification_prefs` with five categories (booking_confirmed / class_cancelled / waitlist_promoted / promotions / system_msgs) opt-out gates row insertion. **FCM dispatch wired** as a fire-and-forget post-commit fan-out (`internal/push` package + `PushDispatcher` interface on Store): dev runs in log-only mode (Auth emulator → no FCM credentials), production sends via the Firebase Admin SDK with dead-token pruning on `IsUnregistered` / `IsInvalidArgument`. `device_tokens` UPSERT supports account-switch handoff.
+
+**Achievements** — Lazy-grant on `/me/achievements`; full screen with locked vs earned badges; Home strip surfaces the latest.
+
+**Manager console** — Dashboard (today's classes, revenue today, attendance alerts), schedule with scope picker, class CRUD, product builder, students, audit log, sign-out menu item.
+
+**Audit** — Manager-initiated cash grants / credit adjusts / voids / cancels **and** student-initiated state changes (`booking_cancel` with outcome, `waitlist_join` with position, `waitlist_claim` linking offer + booking). All atomic with their tx via `writeAuditTx`.
+
+**Reports** — Revenue (cash vs card split, per-period totals in studio TZ); attendance/retention; instructor pay with per-instructor `instructor_pay_rate_minor` override falling back to a studio-wide default.
+
+**Profile (student)** — Overview (12-week bar chart, streak, totals, member-since real `created_at`) with empty-state placeholder when `allTime == 0`; Wallet (purchase history with proper empty state, payment methods stub).
+
+**Buy** — Three layouts (`grouped` default with Memberships + Class packs split, `grid` 2-col tiles, `list` flat rows). Filter chips currently visual-only (still open below).
+
+**Empty states** — Profile stats + purchases, Notifications, Buy "no covering passes".
+
+## Deferred (waiting on external dependencies)
+
+- **Stripe SDK call wiring** — code paths and TODOs are in `internal/store/products.go`; needs a real test account + the `stripe-go` SDK calls in `CreatePendingPurchase` / `ConfirmPurchase` and a `POST /stripe/webhook` handler outside the auth middleware.
+- **FCM real send** — code is wired and exercised in log-only mode; needs a Firebase service account JSON + `GOOGLE_APPLICATION_CREDENTIALS` for production.
+
 ## Still open (smaller, non-blocking)
-- Waitlist promotion **credit timing**: auto-book+burn vs notify-with-claim-window (recommend claim-window). Pick before building the promote flow.
-- Rotating `checkin_token` rotation/expiry mechanism (security).
-- Achievement earning logic + optional leaderboard table.
+
+- **Manual smoke test** — last few sessions shipped substantial feature work without exercising the app end-to-end. Wipe `dev.db`, reseed, walk the golden paths (book / cancel / waitlist promote+claim / check-in scan / Buy filter from a class / Profile empty states / Achievements full screen / manager dashboard with non-UTC studio TZ). The smoke test is what would have caught the TZ formatting bug earlier.
+- **Feedback / reviews / content endpoints** — modelled in Part 1.6 but not built (low value).
+- **Buy filter chips** — visual-only placeholders in `_BuyHeader`. Either wire to the existing `covers_class_type` filter using distinct disciplines from the loaded products, or remove.
+- **Promotions admin UI** — model exists (`promotions` table + `/promotions` read endpoint), manager CRUD UI not built.
+- **Achievements leaderboard** — optional/opt-in; not started.
 
 ---
 

@@ -7,22 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 // AdminProduct extends the public Product with manager-only fields.
 type AdminProduct struct {
 	Product
-	IsArchived  bool   `json:"is_archived"`
-	DisplayOrder int   `json:"display_order"`
-	Usage       AdminProductUsage `json:"usage"`
+	IsArchived   bool              `json:"is_archived"`
+	DisplayOrder int               `json:"display_order"`
+	Usage        AdminProductUsage `json:"usage"`
 }
 
 type AdminProductUsage struct {
-	ActivePasses   int     `json:"active_passes"`
-	RevenueMinor   int     `json:"revenue_minor"`
-	LastSale       *string `json:"last_sale,omitempty"`
+	ActivePasses int     `json:"active_passes"`
+	RevenueMinor int     `json:"revenue_minor"`
+	LastSale     *string `json:"last_sale,omitempty"`
 }
 
 // ListAdminProducts returns every product (including archived) with usage stats.
@@ -44,11 +42,11 @@ func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]Admin
 	out := make([]AdminProduct, 0)
 	for rows.Next() {
 		var (
-			p          AdminProduct
-			credits    sql.NullInt64
-			validity   sql.NullInt64
-			heroInt    int
-			archInt    int
+			p        AdminProduct
+			credits  sql.NullInt64
+			validity sql.NullInt64
+			heroInt  int
+			archInt  int
 		)
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
@@ -124,10 +122,10 @@ func (s *Store) hydrateAdminProductExtras(ctx context.Context, studioID string, 
 	usage := map[string]AdminProductUsage{}
 	for urows.Next() {
 		var (
-			pid        string
-			purchases  int
-			revenue    int
-			lastSale   sql.NullString
+			pid       string
+			purchases int
+			revenue   int
+			lastSale  sql.NullString
 		)
 		if err := urows.Scan(&pid, &purchases, &revenue, &lastSale); err != nil {
 			return err
@@ -194,7 +192,7 @@ type AdminProductInput struct {
 	ClassTypeIDs []string `json:"class_type_ids,omitempty"`
 }
 
-func (s *Store) CreateAdminProduct(ctx context.Context, studioID string, in AdminProductInput) (string, error) {
+func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string, in AdminProductInput) (string, error) {
 	required := []struct {
 		name string
 		ok   bool
@@ -222,7 +220,7 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID string, in Admi
 	}
 	defer tx.Rollback()
 
-	id := uuid.NewString()
+	id := NewID()
 	hero := 0
 	if in.IsHero != nil && *in.IsHero {
 		hero = 1
@@ -257,10 +255,18 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID string, in Admi
 	if err := s.replaceProductClassTypes(ctx, tx, id, in.ClassTypeIDs); err != nil {
 		return "", err
 	}
+	if err := s.writeAuditTx(ctx, tx, studioID, actorID, "product_create", "product", id, map[string]any{
+		"name":         *in.Name,
+		"price_minor":  *in.PriceMinor,
+		"billing_type": *in.BillingType,
+		"pass_kind":    *in.PassKind,
+	}); err != nil {
+		return "", err
+	}
 	return id, tx.Commit()
 }
 
-func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, productID string, in AdminProductInput) error {
+func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, actorID, productID string, in AdminProductInput) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -343,6 +349,41 @@ func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, productID stri
 			return err
 		}
 	}
+	// Always include the product's current name on the audit row so a
+	// price-only edit still reads as "PRODUCT EDIT · 10-pack" rather
+	// than dropping the subject.
+	var currentName string
+	_ = tx.QueryRowContext(ctx,
+		`SELECT name FROM products WHERE id = ?`, productID,
+	).Scan(&currentName)
+	detail := map[string]any{"name": currentName}
+	if in.Name != nil {
+		detail["name"] = *in.Name
+	}
+	if in.PriceMinor != nil {
+		detail["price_minor"] = *in.PriceMinor
+	}
+	if in.BillingType != nil {
+		detail["billing_type"] = *in.BillingType
+	}
+	if in.PassKind != nil {
+		detail["pass_kind"] = *in.PassKind
+	}
+	if in.Credits != nil {
+		detail["credits"] = *in.Credits
+	}
+	if in.ValidityDays != nil {
+		detail["validity_days"] = *in.ValidityDays
+	}
+	if in.IsHero != nil {
+		detail["is_hero"] = *in.IsHero
+	}
+	if in.ClassTypeIDs != nil {
+		detail["class_type_ids"] = in.ClassTypeIDs
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, actorID, "product_update", "product", productID, detail); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -364,7 +405,14 @@ func (s *Store) replaceProductClassTypes(ctx context.Context, tx *sql.Tx, produc
 }
 
 // ArchiveProduct soft-deletes — existing entitlements untouched.
-func (s *Store) ArchiveProduct(ctx context.Context, studioID, productID string) error {
+func (s *Store) ArchiveProduct(ctx context.Context, studioID, actorID, productID string) error {
+	// Snapshot the product name BEFORE archiving so the audit row can
+	// render "PRODUCT ARCHIVED · 10-pack" rather than an opaque id.
+	var name string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT name FROM products WHERE id = ? AND studio_id = ?`,
+		productID, studioID,
+	).Scan(&name)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE products SET is_archived = 1 WHERE id = ? AND studio_id = ?`,
 		productID, studioID,
@@ -376,6 +424,8 @@ func (s *Store) ArchiveProduct(ctx context.Context, studioID, productID string) 
 	if n == 0 {
 		return ErrNotFound
 	}
+	_ = s.WriteAudit(ctx, studioID, actorID, "product_archive", "product", productID,
+		map[string]any{"name": name})
 	return nil
 }
 
@@ -418,7 +468,7 @@ func (s *Store) CreateClassType(ctx context.Context, studioID, actorID string, i
 	if name == "" {
 		return "", fmt.Errorf("name is required")
 	}
-	id := uuid.NewString()
+	id := NewID()
 	disc := sql.NullString{String: strings.TrimSpace(in.Discipline), Valid: in.Discipline != ""}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO class_types (id, studio_id, name, discipline)
@@ -440,6 +490,16 @@ func (s *Store) UpdateClassType(ctx context.Context, studioID, actorID, id strin
 		return fmt.Errorf("name is required")
 	}
 	disc := sql.NullString{String: strings.TrimSpace(in.Discipline), Valid: in.Discipline != ""}
+	// Snapshot the prior values BEFORE the UPDATE so a rename or
+	// discipline change is observable on the audit row — the activity
+	// log can render "TYPE EDIT · Mat Pilates ← Pilates" with both
+	// names side-by-side.
+	var prevName string
+	var prevDisc sql.NullString
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT name, discipline FROM class_types WHERE id = ? AND studio_id = ?`,
+		id, studioID,
+	).Scan(&prevName, &prevDisc)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE class_types
 		   SET name = ?, discipline = ?
@@ -453,10 +513,17 @@ func (s *Store) UpdateClassType(ctx context.Context, studioID, actorID, id strin
 	if n == 0 {
 		return ErrNotFound
 	}
-	_ = s.WriteAudit(ctx, studioID, actorID, "class_type_update", "class_type", id, map[string]any{
+	detail := map[string]any{
 		"name":       name,
 		"discipline": in.Discipline,
-	})
+	}
+	if prevName != "" && prevName != name {
+		detail["previous_name"] = prevName
+	}
+	if prevDisc.Valid && prevDisc.String != in.Discipline {
+		detail["previous_discipline"] = prevDisc.String
+	}
+	_ = s.WriteAudit(ctx, studioID, actorID, "class_type_update", "class_type", id, detail)
 	return nil
 }
 

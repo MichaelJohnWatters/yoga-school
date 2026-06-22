@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
@@ -80,7 +81,7 @@ class _GrantPassDialogState extends ConsumerState<_GrantPassDialog> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }
@@ -104,7 +105,7 @@ class _GrantPassDialogState extends ConsumerState<_GrantPassDialog> {
           student.when(
             data: (d) => _StudentRow(name: d.fullName, email: d.email),
             loading: () => _StudentRow.loading(),
-            error: (e, _) => _StudentRow(name: '…', email: '$e'),
+            error: (e, _) => _StudentRow(name: '…', email: ApiError.fromAny(e).message),
           ),
           const SizedBox(height: 14),
           products.when(
@@ -122,7 +123,7 @@ class _GrantPassDialogState extends ConsumerState<_GrantPassDialog> {
               height: 40,
               child: Center(child: CircularProgressIndicator(strokeWidth: 1.5)),
             ),
-            error: (e, _) => Text("Can't load products: $e"),
+            error: (e, _) => Text("Can't load products: ${ApiError.fromAny(e).message}"),
           ),
           const SizedBox(height: 12),
           _LabeledField(
@@ -448,7 +449,7 @@ class _AdjustDialogState extends ConsumerState<_AdjustDialog> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }
@@ -626,7 +627,7 @@ class _VoidDialogState extends ConsumerState<_VoidDialog> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }

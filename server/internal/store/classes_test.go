@@ -65,14 +65,19 @@ func TestClassesInRange_ReportsBookingState(t *testing.T) {
 
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
 
-	// Book one class for the caller.
-	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, booked, ent, false); err != nil {
-		t.Fatalf("seed booking: %v", err)
-	}
-	// Fill the "full" class with another student.
+	// Seed bookings directly — the fixture's anchor day is fixed in calendar
+	// time, so depending on "now" these classes may already be past, which
+	// CreateBooking refuses. The booking state assertions below don't care
+	// how the rows got there.
+	f.insertBookedSeat(t, s, booked, ent)
 	otherStudent := insertOtherStudent(t, s, f.studioID)
 	otherEnt := f.insertEntitlementFor(t, s, otherStudent, "unlimited", 0)
-	if _, err := s.CreateBooking(ctx, f.studioID, otherStudent, full, otherEnt, false); err != nil {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO bookings
+		    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one,
+		     booked_by_role, cancel_cutoff_hours, status, checkin_token)
+		    VALUES (?, ?, ?, ?, ?, 0, 'student', 12, 'booked', ?)`,
+		NewID(), f.studioID, full, otherStudent, otherEnt, NewID()); err != nil {
 		t.Fatalf("seed full: %v", err)
 	}
 
@@ -106,10 +111,12 @@ func TestPastBookings_OnlyPastAndOrdersDesc(t *testing.T) {
 	future := f.insertClass(t, s, now.Add(48*time.Hour), 10)
 
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
-	for _, c := range []string{pastA, pastB, future} {
-		if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, c, ent, false); err != nil {
-			t.Fatalf("book %s: %v", c, err)
-		}
+	// Seed past bookings directly (CreateBooking refuses past classes);
+	// the future one still goes through the real path.
+	f.insertBookedSeat(t, s, pastA, ent)
+	f.insertBookedSeat(t, s, pastB, ent)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, future, ent, false, ""); err != nil {
+		t.Fatalf("book %s: %v", future, err)
 	}
 
 	rows, err := s.PastBookings(ctx, f.studentID)
@@ -136,18 +143,12 @@ func TestPastBookings_IncludesCancelledAndAttended(t *testing.T) {
 	attended := f.insertClass(t, s, now.Add(-24*time.Hour), 10)
 
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
-	cBookingID, err := s.CreateBooking(ctx, f.studioID, f.studentID, cancelled, ent, false)
-	if err != nil {
-		t.Fatalf("book cancelled: %v", err)
-	}
-	if err := s.CancelBooking(ctx, f.studentID, cBookingID); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
-	aBookingID, err := s.CreateBooking(ctx, f.studioID, f.studentID, attended, ent, false)
-	if err != nil {
-		t.Fatalf("book attended: %v", err)
-	}
-	if err := s.MarkAttendance(ctx, aBookingID, "attended", "manual"); err != nil {
+	// Seed both rows in their terminal states directly. CreateBooking and
+	// CancelBooking both refuse past classes (the "doors closed" gate), so
+	// for historical fixtures we mint the final state in SQL.
+	cBookingID := f.insertCancelledLateSeat(t, s, cancelled, ent)
+	aBookingID := f.insertBookedSeat(t, s, attended, ent)
+	if err := s.MarkAttendance(ctx, "actor-test", aBookingID, "attended", "manual"); err != nil {
 		t.Fatalf("mark attended: %v", err)
 	}
 
@@ -164,6 +165,27 @@ func TestPastBookings_IncludesCancelledAndAttended(t *testing.T) {
 	}
 	if statuses[attended] != "attended" {
 		t.Errorf("attended status: got %q want attended", statuses[attended])
+	}
+
+	// Outcome column should be written for both: late_burned on the cancel
+	// (cutoff already past) and NULL on the attended one (no terminal
+	// outcome for a present row).
+	var cancOutcome, attOutcome string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(outcome,'') FROM bookings WHERE id = ?`, cBookingID,
+	).Scan(&cancOutcome); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(outcome,'') FROM bookings WHERE id = ?`, aBookingID,
+	).Scan(&attOutcome); err != nil {
+		t.Fatal(err)
+	}
+	if cancOutcome != "cancelled_late_burned" {
+		t.Errorf("cancelled outcome: got %q want cancelled_late_burned", cancOutcome)
+	}
+	if attOutcome != "" {
+		t.Errorf("attended outcome should be NULL, got %q", attOutcome)
 	}
 }
 

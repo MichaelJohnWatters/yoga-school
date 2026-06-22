@@ -24,6 +24,30 @@ class AuthService {
     );
   }
 
+  /// Create a Firebase Auth account and stamp the display name on it so
+  /// the server's /me handler can read it from the token's `name` claim
+  /// when it auto-provisions the student row. The auth-state stream fires
+  /// on success and the rest of the bootstrap takes over.
+  Future<UserCredential> createAccount({
+    required String email,
+    required String password,
+    required String fullName,
+  }) async {
+    final cred = await _auth.createUserWithEmailAndPassword(
+      email: email.trim(),
+      password: password,
+    );
+    final name = fullName.trim();
+    if (name.isNotEmpty) {
+      await cred.user?.updateDisplayName(name);
+      // updateDisplayName mutates the local user but the ID token still
+      // carries the old (empty) name claim until refresh — force one so
+      // the very first /me request after sign-up sees the new name.
+      await cred.user?.getIdToken(true);
+    }
+    return cred;
+  }
+
   Future<void> signOut() => _auth.signOut();
 
   /// Fetch a fresh ID token. Used by the Dio interceptor for every request.

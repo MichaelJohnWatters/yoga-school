@@ -6,29 +6,44 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
+import '../widgets/polling.dart';
 import '../widgets/yoga_primitives.dart';
+import 'achievements_screen.dart';
 
 final upcomingBookingsProvider =
-    FutureProvider.autoDispose<List<UpcomingBooking>>((ref) async {
+    // Session-scoped — see notification provider notes. Home is the
+    // landing tab; its upcoming-bookings list should snap in from cache
+    // and refresh silently rather than spinner-flashing every visit.
+    FutureProvider<List<UpcomingBooking>>((ref) async {
   return ref.watch(apiClientProvider).upcomingBookings();
 });
 
 class HomeScreen extends ConsumerWidget {
   final Me me;
   final StudioConfig studio;
-  const HomeScreen({super.key, required this.me, required this.studio});
+  final VoidCallback? onTapProfile;
+  const HomeScreen({
+    super.key,
+    required this.me,
+    required this.studio,
+    this.onTapProfile,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final upcoming = ref.watch(upcomingBookingsProvider);
-    return RefreshIndicator(
+    return PollingRefresh(
+      surface: PollingSurface.upcomingBookings,
+      onPoll: () => ref.invalidate(upcomingBookingsProvider),
+      child: RefreshIndicator(
       onRefresh: () async => ref.invalidate(upcomingBookingsProvider),
       child: ListView(
         padding: const EdgeInsets.only(top: 16, bottom: 24),
         children: [
-          _Header(me: me, studio: studio),
+          _Header(me: me, studio: studio, onTapProfile: onTapProfile),
           const SizedBox(height: 16),
           const _PromoBanner(),
           const SizedBox(height: 20),
@@ -46,7 +61,7 @@ class HomeScreen extends ConsumerWidget {
             ),
             error: (e, _) => Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text("Can't load bookings: $e"),
+              child: Text("Can't load bookings: ${ApiError.fromAny(e).message}"),
             ),
           ),
           const SizedBox(height: 18),
@@ -62,6 +77,7 @@ class HomeScreen extends ConsumerWidget {
           const _MilestonesStrip(),
         ],
       ),
+    ),
     );
   }
 }
@@ -125,7 +141,12 @@ class _NoUpcomingCard extends StatelessWidget {
 class _Header extends StatelessWidget {
   final Me me;
   final StudioConfig studio;
-  const _Header({required this.me, required this.studio});
+  final VoidCallback? onTapProfile;
+  const _Header({
+    required this.me,
+    required this.studio,
+    this.onTapProfile,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -135,24 +156,11 @@ class _Header extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const YLogo(),
-              const SizedBox(width: 10),
-              Text(
-                studio.name.toUpperCase(),
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.6,
-                  color: y.muted,
-                ),
-              ),
-              const Spacer(),
-              _BellButton(unread: true),
-              const SizedBox(width: 10),
-              YAvatar(name: me.fullName, size: 38, tone: YAvatarTone.accent, photoUrl: me.photoUrl),
-            ],
+          YStudioTopBar(
+            studioName: studio.name,
+            userFullName: me.fullName,
+            userPhotoUrl: me.photoUrl,
+            onAvatarTap: onTapProfile,
           ),
           const SizedBox(height: 18),
           Text(
@@ -185,43 +193,6 @@ class _Header extends StatelessWidget {
                   'July', 'August', 'September', 'October', 'November', 'December'];
     final d = DateTime.now();
     return '${dow[d.weekday - 1]} ${d.day} ${mon[d.month - 1]}';
-  }
-}
-
-class _BellButton extends StatelessWidget {
-  final bool unread;
-  const _BellButton({required this.unread});
-
-  @override
-  Widget build(BuildContext context) {
-    final y = context.yoga;
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: y.borderStrong),
-          ),
-          child: Icon(Icons.notifications_none_rounded, size: 20, color: y.text),
-        ),
-        if (unread)
-          Positioned(
-            top: 7,
-            right: 8,
-            child: Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(
-                color: y.accent,
-                shape: BoxShape.circle,
-              ),
-            ),
-          ),
-      ],
-    );
   }
 }
 
@@ -464,39 +435,80 @@ class _WeekRailCard extends StatelessWidget {
   }
 }
 
-class _MilestonesStrip extends StatelessWidget {
+final achievementsProvider = FutureProvider<List<Achievement>>((ref) async {
+  return ref.watch(apiClientProvider).myAchievements();
+});
+
+/// Cosmetic strip on Home that surfaces the latest badge. Per the spec
+/// achievements are intentionally secondary, not a hero — when the user
+/// has none yet the strip is hidden entirely rather than showing an
+/// awkward "no achievements" placeholder.
+class _MilestonesStrip extends ConsumerWidget {
   const _MilestonesStrip();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
+    final ach = ref.watch(achievementsProvider);
+    // Empty / loading / error all collapse to "render nothing" — the strip
+    // is cosmetic, so any failure stays silent rather than nagging the
+    // student with a "couldn't load badges" complaint on Home.
+    // Full catalogue from the server — filter to actually-earned for the
+    // strip's "latest" headline.
+    final all = ach.asData?.value ?? const <Achievement>[];
+    final earned = all.where((a) => a.isEarned).toList();
+    if (earned.isEmpty) return const SizedBox.shrink();
+
+    // Latest is what the strip leads with. Achievements come back in
+    // catalogue order, not earned-recency order — sort here so a fresh
+    // grant always shows.
+    final sorted = [...earned]
+      ..sort((a, b) => b.earnedAt!.compareTo(a.earnedAt!));
+    final latest = sorted.first;
+    final tail = earned.length == 1
+        ? 'First badge earned'
+        : '${earned.length} badges · latest';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(y.radiusCard),
-          border: Border.all(color: y.borderStrong, style: BorderStyle.solid),
-          // Dashed isn't built into Border; the design calls for dashed. We
-          // approximate with a solid strong border for now and revisit once
-          // it matters in side-by-side review.
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.star_border_rounded, size: 16, color: y.accent),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                '24 classes · 3-week streak',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: y.muted,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => const AchievementsScreen(),
+        )),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(y.radiusCard),
+            border: Border.all(color: y.borderStrong, style: BorderStyle.solid),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.star_border_rounded, size: 16, color: y.accent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: RichText(
+                  text: TextSpan(
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: y.muted,
+                    ),
+                    children: [
+                      TextSpan(text: '$tail · '),
+                      TextSpan(
+                        text: latest.title,
+                        style: TextStyle(
+                          color: y.text,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-            Icon(Icons.chevron_right, size: 14, color: y.muted),
-          ],
+              Icon(Icons.chevron_right, size: 14, color: y.muted),
+            ],
+          ),
         ),
       ),
     );

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // ClassTemplateInput is the body for POST /admin/class-templates.
@@ -42,9 +40,9 @@ func (s *Store) CreateClassTemplateWithAudit(ctx context.Context, studioID, acto
 		return nil, err
 	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "template_create", "class_template", r.ID, map[string]any{
-		"title":              in.Title,
-		"weeks":              in.Weeks,
-		"generated_classes":  len(r.GeneratedClassIDs),
+		"title":             in.Title,
+		"weeks":             in.Weeks,
+		"generated_classes": len(r.GeneratedClassIDs),
 	})
 	return r, nil
 }
@@ -100,7 +98,7 @@ func (s *Store) CreateClassTemplate(ctx context.Context, studioID, actorID strin
 	}
 	defer tx.Rollback()
 
-	templateID := uuid.NewString()
+	templateID := NewID()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO class_templates
 		    (id, studio_id, created_by, title, class_type_id, instructor_id,
@@ -127,7 +125,7 @@ func (s *Store) CreateClassTemplate(ctx context.Context, studioID, actorID strin
 	for w := 0; w < in.Weeks; w++ {
 		start := firstSession.AddDate(0, 0, w*7).UTC()
 		end := start.Add(time.Duration(in.DurationMins) * time.Minute)
-		classID := uuid.NewString()
+		classID := NewID()
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO classes
 			    (id, studio_id, class_type_id, instructor_id, room_id,
@@ -189,10 +187,10 @@ func (s *Store) ListClassTemplates(ctx context.Context, studioID string) ([]Clas
 
 // UndoTemplateResult sums up what the undo did, per class.
 type UndoTemplateResult struct {
-	Status         string              `json:"status"`
-	TotalClasses   int                 `json:"total_classes"`
-	CancelResults  []CancelClassResult `json:"cancel_results"`
-	Summary        CancelClassResult   `json:"summary"`
+	Status        string              `json:"status"`
+	TotalClasses  int                 `json:"total_classes"`
+	CancelResults []CancelClassResult `json:"cancel_results"`
+	Summary       CancelClassResult   `json:"summary"`
 }
 
 // UndoClassTemplate iterates every class in the batch and calls
