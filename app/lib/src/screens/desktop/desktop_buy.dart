@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/models.dart';
+import '../../api/api_error.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import '../buy_screen.dart' show productsProvider;
@@ -16,7 +17,7 @@ class DesktopBuy extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    final products = ref.watch(productsProvider);
+    final products = ref.watch(productsProvider(null));
     return ListView(
       padding: EdgeInsets.zero,
       children: [
@@ -45,7 +46,7 @@ class DesktopBuy extends ConsumerWidget {
             padding: EdgeInsets.symmetric(vertical: 40),
             child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           ),
-          error: (e, _) => Text("Can't load products: $e"),
+          error: (e, _) => Text("Can't load products: ${ApiError.fromAny(e).message}"),
         ),
       ],
     );

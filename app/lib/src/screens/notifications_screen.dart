@@ -10,13 +10,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
+import '../widgets/polling.dart';
 import '../widgets/yoga_primitives.dart';
 
+// Session-scoped — autoDispose was producing a full-screen spinner
+// every time the user opened the bell, even though the prior list
+// was still perfectly valid. Keeping it alive means a return visit
+// renders cached items immediately and Riverpod's default
+// skipLoadingOnRefresh keeps data on screen during background
+// re-fetches triggered by markRead / invalidate.
 final notificationsProvider =
-    FutureProvider.autoDispose<List<NotificationItem>>((ref) async {
+    FutureProvider<List<NotificationItem>>((ref) async {
   return ref.watch(apiClientProvider).notificationsFeed();
+});
+
+/// Derived count of unread notifications. Returns 0 while the feed is
+/// loading or errored so the bell badge stays empty rather than
+/// flickering when the user opens the app. Auto-recomputes whenever the
+/// feed provider invalidates (mark-read, polling tick, etc.).
+final unreadNotificationCountProvider = Provider<int>((ref) {
+  final feed = ref.watch(notificationsProvider);
+  final list = feed.asData?.value ?? const <NotificationItem>[];
+  return list.where((n) => n.unread).length;
 });
 
 class NotificationsScreen extends ConsumerWidget {
@@ -26,17 +44,21 @@ class NotificationsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
     final feed = ref.watch(notificationsProvider);
-    return Scaffold(
-      backgroundColor: y.background,
-      body: SafeArea(
-        child: feed.when(
-          data: (items) => _Body(items: items, onAnyRead: () {
-            ref.invalidate(notificationsProvider);
-          }),
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(
-            child: Text("Can't load feed: $e",
-                style: TextStyle(color: y.muted)),
+    return PollingRefresh(
+      surface: PollingSurface.notifications,
+      onPoll: () => ref.invalidate(notificationsProvider),
+      child: Scaffold(
+        backgroundColor: y.background,
+        body: SafeArea(
+          child: feed.when(
+            data: (items) => _Body(items: items, onAnyRead: () {
+              ref.invalidate(notificationsProvider);
+            }),
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) => Center(
+              child: Text("Can't load feed: ${ApiError.fromAny(e).message}",
+                  style: TextStyle(color: y.muted)),
+            ),
           ),
         ),
       ),

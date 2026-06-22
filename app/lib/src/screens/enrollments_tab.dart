@@ -5,13 +5,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
 import 'enroll_sheet.dart';
 
 final enrollmentsProvider =
-    FutureProvider.autoDispose<List<EnrollmentSummary>>((ref) async {
+    FutureProvider<List<EnrollmentSummary>>((ref) async {
   return ref.watch(apiClientProvider).listEnrollments();
 });
 
@@ -21,20 +22,23 @@ class EnrollmentsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final data = ref.watch(enrollmentsProvider);
-    return data.when(
-      data: (list) => list.isEmpty
-          ? const _Empty()
-          : _List(items: list, onReload: () {
-              ref.invalidate(enrollmentsProvider);
-            }),
-      loading: () =>
-          const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-      error: (e, _) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Text(
-            "Can't load enrollments: $e",
-            style: TextStyle(color: context.yoga.muted),
+    return RefreshOnMount(
+      onMount: () => ref.invalidate(enrollmentsProvider),
+      child: data.when(
+        data: (list) => list.isEmpty
+            ? const _Empty()
+            : _List(items: list, onReload: () {
+                ref.invalidate(enrollmentsProvider);
+              }),
+        loading: () =>
+            const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        error: (e, _) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Text(
+              "Can't load enrollments: ${ApiError.fromAny(e).message}",
+              style: TextStyle(color: context.yoga.muted),
+            ),
           ),
         ),
       ),

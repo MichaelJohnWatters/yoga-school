@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestListAdminStaff_IncludesInstructorAndExcludesStudents(t *testing.T) {
@@ -138,6 +139,60 @@ func TestUpdateStaff_NotFoundForStudent(t *testing.T) {
 	})
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("update student via staff endpoint: got %v want ErrNotFound", err)
+	}
+}
+
+// TestInstructorPayRate_OverridesDefaultInReport verifies the per-instructor
+// rate from the users table flows all the way into the report payload, and
+// that the fallback default applies when the column is NULL.
+func TestInstructorPayRate_OverridesDefaultInReport(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+
+	// Custom rate of £42/class on the fixture instructor.
+	custom := 4200
+	if err := s.UpdateStaff(ctx, f.studioID, f.instructorID, f.instructorID, StaffInput{
+		Role: "instructor", Email: "inst@test.com", FullName: "Inst",
+		PayRateMinor: &custom,
+	}); err != nil {
+		t.Fatalf("UpdateStaff: %v", err)
+	}
+
+	// Plant one past class taught by this instructor in the current month.
+	classID := NewID()
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	end := start.Add(1 * time.Hour)
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO classes
+		    (id, studio_id, class_type_id, instructor_id, room_id, title,
+		     starts_at, ends_at, capacity, status)
+		    VALUES (?, ?, ?, ?, ?, 'Past', ?, ?, 10, 'scheduled')`,
+		classID, f.studioID, f.classTypeID, f.instructorID, f.roomID,
+		start.Format(time.RFC3339), end.Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := s.AdminReportsFor(ctx, f.studioID)
+	if err != nil {
+		t.Fatalf("reports: %v", err)
+	}
+	var got *ReportInstructorPay
+	for i := range rep.InstructorPay {
+		if rep.InstructorPay[i].InstructorID == f.instructorID {
+			got = &rep.InstructorPay[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("instructor missing from report: %+v", rep.InstructorPay)
+	}
+	if got.RateMinor != custom {
+		t.Errorf("rate_minor: got %d want %d (per-instructor override)", got.RateMinor, custom)
+	}
+	if got.ClassesTaught == 0 || got.PayMinor != got.ClassesTaught*custom {
+		t.Errorf("pay calc: %+v (custom rate %d)", *got, custom)
 	}
 }
 

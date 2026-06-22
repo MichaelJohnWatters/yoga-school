@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +45,18 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 
+	// Dev-only test reset endpoint. Lets integration tests wipe
+	// non-seed bookings/purchases/etc. between scenarios so each test
+	// starts from a clean baseline without restarting the server. Gated
+	// by the presence of FIREBASE_AUTH_EMULATOR_HOST — when we're talking
+	// to the real Firebase, this route refuses with 404. Unauthenticated
+	// on purpose: tests don't carry a token before they've signed in.
+	r.Post("/dev/reset-test-state", s.handleDevResetTestState)
+	// Companion to reset — fills a target class to capacity by booking
+	// in eligible seed students. Used by the join-waitlist test to
+	// guarantee the under-test student lands on a full class.
+	r.Post("/dev/fill-class", s.handleDevFillClass)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.auth)
 		// Staff routes — instructor + manager + owner. Read-only schedule
@@ -71,11 +87,25 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/admin/dashboard", s.handleAdminDashboard)
 			r.Get("/admin/audit", s.handleAdminAudit)
 			r.Get("/admin/reports", s.handleAdminReports)
+			r.Get("/admin/reports/revenue", s.handleAdminReportRevenue)
+			r.Get("/admin/reports/attendance", s.handleAdminReportAttendance)
+			r.Get("/admin/reports/instructor-pay", s.handleAdminReportInstructorPay)
+			r.Get("/admin/reports/customers", s.handleAdminReportCustomers)
+			r.Get("/admin/reports/builder/schema", s.handleAdminBuilderSchema)
+			r.Post("/admin/reports/builder/run", s.handleAdminBuilderRun)
 			r.Get("/admin/themes", s.handleListThemes)
 			r.Post("/admin/themes", s.handleCreateTheme)
 			r.Patch("/admin/themes/{id}", s.handleUpdateTheme)
 			r.Post("/admin/themes/{id}/activate", s.handleActivateTheme)
+			// Rooms management. Read sits on the staff group (above) so
+			// instructors can see the list when teaching; create/rename/
+			// delete are manager-only — same shape as themes.
+			r.Post("/admin/rooms", s.handleAdminCreateRoom)
+			r.Patch("/admin/rooms/{id}", s.handleAdminUpdateRoom)
+			r.Delete("/admin/rooms/{id}", s.handleAdminDeleteRoom)
 			r.Patch("/admin/studio/config", s.handleUpdateStudioConfig)
+			r.Get("/admin/studio/stripe-credentials", s.handleGetStripeCredentials)
+			r.Patch("/admin/studio/stripe-credentials", s.handleUpdateStripeCredentials)
 			r.Get("/admin/products", s.handleAdminListProducts)
 			r.Post("/admin/products", s.handleAdminCreateProduct)
 			r.Patch("/admin/products/{id}", s.handleAdminUpdateProduct)
@@ -93,6 +123,10 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/students/{id}/entitlements/{eid}/adjust",
 				s.handleAdminAdjustCredits)
 			r.Post("/admin/entitlements/{id}/void", s.handleAdminVoidEntitlement)
+			// UK GDPR data-subject rights (manager-only — these surface or
+			// destroy a person's full record, beyond an instructor's remit).
+			r.Get("/admin/students/{id}/export", s.handleAdminExportStudent)
+			r.Delete("/admin/students/{id}", s.handleAdminEraseStudent)
 			r.Get("/admin/staff", s.handleAdminListStaff)
 			r.Post("/admin/staff", s.handleAdminCreateStaff)
 			r.Patch("/admin/staff/{id}", s.handleAdminUpdateStaff)
@@ -100,6 +134,17 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/promotions", s.handleAdminCreatePromotion)
 			r.Patch("/admin/promotions/{id}", s.handleAdminUpdatePromotion)
 			r.Delete("/admin/promotions/{id}", s.handleAdminArchivePromotion)
+			r.Get("/admin/discounts", s.handleAdminListDiscounts)
+			r.Post("/admin/discounts", s.handleAdminCreateDiscount)
+			r.Delete("/admin/discounts/{id}", s.handleAdminArchiveDiscount)
+			r.Post("/admin/purchases/{id}/refund", s.handleAdminRefundPurchase)
+			// Manager-initiated bookings: add a student to a class on
+			// their behalf, or remove an existing booking with an
+			// explicit refund / consume choice.
+			r.Post("/admin/classes/{id}/bookings", s.handleAdminCreateBooking)
+			r.Get("/admin/classes/{id}/eligible-entitlements",
+				s.handleAdminEligibleEntitlements)
+			r.Post("/admin/bookings/{id}/cancel", s.handleAdminCancelBooking)
 		})
 		r.Get("/me", s.handleMe)
 		r.Get("/studio/config", s.handleStudioConfig)
@@ -111,19 +156,44 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/enrollments/{id}/join", s.handleJoinEnrollment)
 		r.Get("/bookings", s.handleListBookings)
 		r.Post("/bookings", s.handleCreateBooking)
+		r.Get("/bookings/preview", s.handleBookingPreview)
 		r.Delete("/bookings/{id}", s.handleCancelBooking)
+		r.Get("/bookings/{id}/cancel-preview", s.handleCancelPreview)
 		r.Get("/products", s.handleListProducts)
 		r.Get("/products/{id}", s.handleProductDetail)
 		r.Post("/purchases", s.handleCreatePurchase)
+		r.Post("/purchases/{id}/confirm", s.handleConfirmPurchase)
 		r.Get("/purchases", s.handleListPurchases)
 		r.Get("/me/entitlements", s.handleMyEntitlements)
 		r.Get("/me/attendance", s.handleMyAttendance)
 		r.Get("/me/checkin-code", s.handleCheckInCode)
+		r.Get("/me/achievements", s.handleMyAchievements)
+		r.Get("/me/notifications", s.handleGetNotificationPrefs)
+		r.Patch("/me/notifications", s.handleUpdateNotificationPrefs)
+		r.Patch("/me/prefs", s.handleUpdateMyPrefs)
+		r.Post("/me/devices", s.handleRegisterDevice)
 		r.Get("/me/notifications/feed", s.handleNotificationsFeed)
 		r.Post("/me/notifications/{id}/read", s.handleMarkNotificationRead)
 		r.Post("/me/notifications/read-all", s.handleMarkAllNotificationsRead)
 		r.Post("/classes/{id}/waitlist", s.handleJoinWaitlist)
+		r.Delete("/classes/{id}/waitlist", s.handleLeaveWaitlist)
 		r.Get("/promotions", s.handleListPromotions)
+
+		// Chat. Reading + posting + managing your own messages is open to
+		// any authenticated member — the conversation_members ACL (enforced
+		// in the store) is the real gate, not the role. Starting a new
+		// conversation (group or dm) is staff-only: students never initiate.
+		r.Get("/conversations", s.handleListConversations)
+		r.Get("/conversations/{id}/messages", s.handleListMessages)
+		r.Post("/conversations/{id}/messages", s.handleSendMessage)
+		r.Patch("/conversations/{id}/messages/{mid}", s.handleEditMessage)
+		r.Delete("/conversations/{id}/messages/{mid}", s.handleDeleteMessage)
+		r.Post("/conversations/{id}/read", s.handleMarkConversationRead)
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireStaff)
+			r.Post("/conversations", s.handleCreateConversation)
+			r.Post("/conversations/{id}/members", s.handleAddConversationMembers)
+		})
 	})
 
 	return r
@@ -167,14 +237,34 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 		u, err := s.store.UserByEmail(r.Context(), v.Email)
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnauthorized,
-				"firebase user not provisioned in studio: "+v.Email)
-			return
-		}
-		if err != nil {
+			// First sign-in for a Firebase identity we haven't seen before:
+			// auto-create the student row in the (single) studio. Matches the
+			// spec's Splash "onboarding" flow.
+			u, err = s.store.ProvisionStudentFromFirebase(
+				r.Context(), v.UID, v.Email, v.FullName, v.PhotoURL,
+			)
+			if errors.Is(err, store.ErrMultipleStudios) {
+				writeError(w, http.StatusUnauthorized,
+					"cannot auto-provision: multiple studios — please use your studio's invite link")
+				return
+			}
+			if err != nil {
+				log.Printf("provision: %v", err)
+				writeError(w, http.StatusInternalServerError, "auth error")
+				return
+			}
+		} else if err != nil {
 			log.Printf("user lookup: %v", err)
 			writeError(w, http.StatusInternalServerError, "auth error")
 			return
+		} else {
+			// Existing row: best-effort backfill of firebase_uid for users
+			// that were pre-seeded without one (or whose UID rotated, e.g.
+			// emulator restarts in dev). Failure isn't fatal — the next
+			// request just retries.
+			if err := s.store.LinkFirebaseUID(r.Context(), u.ID, v.UID); err != nil {
+				log.Printf("link firebase_uid: %v", err)
+			}
 		}
 		ctx := context.WithValue(r.Context(), ctxUser, u)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -269,28 +359,30 @@ func (s *Server) handleListClasses(w http.ResponseWriter, r *http.Request) {
 	fromStr := q.Get("from")
 	toStr := q.Get("to")
 
+	// All date params arrive as YYYY-MM-DD without a timezone. Parse them
+	// in the studio's TZ so "from=2026-06-15" means Sydney's June 15
+	// boundary for a Sydney studio, not UTC's.
+	loc := s.store.StudioLocation(r.Context(), u.StudioID)
 	var (
 		rows []store.ClassRow
 		err  error
 	)
 	switch {
 	case dateStr != "":
-		day, perr := time.Parse("2006-01-02", dateStr)
+		day, perr := time.ParseInLocation("2006-01-02", dateStr, loc)
 		if perr != nil {
 			writeError(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
 			return
 		}
 		rows, err = s.store.ClassesForDay(r.Context(), u.StudioID, u.ID, day)
 	case fromStr != "" && toStr != "":
-		from, errA := time.Parse("2006-01-02", fromStr)
-		to, errB := time.Parse("2006-01-02", toStr)
+		from, errA := time.ParseInLocation("2006-01-02", fromStr, loc)
+		to, errB := time.ParseInLocation("2006-01-02", toStr, loc)
 		if errA != nil || errB != nil {
 			writeError(w, http.StatusBadRequest, "from + to must be YYYY-MM-DD")
 			return
 		}
-		fromUTC := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
-		toUTC := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
-		rows, err = s.store.ClassesInRange(r.Context(), u.StudioID, u.ID, fromUTC, toUTC)
+		rows, err = s.store.ClassesInRange(r.Context(), u.StudioID, u.ID, from, to)
 	default:
 		writeError(w, http.StatusBadRequest, "date or from+to query params required")
 		return
@@ -336,6 +428,7 @@ func (s *Server) handleEnrollmentDetail(w http.ResponseWriter, r *http.Request) 
 
 type joinEnrollmentReq struct {
 	PaymentMethod string `json:"payment_method"`
+	DiscountCode  string `json:"discount_code,omitempty"`
 }
 
 func (s *Server) handleJoinEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -346,13 +439,9 @@ func (s *Server) handleJoinEnrollment(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "dev_stub"
 	}
-	bookingID, err := s.store.JoinEnrollment(r.Context(), u.StudioID, u.ID, id, req.PaymentMethod)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "enrollment not found")
-		return
-	}
+	bookingID, err := s.store.JoinEnrollment(r.Context(), u.StudioID, u.ID, id, req.PaymentMethod, req.DiscountCode)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		respondErr(w, err, "joinEnrollment")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{
@@ -405,6 +494,7 @@ type createBookingReq struct {
 	ClassID       string `json:"class_id"`
 	EntitlementID string `json:"entitlement_id"`
 	PlusOne       bool   `json:"plus_one"`
+	PlusOneName   string `json:"plus_one_name"`
 }
 
 func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
@@ -418,15 +508,9 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "class_id and entitlement_id are required")
 		return
 	}
-	id, err := s.store.CreateBooking(r.Context(), u.StudioID, u.ID, req.ClassID, req.EntitlementID, req.PlusOne)
-	var be *store.BookingError
-	if errors.As(err, &be) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": be.Message, "code": be.Code})
-		return
-	}
+	id, err := s.store.CreateBooking(r.Context(), u.StudioID, u.ID, req.ClassID, req.EntitlementID, req.PlusOne, req.PlusOneName)
 	if err != nil {
-		log.Printf("create booking: %v", err)
-		writeError(w, http.StatusInternalServerError, "create booking error")
+		respondErr(w, err, "createBooking")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -440,12 +524,56 @@ func (s *Server) handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "booking not found or already cancelled")
 		return
 	}
+	if errors.Is(err, store.ErrClassStarted) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "Class has already started",
+			"code":  "class_already_started",
+		})
+		return
+	}
 	if err != nil {
 		log.Printf("cancel booking: %v", err)
 		writeError(w, http.StatusInternalServerError, "cancel error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCancelPreview(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	out, err := s.store.CancelPreview(r.Context(), u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "booking not found or already cancelled")
+		return
+	}
+	if err != nil {
+		log.Printf("cancel preview: %v", err)
+		writeError(w, http.StatusInternalServerError, "cancel preview error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleBookingPreview(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	entitlementID := strings.TrimSpace(r.URL.Query().Get("entitlement_id"))
+	if classID == "" || entitlementID == "" {
+		writeError(w, http.StatusBadRequest, "class_id and entitlement_id are required")
+		return
+	}
+	out, err := s.store.BookingPreview(r.Context(), u.StudioID, u.ID, classID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "class not found")
+		return
+	}
+	if err != nil {
+		log.Printf("booking preview: %v", err)
+		writeError(w, http.StatusInternalServerError, "booking preview error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleClassDetail(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +610,10 @@ func (s *Server) handleProductDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListProducts(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	rows, err := s.store.ListProducts(r.Context(), u.StudioID)
+	// Optional class-type filter so the "buy a pass for this class" picker
+	// shows only passes that cover it. Empty = list everything.
+	coversClassType := r.URL.Query().Get("covers_class_type")
+	rows, err := s.store.ListProducts(r.Context(), u.StudioID, coversClassType)
 	if err != nil {
 		log.Printf("list products: %v", err)
 		writeError(w, http.StatusInternalServerError, "list products error")
@@ -494,6 +625,10 @@ func (s *Server) handleListProducts(w http.ResponseWriter, r *http.Request) {
 type createPurchaseReq struct {
 	ProductID     string `json:"product_id"`
 	PaymentMethod string `json:"payment_method"` // 'card' | 'cash' | 'dev_stub'
+	// Optional. When set, server validates + applies the discount in the
+	// same tx as the purchase insert and stores discount_minor + discount_id
+	// on the resulting row.
+	DiscountCode string `json:"discount_code,omitempty"`
 }
 
 func (s *Server) handleListPurchases(w http.ResponseWriter, r *http.Request) {
@@ -546,6 +681,63 @@ func (s *Server) handleCheckInCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	out, err := s.store.MyNotificationPrefs(r.Context(), u.ID)
+	if err != nil {
+		log.Printf("notification prefs: %v", err)
+		writeError(w, http.StatusInternalServerError, "prefs error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateNotificationPrefs(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var p store.NotificationPrefsPatch
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	out, err := s.store.UpdateNotificationPrefs(r.Context(), u.ID, p)
+	if err != nil {
+		log.Printf("update notification prefs: %v", err)
+		writeError(w, http.StatusInternalServerError, "prefs error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleMyAchievements(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	out, err := s.store.MyAchievements(r.Context(), u.ID)
+	if err != nil {
+		log.Printf("achievements: %v", err)
+		writeError(w, http.StatusInternalServerError, "achievements error")
+		return
+	}
+	// Always return an array (never null) so the Flutter side can render
+	// the strip without a nil-guard.
+	if out == nil {
+		out = []store.Achievement{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var in store.RegisterDeviceInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := s.store.RegisterDevice(r.Context(), u.ID, in); err != nil {
+		respondValidation(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleNotificationsFeed(w http.ResponseWriter, r *http.Request) {
@@ -605,8 +797,9 @@ func (s *Server) handleAdminClasses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "from + to query params required (YYYY-MM-DD)")
 		return
 	}
-	from, errA := time.Parse("2006-01-02", fromStr)
-	to, errB := time.Parse("2006-01-02", toStr)
+	loc := s.store.StudioLocation(r.Context(), u.StudioID)
+	from, errA := time.ParseInLocation("2006-01-02", fromStr, loc)
+	to, errB := time.ParseInLocation("2006-01-02", toStr, loc)
 	if errA != nil || errB != nil {
 		writeError(w, http.StatusBadRequest, "dates must be YYYY-MM-DD")
 		return
@@ -642,6 +835,7 @@ type markAttendanceReq struct {
 }
 
 func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
 	bookingID := chi.URLParam(r, "id")
 	var req markAttendanceReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -657,14 +851,14 @@ func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request) {
 	if via == "" {
 		via = "manual"
 	}
-	err := s.store.MarkAttendance(r.Context(), bookingID, status, via)
+	err := s.store.MarkAttendance(r.Context(), u.ID, bookingID, status, via)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "booking not found")
 		return
 	}
 	if err != nil {
 		log.Printf("mark attendance: %v", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -673,20 +867,94 @@ func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePromoteWaitlist(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	classID := chi.URLParam(r, "id")
-	out, err := s.store.PromoteWaitlist(r.Context(), u.StudioID, classID)
-	var be *store.BookingError
-	if errors.As(err, &be) {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": be.Message, "code": be.Code,
-		})
-		return
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "class not found")
-		return
-	}
+	out, err := s.store.PromoteWaitlist(r.Context(), u.StudioID, u.ID, classID)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		respondErr(w, err, "promoteWaitlist")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// adminBookingReq is the POST /admin/classes/{id}/bookings body.
+// entitlement_id is required — manager picks from the student's
+// eligible passes via GET …/eligible-entitlements?user_id=… first.
+type adminBookingReq struct {
+	UserID        string `json:"user_id"`
+	EntitlementID string `json:"entitlement_id"`
+	PlusOne       bool   `json:"plus_one,omitempty"`
+	PlusOneName   string `json:"plus_one_name,omitempty"`
+}
+
+func (s *Server) handleAdminCreateBooking(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := chi.URLParam(r, "id")
+	var req adminBookingReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.UserID == "" || req.EntitlementID == "" {
+		writeError(w, http.StatusBadRequest, "user_id and entitlement_id are required")
+		return
+	}
+	out, err := s.store.CreateAdminBooking(r.Context(), u.StudioID, u.ID, classID,
+		req.UserID, req.EntitlementID, req.PlusOne, req.PlusOneName)
+	if err != nil {
+		respondErr(w, err, "createAdminBooking")
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// handleAdminEligibleEntitlements lists a target student's active passes
+// that cover the class. Mirrors the student-self endpoint at
+// GET /classes/{id}/eligible-entitlements but takes user_id as a query
+// param so the manager picker can show the right list per student.
+func (s *Server) handleAdminEligibleEntitlements(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := chi.URLParam(r, "id")
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id query param is required")
+		return
+	}
+	rows, err := s.store.EligibleEntitlements(r.Context(), u.StudioID, userID, classID)
+	if err != nil {
+		log.Printf("admin eligible entitlements: %v", err)
+		writeError(w, http.StatusInternalServerError, "eligibility error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// adminCancelBookingReq is the POST /admin/bookings/{id}/cancel body.
+// refund_credit defaults to true — the explicit field is so the manager
+// can flip to false (e.g. courtesy cancel for a no-show) without
+// changing the route.
+type adminCancelBookingReq struct {
+	RefundCredit *bool  `json:"refund_credit,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+func (s *Server) handleAdminCancelBooking(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	bookingID := chi.URLParam(r, "id")
+	var req adminCancelBookingReq
+	// Empty body is allowed — defaults to refund=true.
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+	}
+	refund := true
+	if req.RefundCredit != nil {
+		refund = *req.RefundCredit
+	}
+	out, err := s.store.CancelAdminBooking(r.Context(), u.StudioID, u.ID,
+		bookingID, refund, req.Reason)
+	if err != nil {
+		respondErr(w, err, "cancelAdminBooking")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -703,6 +971,23 @@ func (s *Server) handleListThemes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
+// writeContrastError shapes a ContrastError into the structured 400 the
+// Flutter theme editor needs to highlight the failing colour pair inline.
+func writeContrastError(w http.ResponseWriter, err error) bool {
+	var ce *store.ContrastError
+	if !errors.As(err, &ce) {
+		return false
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"code":          "contrast_too_low",
+		"error":         ce.Error(),
+		"pair":          ce.Pair,
+		"ratio":         ce.Ratio,
+		"minimum_ratio": ce.Wanted,
+	})
+	return true
+}
+
 func (s *Server) handleCreateTheme(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var in store.ThemeInput
@@ -714,7 +999,10 @@ func (s *Server) handleCreateTheme(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	id, err := s.store.CreateTheme(r.Context(), u.StudioID, in)
+	id, err := s.store.CreateTheme(r.Context(), u.StudioID, u.ID, in)
+	if writeContrastError(w, err) {
+		return
+	}
 	if err != nil {
 		log.Printf("create theme: %v", err)
 		writeError(w, http.StatusInternalServerError, "create theme error")
@@ -731,14 +1019,17 @@ func (s *Server) handleUpdateTheme(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	err := s.store.UpdateTheme(r.Context(), u.StudioID, themeID, p)
+	err := s.store.UpdateTheme(r.Context(), u.StudioID, u.ID, themeID, p)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "theme not found")
 		return
 	}
+	if writeContrastError(w, err) {
+		return
+	}
 	if err != nil {
 		log.Printf("update theme: %v", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -747,15 +1038,48 @@ func (s *Server) handleUpdateTheme(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleActivateTheme(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	themeID := chi.URLParam(r, "id")
-	err := s.store.ActivateTheme(r.Context(), u.StudioID, themeID)
+	// Slot comes from a query param so the existing route shape is
+	// preserved. Empty / unrecognised → "light" for back-compat with the
+	// pre-dark-slot client.
+	slot := r.URL.Query().Get("slot")
+	if slot == "" {
+		slot = "light"
+	}
+	err := s.store.ActivateThemeAs(r.Context(), u.StudioID, u.ID, themeID, slot)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "theme not found")
+		return
+	}
+	if errors.Is(err, store.ErrThemeModeMismatch) {
+		writeErrorCode(w, http.StatusBadRequest, "theme_mode_mismatch",
+			"This theme's mode doesn't match the slot — light themes go in the light slot and dark in the dark slot.")
 		return
 	}
 	if err != nil {
 		log.Printf("activate theme: %v", err)
 		writeError(w, http.StatusInternalServerError, "activate error")
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUpdateMyPrefs is the catch-all PATCH for non-notification user
+// prefs. Right now: theme_mode_pref. Add fields as they appear instead of
+// minting a separate route per pref.
+func (s *Server) handleUpdateMyPrefs(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body struct {
+		ThemeModePref *string `json:"theme_mode_pref"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if body.ThemeModePref != nil {
+		if err := s.store.UpdateUserThemeMode(r.Context(), u.ID, *body.ThemeModePref); err != nil {
+			respondValidation(w, err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -767,13 +1091,41 @@ func (s *Server) handleUpdateStudioConfig(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	err := s.store.UpdateStudioConfig(r.Context(), u.StudioID, p)
+	err := s.store.UpdateStudioConfig(r.Context(), u.StudioID, u.ID, p)
 	if err != nil {
 		log.Printf("update studio config: %v", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetStripeCredentials(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	out, err := s.store.StripeCredentialsFor(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("get stripe creds: %v", err)
+		writeError(w, http.StatusInternalServerError, "stripe credentials error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateStripeCredentials(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var p store.StripeCredentialsPatch
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	out, err := s.store.UpdateStripeCredentials(r.Context(), u.StudioID, u.ID, p)
+	if err != nil {
+		// Mostly user-facing validation errors ("mode must be test|live",
+		// "encryption not configured"). Surface verbatim.
+		respondValidation(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleAdminListProducts(w http.ResponseWriter, r *http.Request) {
@@ -794,9 +1146,9 @@ func (s *Server) handleAdminCreateProduct(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	id, err := s.store.CreateAdminProduct(r.Context(), u.StudioID, in)
+	id, err := s.store.CreateAdminProduct(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -810,13 +1162,13 @@ func (s *Server) handleAdminUpdateProduct(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	err := s.store.UpdateAdminProduct(r.Context(), u.StudioID, id, in)
+	err := s.store.UpdateAdminProduct(r.Context(), u.StudioID, u.ID, id, in)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "product not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -825,7 +1177,7 @@ func (s *Server) handleAdminUpdateProduct(w http.ResponseWriter, r *http.Request
 func (s *Server) handleAdminArchiveProduct(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
-	err := s.store.ArchiveProduct(r.Context(), u.StudioID, id)
+	err := s.store.ArchiveProduct(r.Context(), u.StudioID, u.ID, id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "product not found")
 		return
@@ -866,7 +1218,7 @@ func (s *Server) handleAdminCreateClassTemplate(w http.ResponseWriter, r *http.R
 	}
 	out, err := s.store.CreateClassTemplateWithAudit(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -881,7 +1233,7 @@ func (s *Server) handleAdminUndoClassTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -909,16 +1261,148 @@ func (s *Server) handleAdminListRooms(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
+func (s *Server) handleAdminCreateRoom(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	id, err := s.store.CreateRoom(r.Context(), u.StudioID, u.ID, body.Name, body.Color)
+	if err != nil {
+		// Validation + uniqueness errors are user-fixable; surface them.
+		respondValidation(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (s *Server) handleAdminUpdateRoom(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	roomID := chi.URLParam(r, "id")
+	// Pointer fields so omitted keys mean "leave that column alone".
+	// `color: ""` (present but empty) is the explicit "clear it" signal,
+	// distinct from omitting the key — store.RoomPatch handles both.
+	var body store.RoomPatch
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	err := s.store.UpdateRoom(r.Context(), u.StudioID, u.ID, roomID, body)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "room not found")
+		return
+	}
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminDeleteRoom(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	roomID := chi.URLParam(r, "id")
+	err := s.store.DeleteRoom(r.Context(), u.StudioID, u.ID, roomID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "room not found")
+		return
+	}
+	if errors.Is(err, store.ErrRoomInUse) {
+		writeErrorCode(w, http.StatusConflict, "room_in_use",
+			"This room is still used by one or more classes — move or cancel them first.")
+		return
+	}
+	if err != nil {
+		log.Printf("delete room: %v", err)
+		writeError(w, http.StatusInternalServerError, "delete error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// createClassBody is the POST /admin/classes body. The recurrence block is
+// optional — when present the server materializes N classes from a rule
+// instead of inserting the single one described by the surrounding fields.
+type createClassBody struct {
+	store.AdminClassInput
+	Recurrence *store.RecurrenceInput `json:"recurrence,omitempty"`
+}
+
 func (s *Server) handleAdminCreateClass(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	var in store.AdminClassInput
+	var in createClassBody
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	id, err := s.store.CreateAdminClassWithAudit(r.Context(), u.StudioID, u.ID, in)
+
+	// Recurring branch: build the rule + materialize.
+	if in.Recurrence != nil {
+		missing := []string{}
+		if in.ClassTypeID == nil || *in.ClassTypeID == "" {
+			missing = append(missing, "class_type_id")
+		}
+		if in.InstructorID == nil || *in.InstructorID == "" {
+			missing = append(missing, "instructor_id")
+		}
+		if in.RoomID == nil || *in.RoomID == "" {
+			missing = append(missing, "room_id")
+		}
+		if in.DurationMins == nil || *in.DurationMins <= 0 {
+			missing = append(missing, "duration_minutes")
+		}
+		if in.Capacity == nil || *in.Capacity <= 0 {
+			missing = append(missing, "capacity")
+		}
+		if in.StartsAt == nil || *in.StartsAt == "" {
+			missing = append(missing, "starts_at")
+		}
+		if in.Title == nil || strings.TrimSpace(*in.Title) == "" {
+			missing = append(missing, "title")
+		}
+		if len(missing) > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("missing fields: %v", missing))
+			return
+		}
+		anchor, err := time.Parse(time.RFC3339, *in.StartsAt)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "starts_at must be RFC3339")
+			return
+		}
+		title := strings.TrimSpace(*in.Title)
+		res, err := s.store.CreateRecurringClasses(r.Context(), u.StudioID, u.ID,
+			store.RecurrenceClassInput{
+				Title:        title,
+				ClassTypeID:  *in.ClassTypeID,
+				InstructorID: *in.InstructorID,
+				RoomID:       *in.RoomID,
+				StartHour:    anchor.Hour(),
+				StartMinute:  anchor.Minute(),
+				DurationMins: *in.DurationMins,
+				Capacity:     *in.Capacity,
+				Recurrence:   *in.Recurrence,
+			})
+		if err != nil {
+			respondValidation(w, err)
+			return
+		}
+		_ = s.store.WriteAudit(r.Context(), u.StudioID, u.ID, "rule_create",
+			"recurrence_rule", res.RuleID, map[string]any{
+				"title":     title,
+				"sessions":  len(res.GeneratedClassIDs),
+				"frequency": in.Recurrence.Frequency,
+			})
+		writeJSON(w, http.StatusCreated, res)
+		return
+	}
+
+	id, err := s.store.CreateAdminClassWithAudit(r.Context(), u.StudioID, u.ID, in.AdminClassInput)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -927,6 +1411,67 @@ func (s *Server) handleAdminCreateClass(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleAdminUpdateClass(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
+	scope := r.URL.Query().Get("scope") // "" | this | future | all
+
+	// If a scope is given (or the row is rule-backed), route through the
+	// scoped path so future / all edits cascade. Decoded as the scoped
+	// patch shape, which is a superset of the single-class one minus the
+	// starts_at-on-bulk restriction (the store enforces that).
+	if scope != "" {
+		var in store.ScopedPatchInput
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		out, err := s.store.PatchClassScoped(r.Context(), u.StudioID, id, scope, in)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "class not found")
+			return
+		}
+		if err != nil {
+			respondValidation(w, err)
+			return
+		}
+		// Bulk patches don't have a single "what was the before-value"
+		// answer per field (it varies across N classes), but recording
+		// WHICH fields the manager intended to set is useful — the
+		// activity log can render "edited capacity, room" even when
+		// the per-class diffs aren't enumerable. AnchorTitle comes
+		// back from PatchClassScoped so we don't double-query.
+		changed := []string{}
+		if in.Title != nil {
+			changed = append(changed, "title")
+		}
+		if in.ClassTypeID != nil {
+			changed = append(changed, "class_type")
+		}
+		if in.InstructorID != nil {
+			changed = append(changed, "instructor")
+		}
+		if in.RoomID != nil {
+			changed = append(changed, "room")
+		}
+		if in.StartsAt != nil {
+			changed = append(changed, "starts_at")
+		}
+		if in.DurationMins != nil {
+			changed = append(changed, "duration_minutes")
+		}
+		if in.Capacity != nil {
+			changed = append(changed, "capacity")
+		}
+		_ = s.store.WriteAudit(r.Context(), u.StudioID, u.ID, "class_update",
+			"class", id, map[string]any{
+				"class_title":     out.AnchorTitle,
+				"scope":           scope,
+				"classes_updated": out.ClassesUpdated,
+				"rule_updated":    out.RuleUpdated,
+				"fields_changed":  changed,
+			})
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
 	var in store.AdminClassInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -938,22 +1483,93 @@ func (s *Server) handleAdminUpdateClass(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
+	// Same action ("class_update") as the scoped branch above so the audit
+	// log filter surfaces both single-class and bulk edits together. Record
+	// the patched fields so the Activity log can show what changed instead
+	// of just "something on this class was edited".
+	detail := map[string]any{"scope": "this"}
+	if in.Title != nil {
+		detail["title"] = *in.Title
+	}
+	if in.StartsAt != nil {
+		detail["starts_at"] = *in.StartsAt
+	}
+	if in.DurationMins != nil {
+		detail["duration_minutes"] = *in.DurationMins
+	}
+	if in.Capacity != nil {
+		detail["capacity"] = *in.Capacity
+	}
+	if in.ClassTypeID != nil {
+		detail["class_type_id"] = *in.ClassTypeID
+	}
+	if in.InstructorID != nil {
+		detail["instructor_id"] = *in.InstructorID
+	}
+	if in.RoomID != nil {
+		detail["room_id"] = *in.RoomID
+	}
+	_ = s.store.WriteAudit(r.Context(), u.StudioID, u.ID, "class_update",
+		"class", id, detail)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAdminCancelClass(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "this" {
+		results, err := s.store.CancelClassScoped(r.Context(), u.StudioID, id, scope)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "class not found")
+			return
+		}
+		if err != nil {
+			respondValidation(w, err)
+			return
+		}
+		summary := store.CancelClassResult{}
+		for _, r := range results {
+			summary.BookingsCancelled += r.BookingsCancelled
+			summary.CreditsReturned += r.CreditsReturned
+			summary.NotificationsSent += r.NotificationsSent
+			summary.WaitlistCleared += r.WaitlistCleared
+		}
+		// Use the anchor class's title as the row label — for
+		// scope=future/all the series share the same title shape, so it
+		// reads sensibly as "CANCELLED · Vinyasa Flow (future)".
+		anchorTitle := ""
+		if len(results) > 0 {
+			anchorTitle = results[0].Title
+		}
+		_ = s.store.WriteAudit(r.Context(), u.StudioID, u.ID, "class_cancel",
+			"class", id, map[string]any{
+				"class_title":      anchorTitle,
+				"scope":            scope,
+				"classes":          len(results),
+				"bookings":         summary.BookingsCancelled,
+				"credits_back":     summary.CreditsReturned,
+				"notifications":    summary.NotificationsSent,
+				"waitlist_cleared": summary.WaitlistCleared,
+			})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"scope":   scope,
+			"classes": len(results),
+			"summary": summary,
+		})
+		return
+	}
+
 	out, err := s.store.CancelAdminClassWithAudit(r.Context(), u.StudioID, u.ID, id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "class not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -968,7 +1584,7 @@ func (s *Server) handleAdminCreateSeries(w http.ResponseWriter, r *http.Request)
 	}
 	out, err := s.store.CreateSeries(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -993,13 +1609,13 @@ func (s *Server) handleAdminUpdateEnrollment(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	err := s.store.UpdateAdminEnrollment(r.Context(), u.StudioID, id, in)
+	err := s.store.UpdateAdminEnrollment(r.Context(), u.StudioID, u.ID, id, in)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "enrollment not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1044,6 +1660,201 @@ func (s *Server) handleAdminReports(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// reportRange parses optional ?from=&to= (YYYY-MM-DD, studio TZ, `to`
+// exclusive) shared by the focused report endpoints. ok=false means no range
+// was supplied and the handler should fall back to its default window; a
+// malformed range writes a 400 and returns bad=true so the handler stops.
+func (s *Server) reportRange(w http.ResponseWriter, r *http.Request, studioID string) (from, to time.Time, ok, bad bool) {
+	q := r.URL.Query()
+	fromStr := q.Get("from")
+	toStr := q.Get("to")
+	if fromStr == "" && toStr == "" {
+		return time.Time{}, time.Time{}, false, false
+	}
+	loc := s.store.StudioLocation(r.Context(), studioID)
+	f, errA := time.ParseInLocation("2006-01-02", fromStr, loc)
+	t, errB := time.ParseInLocation("2006-01-02", toStr, loc)
+	if errA != nil || errB != nil {
+		writeError(w, http.StatusBadRequest, "from + to must be YYYY-MM-DD")
+		return time.Time{}, time.Time{}, false, true
+	}
+	if !t.After(f) {
+		writeError(w, http.StatusBadRequest, "to must be after from")
+		return time.Time{}, time.Time{}, false, true
+	}
+	return f, t, true, false
+}
+
+func (s *Server) handleAdminReportRevenue(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	from, to, ok, bad := s.reportRange(w, r, u.StudioID)
+	if bad {
+		return
+	}
+	var (
+		out *store.RevenueReport
+		err error
+	)
+	if ok {
+		out, err = s.store.RevenueReportRange(r.Context(), u.StudioID, from, to, r.URL.Query().Get("granularity"))
+	} else {
+		out, err = s.store.RevenueReportFor(r.Context(), u.StudioID)
+	}
+	if err != nil {
+		log.Printf("revenue report: %v", err)
+		writeError(w, http.StatusInternalServerError, "revenue report error")
+		return
+	}
+	if wantsCSV(r) {
+		rows := make([][]string, 0, len(out.ByWeek))
+		for _, b := range out.ByWeek {
+			total := b.CardMinor + b.CashMinor
+			rows = append(rows, []string{
+				b.WeekStart, out.Month.Currency,
+				minorToDecimal(b.CardMinor), minorToDecimal(b.CashMinor),
+				minorToDecimal(total), minorToDecimal(b.GrossMinor),
+				minorToDecimal(b.DiscountMinor),
+			})
+		}
+		writeCSV(w, "revenue.csv",
+			[]string{"period_start", "currency", "card", "cash", "total", "gross", "discount"},
+			rows)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleAdminReportAttendance(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	from, to, ok, bad := s.reportRange(w, r, u.StudioID)
+	if bad {
+		return
+	}
+	var (
+		out any
+		err error
+	)
+	if ok {
+		out, err = s.store.AttendanceReportRange(r.Context(), u.StudioID, from, to)
+	} else {
+		out, err = s.store.AttendanceReportFor(r.Context(), u.StudioID)
+	}
+	if err != nil {
+		log.Printf("attendance report: %v", err)
+		writeError(w, http.StatusInternalServerError, "attendance report error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleAdminReportInstructorPay(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	from, to, ok, bad := s.reportRange(w, r, u.StudioID)
+	if bad {
+		return
+	}
+	var (
+		out *store.InstructorPayReport
+		err error
+	)
+	if ok {
+		out, err = s.store.InstructorPayReportRange(r.Context(), u.StudioID, from, to)
+	} else {
+		out, err = s.store.InstructorPayReportFor(r.Context(), u.StudioID)
+	}
+	if err != nil {
+		log.Printf("instructor pay report: %v", err)
+		writeError(w, http.StatusInternalServerError, "instructor pay report error")
+		return
+	}
+	if wantsCSV(r) {
+		rows := make([][]string, 0, len(out.Rows))
+		for _, p := range out.Rows {
+			rows = append(rows, []string{
+				p.FullName, strconv.Itoa(p.ClassesTaught),
+				minorToDecimal(p.RateMinor), minorToDecimal(p.PayMinor),
+			})
+		}
+		writeCSV(w, "instructor-pay.csv",
+			[]string{"instructor", "classes_taught", "rate", "pay"}, rows)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleAdminReportCustomers(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	from, to, ok, bad := s.reportRange(w, r, u.StudioID)
+	if bad {
+		return
+	}
+	if !ok {
+		// No window supplied → effectively lifetime.
+		from = time.Time{}
+		to = time.Now().AddDate(100, 0, 0)
+	}
+	sort := r.URL.Query().Get("sort")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	rep, err := s.store.CustomerReportFor(r.Context(), u.StudioID, from, to, sort, q)
+	if err != nil {
+		log.Printf("customer report: %v", err)
+		writeError(w, http.StatusInternalServerError, "customer report error")
+		return
+	}
+	if wantsCSV(r) {
+		rows := make([][]string, 0, len(rep.Rows))
+		for _, c := range rep.Rows {
+			lastSeen := ""
+			if c.LastSeenAt != nil {
+				lastSeen = *c.LastSeenAt
+			}
+			rows = append(rows, []string{
+				c.FullName, c.Email, c.JoinedAt,
+				strconv.Itoa(c.Visits), strconv.Itoa(c.NoShows),
+				minorToDecimal(c.SpendMinor), lastSeen, c.ActivePassLabel,
+			})
+		}
+		writeCSV(w, "customers.csv",
+			[]string{"name", "email", "joined_at", "visits", "no_shows", "spend", "last_seen", "active_pass"},
+			rows)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) handleAdminBuilderSchema(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"datasets": s.store.BuilderSchema()})
+}
+
+func (s *Server) handleAdminBuilderRun(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var spec store.BuilderSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	res, err := s.store.RunBuilder(r.Context(), u.StudioID, spec)
+	var be *store.BuilderError
+	if errors.As(err, &be) {
+		writeError(w, http.StatusBadRequest, be.Error())
+		return
+	}
+	if err != nil {
+		log.Printf("report builder: %v", err)
+		writeError(w, http.StatusInternalServerError, "report builder error")
+		return
+	}
+	if wantsCSV(r) {
+		header := make([]string, len(res.Columns))
+		for i, c := range res.Columns {
+			header[i] = c.Key
+		}
+		writeCSV(w, "report.csv", header, res.Rows)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) handleAdminListStudents(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	q := r.URL.Query().Get("q")
@@ -1077,6 +1888,61 @@ func (s *Server) handleAdminGetStudent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleAdminExportStudent serves the UK GDPR Art. 15 / 20 subject-access
+// bundle as JSON. Reading someone's entire record is itself sensitive, so the
+// access is logged to audit_log (user_data_exported) even though it's a read.
+func (s *Server) handleAdminExportStudent(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	out, err := s.store.ExportUserData(r.Context(), u.StudioID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "student not found")
+		return
+	}
+	if err != nil {
+		log.Printf("export student: %v", err)
+		writeError(w, http.StatusInternalServerError, "export error")
+		return
+	}
+	if err := s.store.WriteAudit(r.Context(), u.StudioID, u.ID,
+		"user_data_exported", "user", id, map[string]any{}); err != nil {
+		log.Printf("export student audit: %v", err)
+		writeError(w, http.StatusInternalServerError, "export error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleAdminEraseStudent fulfils a UK GDPR Art. 17 erasure request. The DB
+// work (tombstone + scrub) commits first; the Firebase Auth account is then
+// deleted best-effort — it holds the email separately and an orphaned auth
+// account left behind would let the person sign back in. The Firebase delete
+// can't be rolled into the DB transaction, so a failure there is logged but
+// doesn't fail the request: the row is already pseudonymised and login is
+// blocked (firebase_uid cleared) regardless.
+func (s *Server) handleAdminEraseStudent(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	res, err := s.store.EraseUser(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "student not found")
+		return
+	}
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	if res.FirebaseUID != "" && s.fbClient != nil {
+		if err := s.fbClient.DeleteUser(r.Context(), res.FirebaseUID); err != nil {
+			// Already-deleted is fine (idempotent erasure); anything else is
+			// worth surfacing in logs for follow-up but the DB is already
+			// erased, so we still return success.
+			log.Printf("erase student: firebase delete uid=%s: %v", res.FirebaseUID, err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleAdminGrantPass(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	studentID := chi.URLParam(r, "id")
@@ -1087,7 +1953,7 @@ func (s *Server) handleAdminGrantPass(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.store.GrantPass(r.Context(), u.StudioID, u.ID, studentID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -1107,7 +1973,7 @@ func (s *Server) handleAdminAdjustCredits(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1127,7 +1993,7 @@ func (s *Server) handleAdminVoidEntitlement(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1153,7 +2019,7 @@ func (s *Server) handleAdminCreateClassType(w http.ResponseWriter, r *http.Reque
 	}
 	id, err := s.store.CreateClassType(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -1173,7 +2039,7 @@ func (s *Server) handleAdminUpdateClassType(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1187,12 +2053,44 @@ func (s *Server) handleJoinWaitlist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "class not found")
 		return
 	}
+	if errors.Is(err, store.ErrAlreadyBooked) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": err.Error(),
+			"code":  "already_booked",
+		})
+		return
+	}
+	if errors.Is(err, store.ErrAlreadyOnWaitlist) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": err.Error(),
+			"code":  "already_on_waitlist",
+		})
+		return
+	}
 	if err != nil {
-		// Could be unique conflict if already on the list.
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]int{"position": pos})
+}
+
+func (s *Server) handleLeaveWaitlist(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := chi.URLParam(r, "id")
+	if err := s.store.LeaveWaitlist(r.Context(), u.ID, classID); err != nil {
+		log.Printf("leave waitlist: %v", err)
+		writeError(w, http.StatusInternalServerError, "leave waitlist error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// requiresStripeConfirm returns true for payment methods that need a
+// PaymentIntent (i.e. real card collection through Stripe Elements). The
+// other methods — cash, comp, card_present (manual swipe), dev_stub — are
+// settled synchronously on the server with no client-side step.
+func requiresStripeConfirm(method string) bool {
+	return method == "card"
 }
 
 func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
@@ -1209,12 +2107,28 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "dev_stub"
 	}
+
+	// Intent flow: real card payment. Server records a 'pending' purchase
+	// and hands the client back a PaymentIntent client_secret so it can
+	// finish on Stripe.js. The entitlement gets minted on POST /confirm.
+	if requiresStripeConfirm(req.PaymentMethod) {
+		out, err := s.store.CreatePendingPurchase(
+			r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod, req.DiscountCode,
+		)
+		if err != nil {
+			respondErr(w, err, "createPendingPurchase")
+			return
+		}
+		writeJSON(w, http.StatusAccepted, out)
+		return
+	}
+
+	// Synchronous one-shot for the non-Stripe methods.
 	purchaseID, entitlementID, err := s.store.CreatePurchase(
-		r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod,
+		r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod, req.DiscountCode,
 	)
 	if err != nil {
-		log.Printf("create purchase: %v", err)
-		writeError(w, http.StatusInternalServerError, "create purchase error")
+		respondErr(w, err, "createPurchase")
 		return
 	}
 	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
@@ -1229,9 +2143,41 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleConfirmPurchase finalises a pending Stripe purchase once the client
+// has run the PaymentIntent through Elements/PaymentSheet. The actual Stripe
+// verification (PaymentIntent.status == 'succeeded') is the natural slot
+// for the SDK call once STRIPE_SECRET_KEY is configured — the store layer
+// trusts the caller in dev.
+func (s *Server) handleConfirmPurchase(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	purchaseID := chi.URLParam(r, "id")
+	entitlementID, err := s.store.ConfirmPurchase(r.Context(), u.StudioID, u.ID, purchaseID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "purchase not found")
+		return
+	}
+	if err != nil {
+		log.Printf("confirm purchase: %v", err)
+		respondValidation(w, err)
+		return
+	}
+	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	if err != nil {
+		log.Printf("get entitlement after confirm: %v", err)
+		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"purchase_id": purchaseID,
+		"entitlement": ent,
+	})
+}
+
+// Per-booking single-use scan: the token alone identifies the booking. The
+// class_id field is no longer required on the request — kept off the
+// struct so callers don't accidentally send irrelevant data.
 type checkinScanReq struct {
-	Token   string `json:"token"`
-	ClassID string `json:"class_id"`
+	Token string `json:"token"`
 }
 
 func (s *Server) handleAdminCheckinScan(w http.ResponseWriter, r *http.Request) {
@@ -1241,11 +2187,11 @@ func (s *Server) handleAdminCheckinScan(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	out, err := s.store.CheckinScan(r.Context(), u.StudioID, u.ID, req.Token, req.ClassID)
+	out, err := s.store.CheckinScan(r.Context(), u.StudioID, u.ID, req.Token)
 	var se *store.ScanError
 	if errors.As(err, &se) {
 		status := http.StatusConflict
-		if se.Code == "invalid_token" || se.Code == "class_not_found" {
+		if se.Code == "invalid_token" {
 			status = http.StatusNotFound
 		}
 		writeJSON(w, status, map[string]string{"error": se.Message, "code": se.Code})
@@ -1279,7 +2225,7 @@ func (s *Server) handleAdminCreateStaff(w http.ResponseWriter, r *http.Request) 
 	}
 	id, err := s.store.CreateStaff(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -1299,7 +2245,7 @@ func (s *Server) handleAdminUpdateStaff(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1336,7 +2282,7 @@ func (s *Server) handleAdminCreatePromotion(w http.ResponseWriter, r *http.Reque
 	}
 	id, err := s.store.CreatePromotion(r.Context(), u.StudioID, u.ID, in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -1356,7 +2302,7 @@ func (s *Server) handleAdminUpdatePromotion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		respondValidation(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1378,6 +2324,312 @@ func (s *Server) handleAdminArchivePromotion(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---- discounts ----------------------------------------------------------
+
+func (s *Server) handleAdminListDiscounts(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	includeArchived := r.URL.Query().Get("include_archived") == "1"
+	rows, err := s.store.ListDiscounts(r.Context(), u.StudioID, includeArchived)
+	if err != nil {
+		log.Printf("admin discounts: %v", err)
+		writeError(w, http.StatusInternalServerError, "discounts error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+type createDiscountReq struct {
+	Code               *string `json:"code,omitempty"`
+	Kind               string  `json:"kind"`
+	Value              int     `json:"value"`
+	AppliesToProductID *string `json:"applies_to_product_id,omitempty"`
+	ValidFrom          *string `json:"valid_from,omitempty"`
+	ValidTo            *string `json:"valid_to,omitempty"`
+	MaxUses            *int    `json:"max_uses,omitempty"`
+	MaxUsesPerUser     *int    `json:"max_uses_per_user,omitempty"`
+	Notes              string  `json:"notes,omitempty"`
+}
+
+func (s *Server) handleAdminCreateDiscount(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req createDiscountReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	in := store.DiscountCreate{
+		Code:               req.Code,
+		Kind:               req.Kind,
+		Value:              req.Value,
+		AppliesToProductID: req.AppliesToProductID,
+		MaxUses:            req.MaxUses,
+		MaxUsesPerUser:     req.MaxUsesPerUser,
+		Notes:              req.Notes,
+	}
+	if req.ValidFrom != nil && *req.ValidFrom != "" {
+		t, err := time.Parse(time.RFC3339, *req.ValidFrom)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "valid_from: invalid RFC3339 time")
+			return
+		}
+		in.ValidFrom = &t
+	}
+	if req.ValidTo != nil && *req.ValidTo != "" {
+		t, err := time.Parse(time.RFC3339, *req.ValidTo)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "valid_to: invalid RFC3339 time")
+			return
+		}
+		in.ValidTo = &t
+	}
+	d, err := s.store.CreateDiscount(r.Context(), u.StudioID, u.ID, in)
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, d)
+}
+
+func (s *Server) handleAdminArchiveDiscount(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.ArchiveDiscount(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "discount not found")
+		return
+	}
+	if err != nil {
+		log.Printf("archive discount: %v", err)
+		writeError(w, http.StatusInternalServerError, "archive error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type refundPurchaseReq struct {
+	RefundAmountMinor int    `json:"refund_amount_minor"`
+	Note              string `json:"note,omitempty"`
+}
+
+func (s *Server) handleAdminRefundPurchase(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	var req refundPurchaseReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	err := s.store.RefundPurchase(r.Context(), u.StudioID, u.ID, id, req.RefundAmountMinor, req.Note)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "purchase not found")
+		return
+	}
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDevResetTestState wipes non-seed bookings/purchases/etc. so
+// integration tests can re-run from a clean baseline. Only available
+// when the Firebase Auth emulator is in play — refuses with 404
+// otherwise to keep prod surface-area zero.
+func (s *Server) handleDevResetTestState(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err := s.store.ResetTestState(r.Context()); err != nil {
+		respondErr(w, err, "internal")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDevFillClass fills the requested class to capacity by booking
+// eligible community-seed students. Body: {"studio_id":"s52","class_id":"…"}.
+// Same dev-only gate as the reset endpoint.
+func (s *Server) handleDevFillClass(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body struct {
+		StudioID string `json:"studio_id"`
+		ClassID  string `json:"class_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	n, err := s.store.FillClassToCapacity(r.Context(), body.StudioID, body.ClassID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "class not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"booked": n})
+}
+
+// ---- chat ----------------------------------------------------------------
+
+// createConversationBody is the POST /conversations payload. `kind` selects
+// the branch: a "group" reads title + member_ids; a "dm" reads user_id (the
+// other participant). Empty kind defaults to group for ergonomics.
+type createConversationBody struct {
+	Kind      string   `json:"kind"`       // "group" | "dm"
+	Title     string   `json:"title"`      // group only
+	MemberIDs []string `json:"member_ids"` // group: initial members besides the creator
+	UserID    string   `json:"user_id"`    // dm: the target user
+}
+
+func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body createConversationBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	var (
+		conv *store.Conversation
+		err  error
+	)
+	switch body.Kind {
+	case "dm":
+		conv, err = s.store.OpenDM(r.Context(), u.StudioID, u.ID, strings.TrimSpace(body.UserID))
+	case "group", "":
+		conv, err = s.store.CreateConversation(r.Context(), u.StudioID, u.ID, body.Title, body.MemberIDs)
+	default:
+		writeError(w, http.StatusBadRequest, "kind must be 'group' or 'dm'")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "create conversation")
+		return
+	}
+	writeJSON(w, http.StatusCreated, conv)
+}
+
+func (s *Server) handleAddConversationMembers(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	var body struct {
+		MemberIDs []string `json:"member_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := s.store.AddMembers(r.Context(), u.StudioID, u.ID, convID, body.MemberIDs); err != nil {
+		respondErr(w, err, "add conversation members")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	out, err := s.store.ListConversations(r.Context(), u.StudioID, u.ID)
+	if err != nil {
+		respondErr(w, err, "list conversations")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	before := queryInt(r, "before")
+	after := queryInt(r, "after")
+	limit := queryInt(r, "limit")
+	out, err := s.store.ListMessages(r.Context(), u.ID, convID, before, after, limit)
+	if err != nil {
+		respondErr(w, err, "list messages")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	msg, err := s.store.SendMessage(r.Context(), u.StudioID, u.ID, convID, body.Body)
+	if err != nil {
+		respondErr(w, err, "send message")
+		return
+	}
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	msgID := chi.URLParam(r, "mid")
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	msg, err := s.store.EditMessage(r.Context(), u.StudioID, u.ID, convID, msgID, body.Body)
+	if err != nil {
+		respondErr(w, err, "edit message")
+		return
+	}
+	writeJSON(w, http.StatusOK, msg)
+}
+
+func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	msgID := chi.URLParam(r, "mid")
+	if err := s.store.DeleteMessage(r.Context(), u.StudioID, u.ID, convID, msgID); err != nil {
+		respondErr(w, err, "delete message")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleMarkConversationRead(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	convID := chi.URLParam(r, "id")
+	var body struct {
+		UpToSeq int `json:"up_to_seq"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := s.store.MarkConversationRead(r.Context(), u.ID, convID, body.UpToSeq); err != nil {
+		respondErr(w, err, "mark conversation read")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// queryInt parses a non-negative integer query param, returning 0 when
+// absent or unparseable — every chat caller treats 0 as "unset".
+func queryInt(r *http.Request, key string) int {
+	n, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 // ---- helpers -------------------------------------------------------------
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -1388,6 +2640,49 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorCode mirrors writeError but also surfaces a stable machine
+// code so the client can branch on the failure type without parsing the
+// human-readable message.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
+// writeCSV streams a CSV download. header is the column row; rows are the data
+// rows (each already stringified). Sets the attachment filename so a browser
+// fetch can name the saved file.
+func writeCSV(w http.ResponseWriter, filename string, header []string, rows [][]string) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	w.WriteHeader(http.StatusOK)
+	cw := csv.NewWriter(w)
+	_ = cw.Write(header)
+	_ = cw.WriteAll(rows)
+	cw.Flush()
+}
+
+// wantsCSV reports whether the caller asked for a CSV download via ?format=csv
+// or an Accept: text/csv header.
+func wantsCSV(r *http.Request) bool {
+	if r.URL.Query().Get("format") == "csv" {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/csv")
+}
+
+// minorToDecimal renders integer minor units as a plain decimal string
+// ("2500" → "25.00") for spreadsheet-friendly CSV cells.
+func minorToDecimal(minor int) string {
+	neg := minor < 0
+	if neg {
+		minor = -minor
+	}
+	s := fmt.Sprintf("%d.%02d", minor/100, minor%100)
+	if neg {
+		return "-" + s
+	}
+	return s
 }
 
 func cors(next http.Handler) http.Handler {

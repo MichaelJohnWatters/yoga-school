@@ -10,17 +10,23 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
 	"github.com/studio52/yoga-school/server/internal/auth"
+	"github.com/studio52/yoga-school/server/internal/store"
 )
 
-// Endpoints that intentionally bypass auth or role gates. None today, but
-// keep the slot so the policy is explicit if one ever needs to be carved out
-// (e.g. a public health probe). Format: "METHOD /path/pattern" exactly as
-// chi.Walk emits it.
+// Endpoints that intentionally bypass auth or role gates. Format
+// "METHOD /path/pattern" exactly as chi.Walk emits it.
+//
+// The /dev/* endpoints are intentionally unauthenticated — they're gated at
+// the handler level by FIREBASE_AUTH_EMULATOR_HOST presence (refuse with
+// 404 in any production-shaped config). The matrix test runs without that
+// env set, so they correctly return 404 instead of 401.
 var (
-	authBypassRoutes = map[string]bool{}
+	authBypassRoutes = map[string]bool{
+		"POST /dev/reset-test-state": true,
+		"POST /dev/fill-class":       true,
+	}
 	roleBypassRoutes = map[string]bool{}
 )
 
@@ -30,19 +36,31 @@ var (
 // list explicit makes route-tier changes deliberate — a refactor that
 // accidentally opens a money endpoint to instructors fails the matrix loudly.
 var staffAllowedRoutes = map[string]bool{
-	"GET /api/v1/admin/classes":                  true,
-	"GET /api/v1/admin/classes/{id}/roster":      true,
+	"GET /api/v1/admin/classes":                   true,
+	"GET /api/v1/admin/classes/{id}/roster":       true,
 	"POST /api/v1/admin/bookings/{id}/attendance": true,
-	"POST /api/v1/admin/classes/{id}/promote":    true,
-	"POST /api/v1/admin/checkin/scan":            true,
-	"GET /api/v1/admin/class-types":              true,
-	"GET /api/v1/admin/instructors":              true,
-	"GET /api/v1/admin/rooms":                    true,
-	"GET /api/v1/admin/class-templates":          true,
-	"GET /api/v1/admin/enrollments":              true,
-	"GET /api/v1/admin/enrollments/{id}/roster":  true,
-	"GET /api/v1/admin/students":                 true,
-	"GET /api/v1/admin/students/{id}":            true,
+	"POST /api/v1/admin/classes/{id}/promote":     true,
+	"POST /api/v1/admin/checkin/scan":             true,
+	"GET /api/v1/admin/class-types":               true,
+	"GET /api/v1/admin/instructors":               true,
+	"GET /api/v1/admin/rooms":                     true,
+	"GET /api/v1/admin/class-templates":           true,
+	"GET /api/v1/admin/enrollments":               true,
+	"GET /api/v1/admin/enrollments/{id}/roster":   true,
+	"GET /api/v1/admin/students":                  true,
+	"GET /api/v1/admin/students/{id}":             true,
+}
+
+// staffOnlyRoutes declares non-admin routes that still require staff
+// (instructor+). The chat-creation endpoints live outside /api/v1/admin/*
+// — so the admin matrices above skip them — but are gated by
+// s.requireStaff: a student must get 403. Declaring them keeps that gate
+// under test the same way staffAllowedRoutes pins the admin tier. The
+// read/post/edit chat routes are intentionally open to any member (the
+// conversation_members ACL is the real gate) and so are NOT listed here.
+var staffOnlyRoutes = map[string]bool{
+	"POST /api/v1/conversations":              true,
+	"POST /api/v1/conversations/{id}/members": true,
 }
 
 // routeKey formats the method + pattern the way our bypass sets expect it.
@@ -65,7 +83,7 @@ func substitutePathParams(pattern string) string {
 		if end < 0 {
 			break
 		}
-		out = out[:start] + uuid.NewString() + out[start+end+1:]
+		out = out[:start] + store.NewID() + out[start+end+1:]
 	}
 	return out
 }
@@ -136,7 +154,7 @@ func TestRoleMatrix_AdminRoutesRequireManager(t *testing.T) {
 	studentEmail := "matrix-student@test.com"
 	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'student', ?, 'Matrix Student')`,
-		uuid.NewString(), r.studioID, studentEmail)
+		store.NewID(), r.studioID, studentEmail)
 
 	// Swap the verifier so any token resolves to the student.
 	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
@@ -176,6 +194,106 @@ func TestRoleMatrix_AdminRoutesRequireManager(t *testing.T) {
 	}
 }
 
+// TestRoleMatrix_StaffOnlyRoutesRejectStudents asserts that every declared
+// staff-only non-admin route (the chat-creation endpoints) returns 403 for a
+// student, and that staffOnlyRoutes has no stale entries. A failure means a
+// chat-creation route lost its s.requireStaff gate, or the declaration drifted
+// from the registered routes.
+func TestRoleMatrix_StaffOnlyRoutesRejectStudents(t *testing.T) {
+	r := newRig(t)
+
+	studentEmail := "matrix-staffonly-student@test.com"
+	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
+		VALUES (?, ?, 'student', ?, 'Matrix StaffOnly Student')`,
+		store.NewID(), r.studioID, studentEmail)
+	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
+		return &auth.Verified{UID: "uid-staffonly-student", Email: studentEmail}, nil
+	}
+
+	routes := enumerateRoutes(t, r.server)
+
+	// Flag stale declarations — a route removed/renamed without updating the set.
+	registered := map[string]bool{}
+	for _, rt := range routes {
+		registered[routeKey(rt[0], rt[1])] = true
+	}
+	for declared := range staffOnlyRoutes {
+		if !registered[declared] {
+			t.Errorf("staffOnlyRoutes contains stale entry %q — route no longer exists", declared)
+		}
+	}
+
+	var checked int
+	for _, rt := range routes {
+		method, pattern := rt[0], rt[1]
+		key := routeKey(method, pattern)
+		if !staffOnlyRoutes[key] {
+			continue
+		}
+		checked++
+		t.Run(key, func(t *testing.T) {
+			url := substitutePathParams(pattern)
+			req := httptest.NewRequest(method, url, bytes.NewReader([]byte("{}")))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.handler.ServeHTTP(w, req)
+			got := w.Result().StatusCode
+			if got != http.StatusForbidden {
+				body, _ := io.ReadAll(w.Result().Body)
+				t.Errorf("%s %s as student: got %d want 403 body=%s",
+					method, pattern, got, body)
+			}
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no staff-only routes were checked — declaration is empty?")
+	}
+}
+
+// TestRoleMatrix_StaffOnlyRoutesAllowInstructors is the inverse: an
+// instructor must clear the role gate on staff-only routes. The handler may
+// still 400/404 (empty body, no such conversation) — we only assert the gate
+// itself doesn't reject with 403.
+func TestRoleMatrix_StaffOnlyRoutesAllowInstructors(t *testing.T) {
+	r := newRig(t)
+
+	instructorEmail := "matrix-staffonly-instructor@test.com"
+	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
+		VALUES (?, ?, 'instructor', ?, 'Matrix StaffOnly Instructor')`,
+		store.NewID(), r.studioID, instructorEmail)
+	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
+		return &auth.Verified{UID: "uid-staffonly-instructor", Email: instructorEmail}, nil
+	}
+
+	routes := enumerateRoutes(t, r.server)
+	var checked int
+	for _, rt := range routes {
+		method, pattern := rt[0], rt[1]
+		key := routeKey(method, pattern)
+		if !staffOnlyRoutes[key] {
+			continue
+		}
+		checked++
+		t.Run(key, func(t *testing.T) {
+			url := substitutePathParams(pattern)
+			req := httptest.NewRequest(method, url, bytes.NewReader([]byte("{}")))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.handler.ServeHTTP(w, req)
+			if got := w.Result().StatusCode; got == http.StatusForbidden {
+				body, _ := io.ReadAll(w.Result().Body)
+				t.Errorf("%s %s as instructor: got 403 (role gate rejected); should pass body=%s",
+					method, pattern, body)
+			}
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no staff-only routes were checked — declaration is empty?")
+	}
+}
+
 // TestRoleMatrix_InstructorRejectedFromManagerOnlyRoutes asserts that an
 // authenticated instructor still gets 403 on the manager-only admin tier
 // (money mutators, config, reports, audit, dashboard, staff CRUD,
@@ -187,7 +305,7 @@ func TestRoleMatrix_InstructorRejectedFromManagerOnlyRoutes(t *testing.T) {
 	instructorEmail := "matrix-instructor@test.com"
 	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'instructor', ?, 'Matrix Instructor')`,
-		uuid.NewString(), r.studioID, instructorEmail)
+		store.NewID(), r.studioID, instructorEmail)
 	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
 		return &auth.Verified{UID: "uid-instructor", Email: instructorEmail}, nil
 	}
@@ -233,7 +351,7 @@ func TestRoleMatrix_InstructorAllowedOnStaffRoutes(t *testing.T) {
 	instructorEmail := "matrix-instructor@test.com"
 	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'instructor', ?, 'Matrix Instructor')`,
-		uuid.NewString(), r.studioID, instructorEmail)
+		store.NewID(), r.studioID, instructorEmail)
 	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
 		return &auth.Verified{UID: "uid-instructor", Email: instructorEmail}, nil
 	}

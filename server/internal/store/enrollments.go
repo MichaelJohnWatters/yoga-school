@@ -6,24 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // EnrollmentSummary is one row in GET /enrollments.
 type EnrollmentSummary struct {
-	ID               string         `json:"id"`
-	Title            string         `json:"title"`
-	Description      string         `json:"description"`
-	SessionCount     int            `json:"session_count"`
-	Capacity         int            `json:"capacity"`
-	EnrolledCount    int            `json:"enrolled_count"`
-	PriceMinor       int            `json:"price_minor"`
-	Currency         string         `json:"currency"`
-	StartsAt         string         `json:"starts_at"`
-	EndsAt           string         `json:"ends_at"`
-	InstructorName   string         `json:"instructor_name"`
-	SeriesState      string         `json:"series_state"` // open | full | enrolled
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	SessionCount   int    `json:"session_count"`
+	Capacity       int    `json:"capacity"`
+	EnrolledCount  int    `json:"enrolled_count"`
+	PriceMinor     int    `json:"price_minor"`
+	Currency       string `json:"currency"`
+	StartsAt       string `json:"starts_at"`
+	EndsAt         string `json:"ends_at"`
+	InstructorName string `json:"instructor_name"`
+	SeriesState    string `json:"series_state"` // open | full | enrolled
 }
 
 // MyEnrollmentState reports per-caller enrollment.
@@ -169,7 +167,12 @@ func (s *Store) GetEnrollmentDetail(ctx context.Context, studioID, userID, enrol
 // JoinEnrollment atomically: creates an entitlement + a purchase, an
 // enrollment_bookings row, and a booking for each future session.
 // Returns the created enrollment_bookings ID.
-func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollmentID, paymentMethod string) (string, error) {
+//
+// discountCode is optional; pass "" for no discount. When set, the code is
+// validated inside the tx and recorded on the purchase row alongside the
+// list price. Returns *BookingError for discount-related failures so the
+// API layer can surface a structured 409.
+func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollmentID, paymentMethod, discountCode string) (string, error) {
 	switch paymentMethod {
 	case "cash", "card", "card_present", "transfer", "comp", "dev_stub":
 	default:
@@ -215,18 +218,20 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", fmt.Errorf("enrollment is full")
 	}
 
-	// Product + currency for the purchase row.
-	var productID string
+	// Product + currency for the purchase row. Also grab the enrollment
+	// title for the audit row — without it the activity log would just
+	// show an opaque enrollment_id.
+	var productID, enrollmentTitle string
 	var priceMinor int
 	var currency string
 	err = tx.QueryRowContext(ctx, `
-		SELECT p.id, p.price_minor, st.currency
+		SELECT p.id, p.price_minor, st.currency, e.title
 		  FROM enrollments e
 		  JOIN products p ON p.id = e.product_id
 		  JOIN studios st ON st.id = e.studio_id
 		 WHERE e.id = ?`,
 		enrollmentID,
-	).Scan(&productID, &priceMinor, &currency)
+	).Scan(&productID, &priceMinor, &currency, &enrollmentTitle)
 	if err != nil {
 		return "", err
 	}
@@ -271,9 +276,9 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", err
 	}
 
-	purchaseID := uuid.NewString()
-	entitlementID := uuid.NewString()
-	enrollBookingID := uuid.NewString()
+	purchaseID := NewID()
+	entitlementID := NewID()
+	enrollBookingID := NewID()
 
 	// Entitlement — unlimited within the series' validity window.
 	if _, err := tx.ExecContext(ctx, `
@@ -294,14 +299,29 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", err
 	}
 
-	// Purchase.
+	// Discount (optional). Validates inside the tx so the usage counts
+	// stay consistent with the purchase insert.
+	discountID, discountMinor, err := validateAndApplyDiscountTx(
+		ctx, tx, studioID, userID, productID, discountCode, priceMinor,
+	)
+	if err != nil {
+		return "", err
+	}
+	amountMinor := priceMinor - discountMinor
+	var discountIDPtr any
+	if discountID != "" {
+		discountIDPtr = discountID
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO purchases
-		    (id, studio_id, user_id, product_id, amount_minor, currency,
+		    (id, studio_id, user_id, product_id, list_price_minor, amount_minor, currency,
+		     discount_minor, discount_id,
 		     payment_method, initiated_by, actor_role, status,
 		     resulting_entitlement_id)
-		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'student', 'completed', ?)`,
-		purchaseID, studioID, userID, productID, priceMinor, currency,
+		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'completed', ?)`,
+		purchaseID, studioID, userID, productID, priceMinor, amountMinor, currency,
+		discountMinor, discountIDPtr,
 		paymentMethod, userID, entitlementID,
 	); err != nil {
 		return "", err
@@ -322,10 +342,32 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 			    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one,
 			     booked_by_role, cancel_cutoff_hours, status)
 			    VALUES (?, ?, ?, ?, ?, 0, 'student', 0, 'booked')`,
-			uuid.NewString(), studioID, sess.id, userID, entitlementID,
+			NewID(), studioID, sess.id, userID, entitlementID,
 		); err != nil {
 			return "", err
 		}
+	}
+	// Audit the student joining a series so the activity log captures
+	// it alongside one-off booking_create rows. Records what they paid
+	// and which series so support can match "did I sign up for the
+	// 6-week course?" to a real event.
+	auditDetail := map[string]any{
+		"enrollment_id":    enrollmentID,
+		"enrollment_title": enrollmentTitle,
+		"sessions":         len(sessions),
+		"amount_minor":     amountMinor,
+		"currency":         currency,
+		"payment_method":   paymentMethod,
+	}
+	if discountMinor > 0 {
+		auditDetail["discount_minor"] = discountMinor
+	}
+	if discountCode != "" {
+		auditDetail["discount_code"] = discountCode
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, userID,
+		"series_join", "enrollment", enrollmentID, auditDetail); err != nil {
+		return "", fmt.Errorf("audit series_join: %w", err)
 	}
 	return enrollBookingID, tx.Commit()
 }

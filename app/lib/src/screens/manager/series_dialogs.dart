@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
@@ -99,7 +100,7 @@ class _NewSeriesDialogState extends ConsumerState<_NewSeriesDialog> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }
@@ -172,7 +173,7 @@ class _NewSeriesDialogState extends ConsumerState<_NewSeriesDialog> {
                         onChanged: (v) => setState(() => _instructorId = v),
                       ),
                       loading: () => _LoadingMini(),
-                      error: (e, _) => Text('$e'),
+                      error: (e, _) => Text(ApiError.fromAny(e).message),
                     ),
                   ),
                 ),
@@ -187,7 +188,7 @@ class _NewSeriesDialogState extends ConsumerState<_NewSeriesDialog> {
                         onChanged: (v) => setState(() => _roomId = v),
                       ),
                       loading: () => _LoadingMini(),
-                      error: (e, _) => Text('$e'),
+                      error: (e, _) => Text(ApiError.fromAny(e).message),
                     ),
                   ),
                 ),
@@ -408,7 +409,7 @@ class _EditSeriesDialogState extends ConsumerState<_EditSeriesDialog> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = ApiError.fromAny(e).message;
       });
     }
   }

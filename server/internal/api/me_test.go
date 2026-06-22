@@ -5,9 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/studio52/yoga-school/server/internal/auth"
+	"github.com/studio52/yoga-school/server/internal/store"
 )
 
 func TestMe_ReturnsManagerTierForManager(t *testing.T) {
@@ -27,7 +26,7 @@ func TestMe_ReturnsStaffTierForInstructor(t *testing.T) {
 	email := "tier-inst@test.com"
 	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'instructor', ?, 'Inst Tier')`,
-		uuid.NewString(), r.studioID, email)
+		store.NewID(), r.studioID, email)
 	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
 		return &auth.Verified{UID: "uid-inst", Email: email}, nil
 	}
@@ -43,7 +42,7 @@ func TestMe_ReturnsStudentTierForStudent(t *testing.T) {
 	email := "tier-stu@test.com"
 	mustExec(t, r.server.store, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'student', ?, 'Stu Tier')`,
-		uuid.NewString(), r.studioID, email)
+		store.NewID(), r.studioID, email)
 	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
 		return &auth.Verified{UID: "uid-stu", Email: email}, nil
 	}
@@ -54,13 +53,42 @@ func TestMe_ReturnsStudentTierForStudent(t *testing.T) {
 	}
 }
 
+// TestMe_FirstSignInAutoProvisionsStudent walks the splash/onboarding flow:
+// a Firebase identity whose email isn't in the users table should get a
+// student row created on the spot, not a 401.
+func TestMe_FirstSignInAutoProvisionsStudent(t *testing.T) {
+	r := newRig(t)
+	newEmail := "fresh-user@studio52.dev"
+	r.server.verify = func(ctx context.Context, token string) (*auth.Verified, error) {
+		return &auth.Verified{
+			UID:      "fb-uid-fresh",
+			Email:    newEmail,
+			FullName: "Fresh User",
+		}, nil
+	}
+	res := r.do(http.MethodGet, "/me", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("first /me: got %d want 200 (auto-provision)", res.StatusCode)
+	}
+	body := decode[map[string]any](t, res)
+	if body["email"] != newEmail {
+		t.Errorf("/me email: got %v want %s", body["email"], newEmail)
+	}
+	if body["tier"] != "student" {
+		t.Errorf("/me tier: got %v want student", body["tier"])
+	}
+	if body["full_name"] != "Fresh User" {
+		t.Errorf("/me full_name: got %v want Fresh User", body["full_name"])
+	}
+}
+
 func TestTierForRole_MapsAllCases(t *testing.T) {
 	for _, c := range []struct{ role, want string }{
 		{"owner", "manager"},
 		{"manager", "manager"},
 		{"instructor", "staff"},
 		{"student", "student"},
-		{"", "student"},     // unknown → student (safe default)
+		{"", "student"},      // unknown → student (safe default)
 		{"alien", "student"}, // unknown → student
 	} {
 		if got := tierForRole(c.role); got != c.want {

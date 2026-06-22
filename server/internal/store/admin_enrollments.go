@@ -5,21 +5,19 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // AdminEnrollmentSummary adds revenue + attendance stats on top of the
 // student-facing summary.
 type AdminEnrollmentSummary struct {
 	EnrollmentSummary
-	RevenueMinor int     `json:"revenue_minor"`
-	AttendancePct int    `json:"attendance_pct"` // marked-present ÷ all marked
+	RevenueMinor     int `json:"revenue_minor"`
+	AttendancePct    int `json:"attendance_pct"` // marked-present ÷ all marked
 	UpcomingSessions int `json:"upcoming_sessions"`
 }
 
 func (s *Store) ListAdminEnrollments(ctx context.Context, studioID string) ([]AdminEnrollmentSummary, error) {
-	rows, err := s.ListEnrollments(ctx, studioID, "00000000-0000-0000-0000-000000000000")
+	rows, err := s.ListEnrollments(ctx, studioID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +69,10 @@ func (s *Store) ListAdminEnrollments(ctx context.Context, studioID string) ([]Ad
 
 // SeriesRoster is the attendance-grid payload.
 type SeriesRoster struct {
-	Series       EnrollmentSummary    `json:"series"`
-	Sessions     []EnrollmentSession  `json:"sessions"`
-	CurrentWeek  int                  `json:"current_week_idx"`
-	Students     []SeriesRosterStudent `json:"students"`
+	Series      EnrollmentSummary     `json:"series"`
+	Sessions    []EnrollmentSession   `json:"sessions"`
+	CurrentWeek int                   `json:"current_week_idx"`
+	Students    []SeriesRosterStudent `json:"students"`
 }
 
 type SeriesRosterStudent struct {
@@ -84,7 +82,7 @@ type SeriesRosterStudent struct {
 }
 
 func (s *Store) SeriesRosterFor(ctx context.Context, studioID, enrollmentID string) (*SeriesRoster, error) {
-	det, err := s.GetEnrollmentDetail(ctx, studioID, "00000000-0000-0000-0000-000000000000", enrollmentID)
+	det, err := s.GetEnrollmentDetail(ctx, studioID, "", enrollmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -243,9 +241,9 @@ func (s *Store) CreateSeries(ctx context.Context, studioID, actorID string, in N
 	}
 	defer tx.Rollback()
 
-	classTypeID := uuid.NewString()
-	productID := uuid.NewString()
-	enrollmentID := uuid.NewString()
+	classTypeID := NewID()
+	productID := NewID()
+	enrollmentID := NewID()
 
 	// Dedicated class type so the entitlement is naturally scoped.
 	if _, err := tx.ExecContext(ctx, `
@@ -292,7 +290,7 @@ func (s *Store) CreateSeries(ctx context.Context, studioID, actorID string, in N
 	for w := 0; w < in.SessionCount; w++ {
 		start := firstSession.AddDate(0, 0, w*7).UTC()
 		end := start.Add(time.Duration(in.DurationMins) * time.Minute)
-		classID := uuid.NewString()
+		classID := NewID()
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO classes
 			    (id, studio_id, class_type_id, instructor_id, room_id,
@@ -329,16 +327,19 @@ func (s *Store) CreateSeries(ctx context.Context, studioID, actorID string, in N
 }
 
 // UpdateAdminEnrollment partially updates a series row.
-func (s *Store) UpdateAdminEnrollment(ctx context.Context, studioID, enrollmentID string, in AdminEnrollmentInput) error {
+func (s *Store) UpdateAdminEnrollment(ctx context.Context, studioID, actorID, enrollmentID string, in AdminEnrollmentInput) error {
 	set := []string{}
 	args := []any{}
+	detail := map[string]any{}
 	if in.Title != nil {
 		set = append(set, "title = ?")
 		args = append(args, *in.Title)
+		detail["title"] = *in.Title
 	}
 	if in.Description != nil {
 		set = append(set, "description = ?")
 		args = append(args, *in.Description)
+		detail["description"] = *in.Description
 	}
 	if in.Capacity != nil {
 		if *in.Capacity < 1 {
@@ -346,6 +347,7 @@ func (s *Store) UpdateAdminEnrollment(ctx context.Context, studioID, enrollmentI
 		}
 		set = append(set, "capacity = ?")
 		args = append(args, *in.Capacity)
+		detail["capacity"] = *in.Capacity
 	}
 	if len(set) == 0 {
 		return nil
@@ -367,5 +369,15 @@ func (s *Store) UpdateAdminEnrollment(ctx context.Context, studioID, enrollmentI
 	if n == 0 {
 		return ErrNotFound
 	}
+	// Always include the current title on the audit row so the
+	// activity log can identify the series even when the patch only
+	// touched description/capacity. Cheap; the row is already loaded
+	// into the page cache by the UPDATE above.
+	var enrollmentTitle string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT title FROM enrollments WHERE id = ?`, enrollmentID,
+	).Scan(&enrollmentTitle)
+	detail["enrollment_title"] = enrollmentTitle
+	_ = s.WriteAudit(ctx, studioID, actorID, "series_update", "enrollment", enrollmentID, detail)
 	return nil
 }

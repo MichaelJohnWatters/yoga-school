@@ -1,7 +1,9 @@
 // Mobile primitives ported from design_handoff_yoga_school/yoga-ui.jsx.
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../screens/notifications_screen.dart';
 import '../theme/yoga_tokens.dart';
 
 /// Studio monogram tile. Real logo replaces "52" later.
@@ -123,6 +125,189 @@ class YAvatar extends StatelessWidget {
   }
 }
 
+/// Shared top utility row for the student-facing shells (home, book,
+/// profile etc.). Keeps the brand row visually consistent: studio logo
+/// + name on the left, notifications bell + user avatar on the right.
+/// Each consuming screen wraps it in its own padding so it can sit
+/// inside a ListView or other scrollable.
+/// Fires [onMount] once, on the frame after this widget is first
+/// inserted into the tree. Used to schedule a silent provider refresh
+/// when the user navigates to a screen — paired with non-autoDispose
+/// providers, the cache renders immediately and the in-flight refetch
+/// updates the UI quietly when it lands (Riverpod's default
+/// skipLoadingOnRefresh keeps the data callback firing with the
+/// previous value while loading).
+///
+/// Plain `StatefulWidget` rather than ConsumerStatefulWidget — the
+/// callback is just a void function so the caller can capture `ref`
+/// from its enclosing scope.
+class RefreshOnMount extends StatefulWidget {
+  final VoidCallback onMount;
+  final Widget child;
+  const RefreshOnMount({
+    super.key,
+    required this.onMount,
+    required this.child,
+  });
+
+  @override
+  State<RefreshOnMount> createState() => _RefreshOnMountState();
+}
+
+class _RefreshOnMountState extends State<RefreshOnMount> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onMount();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+class YStudioTopBar extends ConsumerWidget {
+  final String studioName;
+  final String userFullName;
+  final String? userPhotoUrl;
+  /// Tapping the avatar fires this — RootShell wires it to "switch to
+  /// the Profile tab". Null on the Profile tab itself so the avatar is
+  /// just a visual identity marker there (no self-navigation).
+  final VoidCallback? onAvatarTap;
+  const YStudioTopBar({
+    super.key,
+    required this.studioName,
+    required this.userFullName,
+    this.userPhotoUrl,
+    this.onAvatarTap,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final y = context.yoga;
+    // Live unread count drives both the dot and the screen-reader label,
+    // so the bell badge tracks the actual feed instead of the old
+    // hardcoded `true`.
+    final unread = ref.watch(unreadNotificationCountProvider);
+    // Fixed children (logo + bell + avatar + spacing) take ~130px on their
+    // own. Below that the Row would overflow no matter how aggressively the
+    // studio-name Expanded shrinks, so drop the label then the bell as the
+    // surrounding container narrows. The avatar is the identity anchor and
+    // stays visible at every width.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final showStudioName = w >= 200;
+        final showBell = w >= 150;
+        return Row(
+          children: [
+            const YLogo(),
+            const SizedBox(width: 10),
+            if (showStudioName)
+              Expanded(
+                child: Text(
+                  studioName.toUpperCase(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.6,
+                    color: y.muted,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )
+            else
+              const Spacer(),
+            if (showBell) ...[
+              _BellButton(
+                unread: unread > 0,
+                count: unread,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const NotificationsScreen(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+            ],
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onAvatarTap,
+              child: YAvatar(
+                name: userFullName,
+                size: 38,
+                tone: YAvatarTone.accent,
+                photoUrl: userPhotoUrl,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _BellButton extends StatelessWidget {
+  final bool unread;
+  final int count;
+  final VoidCallback onTap;
+  const _BellButton({
+    required this.unread,
+    required this.count,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    // Material+InkWell so the bell gets the same hover/splash treatment
+    // as other tappable surfaces. Tooltip exposes the unread count for
+    // screen readers and as a hover hint on desktop.
+    return Tooltip(
+      message: unread
+          ? (count == 1 ? '1 unread notification' : '$count unread notifications')
+          : 'Notifications',
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: y.borderStrong),
+                ),
+                child: Icon(Icons.notifications_none_rounded,
+                    size: 20, color: y.text),
+              ),
+              if (unread)
+                Positioned(
+                  top: 7,
+                  right: 8,
+                  child: Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: y.accent,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 enum YChipKind { booked, full, accent, neutral }
 
 class YChip extends StatelessWidget {
@@ -210,47 +395,72 @@ class YButton extends StatelessWidget {
     final y = context.yoga;
     late final Color bg;
     late final Color fg;
+    late final Color hover;
+    late final Color splash;
     Border? border;
     switch (variant) {
       case YButtonVariant.primary:
         bg = y.primary;
         fg = y.onPrimary;
+        // White overlay reads as a subtle lighten over the brand colour;
+        // pure black would muddy the warm primary.
+        hover = Colors.white.withValues(alpha: 0.10);
+        splash = Colors.white.withValues(alpha: 0.18);
         break;
       case YButtonVariant.soft:
         bg = y.primarySoft;
         fg = y.primaryStrong;
+        hover = y.primary.withValues(alpha: 0.10);
+        splash = y.primary.withValues(alpha: 0.18);
         break;
       case YButtonVariant.outline:
         bg = Colors.transparent;
         fg = y.text;
         border = Border.all(color: y.borderStrong);
+        hover = y.primary.withValues(alpha: 0.06);
+        splash = y.primary.withValues(alpha: 0.12);
         break;
     }
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(y.radiusChip),
-      child: Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: small ? 14 : 20,
-          vertical: small ? 7 : 13,
+    final radius = BorderRadius.circular(y.radiusChip);
+    final disabled = onTap == null;
+    final content = Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: small ? 14 : 20,
+        vertical: small ? 7 : 13,
+      ),
+      decoration: border == null
+          ? null
+          : BoxDecoration(borderRadius: radius, border: border),
+      constraints: const BoxConstraints(minHeight: 32),
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: disabled ? fg.withValues(alpha: 0.55) : fg,
+          fontWeight: FontWeight.w700,
+          fontSize: small ? 13 : 15,
+          height: 1.0,
         ),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(y.radiusChip),
-          border: border,
-        ),
-        // Min 44 px touch target per spec.
-        constraints: const BoxConstraints(minHeight: 32),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: fg,
-            fontWeight: FontWeight.w700,
-            fontSize: small ? 13 : 15,
-            height: 1.0,
-          ),
-        ),
+      ),
+    );
+    // Material owns the fill + borderRadius so the InkWell's hover/splash
+    // overlay paints between the fill and the label. Wrapping the inner
+    // Container in InkWell alone (the previous shape) put the fill on top
+    // of the overlay layer, so hover never showed on web/desktop.
+    return Material(
+      color: bg,
+      borderRadius: radius,
+      type: MaterialType.button,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: radius,
+        hoverColor: hover,
+        splashColor: splash,
+        highlightColor: splash,
+        // Wider cursor target on web: the system pointer flips to a hand
+        // automatically when onTap is non-null, but stays default when null
+        // — i.e. disabled — which is the behaviour we want.
+        child: content,
       ),
     );
   }

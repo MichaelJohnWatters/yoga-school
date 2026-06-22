@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
@@ -36,7 +37,7 @@ class AdminSeriesRosterScreen extends ConsumerWidget {
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
         error: (e, _) => Center(
           child: Text(
-            "Can't load roster: $e",
+            "Can't load roster: ${ApiError.fromAny(e).message}",
             style: TextStyle(color: context.yoga.muted),
           ),
         ),

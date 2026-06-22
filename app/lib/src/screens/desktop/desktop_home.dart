@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/models.dart';
+import '../../api/api_error.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import '../home_screen.dart'
@@ -68,7 +69,7 @@ class DesktopHome extends ConsumerWidget {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       ),
-                      error: (e, _) => Text("Can't load bookings: $e"),
+                      error: (e, _) => Text("Can't load bookings: ${ApiError.fromAny(e).message}"),
                     ),
                     const SizedBox(height: 18),
                     _MilestonesStrip(),
