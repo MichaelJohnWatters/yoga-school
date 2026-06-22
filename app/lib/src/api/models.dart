@@ -126,28 +126,28 @@ class Me {
   });
 
   factory Me.fromJson(Map<String, dynamic> j) => Me(
-    id: j['id'] as String,
-    studioId: j['studio_id'] as String,
-    role: j['role'] as String,
-    email: j['email'] as String,
-    fullName: j['full_name'] as String,
-    photoUrl: j['photo_url'] as String?,
-    themeModePref: parseThemeModePref(j['theme_mode_pref'] as String?),
-    createdAt: DateTime.parse(j['created_at'] as String),
-    tier: _parseTier(j['tier'] as String?),
-  );
+        id: j['id'] as String,
+        studioId: j['studio_id'] as String,
+        role: j['role'] as String,
+        email: j['email'] as String,
+        fullName: j['full_name'] as String,
+        photoUrl: j['photo_url'] as String?,
+        themeModePref: parseThemeModePref(j['theme_mode_pref'] as String?),
+        createdAt: DateTime.parse(j['created_at'] as String),
+        tier: _parseTier(j['tier'] as String?),
+      );
 
   Me copyWith({ThemeModePref? themeModePref}) => Me(
-    id: id,
-    studioId: studioId,
-    role: role,
-    email: email,
-    fullName: fullName,
-    photoUrl: photoUrl,
-    themeModePref: themeModePref ?? this.themeModePref,
-    createdAt: createdAt,
-    tier: tier,
-  );
+        id: id,
+        studioId: studioId,
+        role: role,
+        email: email,
+        fullName: fullName,
+        photoUrl: photoUrl,
+        themeModePref: themeModePref ?? this.themeModePref,
+        createdAt: createdAt,
+        tier: tier,
+      );
 
   String get firstName => fullName.split(' ').first;
 
@@ -176,6 +176,7 @@ class ClassRow {
   final int durationMinutes;
   final int capacity;
   final int bookedCount;
+  final int waitlistCount;
   final BookingState bookingState;
   final String? bookingId;
 
@@ -216,6 +217,7 @@ class ClassRow {
     required this.durationMinutes,
     required this.capacity,
     required this.bookedCount,
+    required this.waitlistCount,
     required this.bookingState,
     required this.bookingId,
     required this.waitlistPosition,
@@ -225,32 +227,33 @@ class ClassRow {
   });
 
   factory ClassRow.fromJson(Map<String, dynamic> j) => ClassRow(
-    id: j['id'] as String,
-    title: (j['title'] as String?) ?? '',
-    classTypeId: j['class_type_id'] as String,
-    classTypeName: j['class_type_name'] as String,
-    discipline: j['discipline'] as String,
-    instructorId: j['instructor_id'] as String,
-    instructorName: j['instructor_name'] as String,
-    instructorPhotoUrl: j['instructor_photo_url'] as String?,
-    roomName: j['room_name'] as String,
-    roomColor: j['room_color'] as String?,
-    startsAt: DateTime.parse(j['starts_at'] as String),
-    endsAt: DateTime.parse(j['ends_at'] as String),
-    durationMinutes: j['duration_minutes'] as int,
-    capacity: j['capacity'] as int,
-    bookedCount: j['booked_count'] as int,
-    bookingState: switch (j['booking_state'] as String) {
-      'booked' => BookingState.booked,
-      'full' => BookingState.full,
-      _ => BookingState.available,
-    },
-    bookingId: j['booking_id'] as String?,
-    waitlistPosition: j['waitlist_position'] as int?,
-    enrollmentId: j['enrollment_id'] as String?,
-    recurrenceRuleId: j['recurrence_rule_id'] as String?,
-    myPlusOneName: j['my_plus_one_name'] as String?,
-  );
+        id: j['id'] as String,
+        title: (j['title'] as String?) ?? '',
+        classTypeId: j['class_type_id'] as String,
+        classTypeName: j['class_type_name'] as String,
+        discipline: j['discipline'] as String,
+        instructorId: j['instructor_id'] as String,
+        instructorName: j['instructor_name'] as String,
+        instructorPhotoUrl: j['instructor_photo_url'] as String?,
+        roomName: j['room_name'] as String,
+        roomColor: j['room_color'] as String?,
+        startsAt: DateTime.parse(j['starts_at'] as String),
+        endsAt: DateTime.parse(j['ends_at'] as String),
+        durationMinutes: j['duration_minutes'] as int,
+        capacity: j['capacity'] as int,
+        bookedCount: j['booked_count'] as int,
+        waitlistCount: (j['waitlist_count'] as int?) ?? 0,
+        bookingState: switch (j['booking_state'] as String) {
+          'booked' => BookingState.booked,
+          'full' => BookingState.full,
+          _ => BookingState.available,
+        },
+        bookingId: j['booking_id'] as String?,
+        waitlistPosition: j['waitlist_position'] as int?,
+        enrollmentId: j['enrollment_id'] as String?,
+        recurrenceRuleId: j['recurrence_rule_id'] as String?,
+        myPlusOneName: j['my_plus_one_name'] as String?,
+      );
 
   int get spotsLeft => capacity - bookedCount;
   bool get isRecurring => recurrenceRuleId != null;

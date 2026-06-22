@@ -285,12 +285,15 @@ class _Cell extends StatelessWidget {
         child = Icon(Icons.close, color: y.background, size: 16);
         break;
       case 'upcoming':
-        deco = BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: y.borderStrong, width: 1.5, style: BorderStyle.solid),
+        // Dashed outline per yoga-enroll.jsx:143 (`1px dashed var(--border-strong)`).
+        return SizedBox(
+          height: 36,
+          child: YDashedBorder(
+            color: y.borderStrong,
+            radius: 8,
+            child: const SizedBox.expand(),
+          ),
         );
-        child = const SizedBox.shrink();
-        break;
       case 'unmarked':
         deco = BoxDecoration(
           color: y.accentSoft,

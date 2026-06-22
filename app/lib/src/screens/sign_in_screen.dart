@@ -201,6 +201,17 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                       color: y.text,
                     ),
                   ),
+                  const SizedBox(height: 5),
+                  Text(
+                    'Sign in to book classes and manage your passes.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                      height: 1.45,
+                    ),
+                  ),
                   const SizedBox(height: 24),
                   // Dev picker only makes sense for sign-in — the seeded
                   // users already exist on the emulator.
@@ -270,7 +281,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                         : (_isSignUp ? 'Create account' : 'Sign in'),
                     onTap: _busy ? null : _submit,
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 22),
                   Center(
                     child: GestureDetector(
                       key: const Key('auth-toggle-mode'),

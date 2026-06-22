@@ -33,6 +33,22 @@ class ClassesChangedTickNotifier extends Notifier<ClassesChangedTick> {
       state = (seq: state.seq + 1, day: day);
 }
 
+/// Caches the set of days within a given Monday-anchored week that have at
+/// least one scheduled class. The day strip uses this to render the activity
+/// dot under each day.
+final _weekDaysWithClassesProvider = FutureProvider.autoDispose
+    .family<Set<DateTime>, DateTime>((ref, monday) async {
+  final classes = await ref.watch(apiClientProvider).classesInRange(
+        from: monday,
+        to: monday.add(const Duration(days: 7)),
+      );
+  return {
+    for (final c in classes)
+      DateTime(c.startsAt.toLocal().year, c.startsAt.toLocal().month,
+          c.startsAt.toLocal().day)
+  };
+});
+
 class BookScreen extends ConsumerStatefulWidget {
   final Me me;
   final StudioConfig studio;
@@ -224,7 +240,7 @@ class _BookScreenState extends ConsumerState<BookScreen> {
         child: CircularProgressIndicator(strokeWidth: 2),
       );
     }
-    if (rows.isEmpty) return _EmptyDay(day: _selected);
+    if (rows.isEmpty) return _EmptyDay(day: _selected, onJumpTo: _pick);
     switch (_dayView) {
       case _DayView.sections:
         return _SectionsList(rows: rows, onBookingChanged: _reload);
@@ -379,6 +395,13 @@ class _DayStrip extends StatelessWidget {
     // drift off midnight and break the sameness check below.
     final week = List.generate(7,
         (i) => DateTime(windowStart.year, windowStart.month, windowStart.day + i));
+    // Anchor for the activity-dot provider — _DayChip queries which days
+    // in `[monday, monday + 7d)` carry at least one scheduled class.
+    // Using the actual Monday of the visible week (vs. windowStart, which
+    // can drift mid-week on first load) keeps the provider cache key
+    // stable as the user navigates within the same week.
+    final monday = DateTime(week.first.year, week.first.month,
+        week.first.day - ((week.first.weekday + 6) % 7));
     const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
     final monthLabel = '${monthNames[selected.month - 1]} ${selected.year}';
 
@@ -456,6 +479,7 @@ class _DayStrip extends StatelessWidget {
                 Expanded(
                   child: _DayChip(
                     date: week[i],
+                    monday: monday,
                     selected: _sameDay(week[i], selected),
                     onTap: () => onPick(week[i]),
                   ),
@@ -474,17 +498,24 @@ class _DayStrip extends StatelessWidget {
 
 class _DayChip extends ConsumerWidget {
   final DateTime date;
+  final DateTime monday;
   final bool selected;
   final VoidCallback onTap;
-  const _DayChip({required this.date, required this.selected, required this.onTap});
+  const _DayChip({
+    required this.date,
+    required this.monday,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    // Dot logic: ask the API if this day has classes. To avoid a flood of
-    // requests, we just show a dot for every day except Sunday in the seeded
-    // schedule. A future iteration can fetch a month-level summary.
-    final hasClasses = date.weekday != DateTime.sunday;
+    final days = ref.watch(_weekDaysWithClassesProvider(monday));
+    final hasClasses = days.maybeWhen(
+      data: (set) => set.contains(date),
+      orElse: () => false,
+    );
     const dows = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     final dow = dows[(date.weekday + 6) % 7];
 
@@ -1081,10 +1112,16 @@ class _ClassListRow extends StatelessWidget {
             ],
           );
         }
+        // Public "Full · N waiting" label when the caller isn't on the
+        // waitlist themselves — uses the server's waitlist_count so the
+        // queue depth is visible to anyone hovering over a packed class.
+        final fullLabel = row.waitlistCount > 0
+            ? 'Full · ${row.waitlistCount} waiting'
+            : 'Full';
         return Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            YChip(kind: YChipKind.full, label: 'Full · ${row.bookedCount}/${row.capacity}'),
+            YChip(kind: YChipKind.full, label: fullLabel),
             const SizedBox(height: 5),
             Text(
               'Join waitlist',
@@ -1122,13 +1159,18 @@ class _ClassListRow extends StatelessWidget {
 
 class _EmptyDay extends StatelessWidget {
   final DateTime day;
-  const _EmptyDay({required this.day});
+  final ValueChanged<DateTime>? onJumpTo;
+  const _EmptyDay({required this.day, this.onJumpTo});
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     const dowFull = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
     final label = '${dowFull[(day.weekday + 6) % 7]} ${day.day}';
+    final nextDay = day.add(const Duration(days: 1));
+    const dowShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final nextLabel =
+        '${dowShort[(nextDay.weekday + 6) % 7]} ${nextDay.day}';
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
       child: Column(
@@ -1163,6 +1205,13 @@ class _EmptyDay extends StatelessWidget {
               color: y.muted,
               height: 1.45,
             ),
+          ),
+          const SizedBox(height: 16),
+          YButton(
+            label: 'Next classes · $nextLabel →',
+            variant: YButtonVariant.soft,
+            small: true,
+            onTap: onJumpTo == null ? null : () => onJumpTo!(nextDay),
           ),
         ],
       ),

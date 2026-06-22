@@ -236,7 +236,7 @@ class _FullRow extends StatelessWidget {
     final y = context.yoga;
     return Row(
       children: [
-        const YChip(kind: YChipKind.full, label: 'Full · 2 waiting'),
+        const YChip(kind: YChipKind.full, label: 'Full'),
         const Spacer(),
         Text(
           'Join waitlist',

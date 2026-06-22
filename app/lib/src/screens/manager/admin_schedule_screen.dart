@@ -169,10 +169,19 @@ class _AdminScheduleScreenState extends ConsumerState<AdminScheduleScreen> {
             builder: (context) {
               final rows = classes.asData?.value ?? const <ClassRow>[];
               final rooms = <String>{for (final r in rows) r.roomName};
+              final classCount = rows.length;
+              final roomCount = rooms.length;
+              // Week view reads "X classes across N rooms" — the "across"
+              // phrasing tracks the design spec for a multi-day summary.
+              // Single-day views (Day / Rooms) use the simpler "·"
+              // separator since the layout already groups by room.
               final subText = rows.isEmpty
                   ? label
-                  : '$label · ${rows.length} class${rows.length == 1 ? '' : 'es'}'
-                      '${showsMultiDay ? '' : ' · ${rooms.length} room${rooms.length == 1 ? '' : 's'}'}';
+                  : showsMultiDay
+                      ? '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+                          ' across $roomCount room${roomCount == 1 ? '' : 's'}'
+                      : '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+                          ' · $roomCount room${roomCount == 1 ? '' : 's'}';
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [

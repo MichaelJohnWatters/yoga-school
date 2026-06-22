@@ -119,6 +119,24 @@ class SplashScreen extends ConsumerWidget {
               child: Container(color: const Color(0x66000000)),
             ),
           SafeArea(child: body),
+          // Bottom home-indicator pill (matches yoga-onboard.jsx:42-44).
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 64,
+            child: Center(
+              child: Container(
+                width: 28,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: onImage
+                      ? Colors.white.withValues(alpha: 0.4)
+                      : y.borderStrong,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
