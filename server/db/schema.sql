@@ -564,3 +564,35 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_conv_seq ON messages(conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_conv_seq ON messages(conversation_id, seq);
+
+-- ===== Student notes ====================================================
+-- Free-text notes attached to a user, visible to all staff (instructor +
+-- manager). Use cases: injuries to be aware of, preferences ("always
+-- sits at the back"), what an instructor covered with the student last
+-- time. Distinct from `audit_log` (which records what happened in the
+-- system) and `messages` (which is a conversation WITH the student).
+--
+-- Soft-delete intentionally NOT modelled — notes get small + frequent
+-- edits, hard-delete on remove keeps the list focused. The audit_log
+-- captures the create/update/delete actions for compliance, including
+-- the body at the time of the action, so historical reads are still
+-- possible via audit even after the row is gone.
+CREATE TABLE IF NOT EXISTS user_notes (
+  id          TEXT PRIMARY KEY,
+  studio_id   TEXT NOT NULL REFERENCES studios(id),
+  -- Subject of the note (the student being noted about).
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  -- Staff member who wrote the note. Could differ from the studio's
+  -- current staff list if they've since left; we keep the FK so the
+  -- attribution survives but accept that the join might surface an
+  -- ex-staff name.
+  author_id   TEXT NOT NULL REFERENCES users(id),
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  -- NULL until edited.
+  updated_at  TEXT
+);
+-- Primary read path: list a user's notes newest-first when opening their
+-- detail page. Index covers that exact lookup.
+CREATE INDEX IF NOT EXISTS idx_user_notes_user
+  ON user_notes (user_id, created_at DESC);

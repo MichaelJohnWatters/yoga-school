@@ -491,6 +491,48 @@ var auditMatrix = []auditCase{
 			return http.MethodDelete, "/admin/students/" + studentID, nil
 		},
 	},
+	{
+		name:           "student_note_create",
+		expectedAction: "student_note_create",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			studentID := seedStudent(t, r)
+			return http.MethodPost, "/admin/students/" + studentID + "/notes",
+				map[string]any{"body": "Prefers props · audit matrix"}
+		},
+	},
+	{
+		name:           "student_note_update",
+		expectedAction: "student_note_update",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			noteID := seedStudentNote(t, r)
+			return http.MethodPatch, "/admin/notes/" + noteID,
+				map[string]any{"body": "Edited note body"}
+		},
+	},
+	{
+		name:           "student_note_delete",
+		expectedAction: "student_note_delete",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			noteID := seedStudentNote(t, r)
+			return http.MethodDelete, "/admin/notes/" + noteID, nil
+		},
+	},
+}
+
+// seedStudentNote drops a single note onto a freshly-seeded student
+// owned by the rig's manager, so the update/delete audit cases above
+// have a real row to operate on. Returns the note id.
+func seedStudentNote(t *testing.T, r *testRig) string {
+	t.Helper()
+	studentID := seedStudent(t, r)
+	id, err := r.server.store.CreateStudentNote(
+		context.Background(), r.studioID, r.mgrID, studentID,
+		"Seeded for audit matrix",
+	)
+	if err != nil {
+		t.Fatalf("seed note: %v", err)
+	}
+	return id
 }
 
 // TestAuditMatrix_EachSensitiveAdminRouteWritesAuditRow runs every declared

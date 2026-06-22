@@ -16,7 +16,17 @@ import '../auth/auth_state.dart';
 import 'api_error.dart';
 import 'models.dart';
 
-const _devBaseUrl = 'http://localhost:8080/api/v1';
+// Dev base URL goes through the Caddy reverse proxy at
+// https://localhost:5443. Same origin as the Flutter dev server (also
+// proxied), which eliminates the per-request CORS OPTIONS preflight,
+// AND gives the app a real TLS endpoint so service workers / secure
+// cookies / HTTP/2 behave the way they will in prod.
+//
+// Bypass path: if Caddy isn't running and you want to talk straight to
+// the Go server, switch this to `http://localhost:8080/api/v1`. The
+// browser will then need CORS preflight + plain HTTP, and you lose the
+// dev/prod parity wins.
+const _devBaseUrl = 'https://localhost:5443/api/v1';
 
 class ApiClient {
   final Dio _dio;
@@ -984,6 +994,43 @@ class ApiClient {
   Future<AdminStudentDetail> adminGetStudent(String id) async {
     final r = await _dio.get<Map<String, dynamic>>('/admin/students/$id');
     return AdminStudentDetail.fromJson(r.data!);
+  }
+
+  /// Student notes — staff-visible free-text context attached to a
+  /// student. Server scopes everything by studio_id so cross-tenant
+  /// reads are impossible; author-only edit + delete enforced
+  /// server-side (returns `not_message_sender` for someone else's note).
+
+  Future<List<StudentNote>> adminListStudentNotes(String studentId) async {
+    final r = await _dio.get<List<dynamic>>(
+      '/admin/students/$studentId/notes',
+    );
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(StudentNote.fromJson)
+        .toList();
+  }
+
+  Future<String> adminCreateStudentNote({
+    required String studentId,
+    required String body,
+  }) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/admin/students/$studentId/notes',
+      data: {'body': body},
+    );
+    return r.data!['id'] as String;
+  }
+
+  Future<void> adminUpdateStudentNote({
+    required String noteId,
+    required String body,
+  }) async {
+    await _dio.patch<void>('/admin/notes/$noteId', data: {'body': body});
+  }
+
+  Future<void> adminDeleteStudentNote(String noteId) async {
+    await _dio.delete<void>('/admin/notes/$noteId');
   }
 
   /// UK GDPR Art. 15/20 subject-access export. Returns the raw JSON bundle so

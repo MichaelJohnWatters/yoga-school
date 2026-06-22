@@ -35,3 +35,8 @@ server/coverage.html
 # Firebase emulator log — produced on every `firebase emulators:start`,
 # noisy + machine-specific, never useful in source control.
 firebase-debug.log
+
+# Local dev TLS certs — generated per-dev via `mkcert -install &&
+# mkcert localhost 127.0.0.1 ::1`. Pinning these in git would bind
+# every dev to one machine's root CA, which defeats the trust model.
+dev-certs/

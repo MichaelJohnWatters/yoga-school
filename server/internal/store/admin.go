@@ -155,7 +155,7 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			c.id, COALESCE(c.title,''),
 			ct.id, ct.name, COALESCE(ct.discipline,''),
 			i.id, i.full_name, i.photo_url,
-			r.id, r.name,
+			r.id, r.name, r.color,
 			c.starts_at, c.ends_at, c.capacity,
 			(SELECT COUNT(*) FROM bookings b
 			    WHERE b.class_id = c.id AND b.status = 'booked') AS booked_count,
@@ -185,12 +185,13 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			photoURL     sql.NullString
 			ruleID       sql.NullString
 			enrollmentID sql.NullString
+			roomColor    sql.NullString
 		)
 		if err := rows.Scan(
 			&r.ID, &r.Title,
 			&r.ClassTypeID, &r.ClassTypeName, &r.Discipline,
 			&r.InstructorID, &r.InstructorName, &photoURL,
-			&r.RoomID, &r.RoomName,
+			&r.RoomID, &r.RoomName, &roomColor,
 			&r.StartsAt, &r.EndsAt, &r.Capacity,
 			&r.BookedCount, &myBooking, &ruleID, &enrollmentID,
 		); err != nil {
@@ -207,6 +208,10 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 		if enrollmentID.Valid {
 			s := enrollmentID.String
 			r.EnrollmentID = &s
+		}
+		if roomColor.Valid && roomColor.String != "" {
+			s := roomColor.String
+			r.RoomColor = &s
 		}
 		start, _ := time.Parse(time.RFC3339, r.StartsAt)
 		end, _ := time.Parse(time.RFC3339, r.EndsAt)

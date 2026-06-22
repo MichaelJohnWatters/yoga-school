@@ -462,7 +462,12 @@ class _LayoutPicker extends StatelessWidget {
 
 const double _dayStartHour = 7.0;
 const double _dayEndHour = 21.0;
-const double _hourHeight = 56.0;
+// Pixels per hour in the day-lane (Rooms) view. Bumped from 56→64 so a
+// 60-min class block has enough room to carry title + meta + the
+// occupancy bar without LayoutBuilder having to drop pieces. Trade-off
+// is the day's vertical scroll area grows by ~14%, which is fine — the
+// view already scrolls.
+const double _hourHeight = 64.0;
 const double _gutterWidth = 52.0;
 
 class _DayLanes extends StatelessWidget {
@@ -723,7 +728,9 @@ class _WeekGrid extends StatelessWidget {
   // 56 px per hour reads well on desktop without making a typical 8-21
   // schedule require excessive vertical scrolling. The class block keeps
   // a minimum so a tiny 30-min class doesn't shrink below tap-comfort.
-  static const double _hourPx = 56;
+  // Matches _hourHeight in the day-lane view above so both grids use
+  // the same scale. See that comment for the bump rationale.
+  static const double _hourPx = 64;
   static const double _minBlockPx = 36;
   // Padding inside each day column so blocks don't kiss the day divider.
   static const double _colInnerPad = 4;
@@ -983,18 +990,22 @@ class _ClassBlock extends StatelessWidget {
     final isReformer = row.discipline == 'reformer';
     final isSeries = row.isEnrollmentSession;
     final isPast = row.endsAt.toLocal().isBefore(DateTime.now());
-    // Enrollment sessions get their own accent so they don't blend in with
-    // the regular drop-in classes — they're a multi-week commitment with
-    // different booking rules and shouldn't read as a one-off Yoga slot.
-    final bg = isSeries
-        ? y.surface
-        : (isReformer ? y.accentSoft : y.primarySoft);
-    // The left-edge accent is room-coloured when the room has one set,
-    // otherwise it falls back to the discipline-based default. Past
-    // blocks always use the neutral border so faded cards don't shout
-    // for attention via a saturated stripe.
-    final roomEdge = isPast ? null : _parseRoomAccent(row.roomColor);
-    final edge = roomEdge ??
+    // Room colour drives both the left-edge accent AND a low-alpha
+    // wash on the card background. When the room has no colour set we
+    // fall back to the discipline-based defaults (primarySoft for yoga,
+    // accentSoft for reformer, plain surface for series) so the
+    // existing visual language for theme-only studios is preserved.
+    final roomTint = isPast ? null : _parseRoomAccent(row.roomColor);
+    final bg = roomTint != null
+        // alphaBlend over the theme surface so the wash composes
+        // correctly in both light + dark mode without the colour going
+        // sour. 0.18 is around the threshold where the hue reads as
+        // intentional without making 11.5pt text struggle.
+        ? Color.alphaBlend(roomTint.withValues(alpha: 0.18), y.surface)
+        : (isSeries
+            ? y.surface
+            : (isReformer ? y.accentSoft : y.primarySoft));
+    final edge = roomTint ??
         (isSeries ? y.text : (isReformer ? y.accent : y.primary));
     final local = row.startsAt.toLocal();
     final hh = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
@@ -1011,15 +1022,19 @@ class _ClassBlock extends StatelessWidget {
     final block = LayoutBuilder(
       builder: (context, c) {
         final h = c.maxHeight;
-        // Rough thresholds — measured against the actual rendered heights
-        // (title 14 + meta 14 + occupancy 16 + paddings + gaps).
-        final showMeta = h >= 42;
-        final showOccupancy = h >= 62;
+        // Tiered thresholds — measured against the actual rendered
+        // stack height (title ~14 + meta ~12 + bar ~11 + padding 6 +
+        // gaps 2 ≈ 45px). Tight enough to fit a 50-min Reformer block
+        // (47px tall at 56px/hr) which is the shortest common class
+        // length; anything below that genuinely doesn't have room for
+        // three text lines.
+        final showMeta = h >= 36;
+        final showOccupancy = h >= 47;
         return InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(10),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
             decoration: BoxDecoration(
               color: isPast ? y.surface2 : bg,
               borderRadius: BorderRadius.circular(10),
@@ -1067,7 +1082,7 @@ class _ClassBlock extends StatelessWidget {
                   ),
                 ],
                 if (showOccupancy) ...[
-                  const SizedBox(height: 3),
+                  const SizedBox(height: 1),
                   // Occupancy — booked seats vs capacity. For past
                   // classes BookedCount drops as people get marked
                   // attended/no_show, so a 0/14 reading there means
