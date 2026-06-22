@@ -263,7 +263,10 @@ class _StudioCardState extends ConsumerState<_StudioCard> {
       ref.invalidate(bootstrapProvider);
       if (mounted) setState(() => _saved = 'Saved');
     } catch (e) {
-      if (mounted) setState(() => _saved = 'Save failed: $e');
+      if (mounted) {
+        setState(() =>
+            _saved = 'Save failed: ${ApiError.fromAny(e).message}');
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -2148,18 +2151,35 @@ class _RoomsBodyState extends ConsumerState<_RoomsBody> {
 }
 
 /// Curated palette for the rooms colour picker. Picked for legibility
-/// as a 4px stripe on class cards in both light and dark themes — not
-/// neon, not muddy. The custom hex field gives an escape hatch for
-/// studios that need to match a specific brand palette.
+/// as a 4px stripe + an 18% background wash on class cards in both
+/// light and dark themes — not neon, not muddy. Ordered roughly by
+/// hue so the picker reads as a spectrum (warm → cool → neutral)
+/// rather than a random scatter. The custom hex field below the
+/// presets stays as an escape hatch for studios that need a brand
+/// match outside this set.
 const List<String> _kRoomColorPresets = [
+  // Warm — reds, pinks, oranges, ambers.
   '#e27d60', // coral
+  '#d97757', // terracotta
   '#e8a87c', // peach
+  '#c25a5a', // brick
+  '#e0a3a3', // blush
   '#c38d9e', // rose
+  '#ab83a1', // plum
+  '#8b7baa', // periwinkle
+  // Yellows + earths.
+  '#e8b04a', // amber
+  '#d4a574', // sand
+  '#b5651d', // clay
+  '#c4a85e', // olive
+  // Cool — greens.
   '#85dcb0', // mint
   '#41b3a3', // teal
-  '#5b8fa8', // sky
   '#8ba888', // sage
-  '#b5651d', // clay
+  '#5b8c5a', // moss
+  // Cool — blues + neutral.
+  '#5b8fa8', // sky
+  '#6b7785', // slate
 ];
 
 /// Lenient hex parser used by the swatch + preview. Returns null when
@@ -2317,28 +2337,44 @@ class _RoomRowState extends ConsumerState<_RoomRow> {
         children: [
           // Swatch doubles as both the room indicator AND the "set
           // colour" affordance — tap to open the picker. Empty rooms
-          // get a hatched / outlined circle so the absence reads as
-          // "no colour yet" rather than "this room is broken".
+          // get an outlined circle with an eyedropper icon + a primary
+          // tint on the icon so it reads as "tap to set", not decor.
+          // Material + InkWell so the hover/splash overlay actually
+          // paints on web/desktop (same fix as YButton's hover).
           Tooltip(
-            message: swatchColor != null ? 'Change room colour' : 'Set room colour',
-            child: InkWell(
-              onTap: _busy ? null : _pickColor,
-              customBorder: const CircleBorder(),
-              child: Container(
-                width: 24,
-                height: 24,
-                decoration: BoxDecoration(
-                  color: swatchColor ?? Colors.transparent,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: swatchColor == null ? y.borderStrong : y.border,
-                    width: 1.2,
+            message: swatchColor != null
+                ? 'Change room colour'
+                : 'Pick a room colour',
+            child: Material(
+              color: Colors.transparent,
+              shape: const CircleBorder(),
+              child: InkWell(
+                onTap: _busy ? null : _pickColor,
+                customBorder: const CircleBorder(),
+                hoverColor: y.primary.withValues(alpha: 0.08),
+                splashColor: y.primary.withValues(alpha: 0.16),
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: swatchColor ?? Colors.transparent,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      // Primary-tinted border on the empty state so the
+                      // chip pulls a bit of attention. Once a colour is
+                      // set, the border drops back to neutral so the
+                      // colour itself does the talking.
+                      color: swatchColor == null
+                          ? y.primary.withValues(alpha: 0.55)
+                          : y.border,
+                      width: swatchColor == null ? 1.4 : 1.2,
+                    ),
                   ),
+                  alignment: Alignment.center,
+                  child: swatchColor == null
+                      ? Icon(Icons.colorize, size: 14, color: y.primary)
+                      : null,
                 ),
-                alignment: Alignment.center,
-                child: swatchColor == null
-                    ? Icon(Icons.colorize, size: 12, color: y.muted)
-                    : null,
               ),
             ),
           ),
@@ -2420,18 +2456,16 @@ class _RoomColorPickerDialog extends StatefulWidget {
 }
 
 class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
-  String? _selected;
   late TextEditingController _customCtrl;
   String? _customError;
 
   @override
   void initState() {
     super.initState();
-    _selected = widget.initial?.toLowerCase();
+    final init = widget.initial?.toLowerCase();
     // Pre-fill the custom field with the current value when it's not in
     // the preset list — saves the manager from having to retype it just
     // to nudge a hue.
-    final init = _selected;
     _customCtrl = TextEditingController(
       text: init != null && !_kRoomColorPresets.contains(init) ? init : '',
     );
@@ -2443,29 +2477,30 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
     super.dispose();
   }
 
-  void _applyCustom() {
+  /// Pop with the given choice, closing the dialog. Centralises the
+  /// "tap = commit" behaviour so every entry point (preset, custom hex,
+  /// Clear) goes through the same single exit.
+  void _commit(String? color) {
+    Navigator.of(context).pop(_RoomColorChoice(color));
+  }
+
+  /// Validate + commit the custom hex on Enter / blur. Empty input is
+  /// ignored (doesn't accidentally clear the colour — that's what the
+  /// explicit Clear action is for).
+  void _commitCustom() {
     final raw = _customCtrl.text.trim().toLowerCase();
-    if (raw.isEmpty) {
-      setState(() {
-        _selected = null;
-        _customError = null;
-      });
-      return;
-    }
+    if (raw.isEmpty) return;
     if (!RegExp(r'^#[0-9a-f]{6}$').hasMatch(raw)) {
-      setState(() =>
-          _customError = 'Use a hex value like #a3b7c1.');
+      setState(() => _customError = 'Use a hex value like #a3b7c1.');
       return;
     }
-    setState(() {
-      _selected = raw;
-      _customError = null;
-    });
+    _commit(raw);
   }
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    final initial = widget.initial?.toLowerCase();
     return AlertDialog(
       backgroundColor: y.surface,
       title: const Text('Room colour'),
@@ -2476,8 +2511,9 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Pick a preset or enter a custom hex. Class cards in this '
-              'room will show a stripe in this colour.',
+              'Tap a preset to apply it. Or type a custom hex and press '
+              'Enter. Either commits straight away — Cancel keeps the '
+              'current colour.',
               style: TextStyle(
                 fontSize: 12.5,
                 fontWeight: FontWeight.w500,
@@ -2493,12 +2529,12 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
                 for (final hex in _kRoomColorPresets)
                   _PresetSwatch(
                     hex: hex,
-                    selected: _selected == hex,
-                    onTap: () => setState(() {
-                      _selected = hex;
-                      _customError = null;
-                      _customCtrl.clear();
-                    }),
+                    // Highlight the currently-saved colour so it's
+                    // obvious which preset matches the room's existing
+                    // value. No selection-then-confirm dance — the
+                    // mark is just a "you're already on this" hint.
+                    selected: initial == hex,
+                    onTap: () => _commit(hex),
                   ),
               ],
             ),
@@ -2513,43 +2549,34 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
               ),
             ),
             const SizedBox(height: 6),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _customCtrl,
-                    onChanged: (_) {
-                      if (_customError != null) {
-                        setState(() => _customError = null);
-                      }
-                    },
-                    onSubmitted: (_) => _applyCustom(),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      hintText: '#a3b7c1',
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 8),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide(
-                          color: _customError == null ? y.border : Colors.redAccent,
-                        ),
-                      ),
-                    ),
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      fontFamily: 'monospace',
-                      color: y.text,
-                    ),
+            TextField(
+              controller: _customCtrl,
+              onChanged: (_) {
+                if (_customError != null) {
+                  setState(() => _customError = null);
+                }
+              },
+              onSubmitted: (_) => _commitCustom(),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '#a3b7c1  (press Enter)',
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 8),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide(
+                    color: _customError == null
+                        ? y.border
+                        : Colors.redAccent,
                   ),
                 ),
-                const SizedBox(width: 8),
-                TextButton(
-                  onPressed: _applyCustom,
-                  child: const Text('Use'),
-                ),
-              ],
+              ),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'monospace',
+                color: y.text,
+              ),
             ),
             if (_customError != null) ...[
               const SizedBox(height: 6),
@@ -2566,20 +2593,15 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
         ),
       ),
       actions: [
+        // Removes the current colour entirely — equivalent to "no tint".
         TextButton(
-          onPressed: () => Navigator.of(context)
-              .pop(const _RoomColorChoice(null)),
-          child: Text('Clear', style: TextStyle(color: y.muted)),
+          onPressed: () => _commit(null),
+          child: Text('Remove colour', style: TextStyle(color: y.muted)),
         ),
         const Spacer(),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(context)
-              .pop(_RoomColorChoice(_selected)),
-          child: const Text('Save'),
         ),
       ],
     );

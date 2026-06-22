@@ -127,6 +127,10 @@ class _AdminAuditScreenState extends ConsumerState<AdminAuditScreen> {
     'theme_activate': 'Theme activations',
     'studio_config_update': 'Studio settings',
     'stripe_credentials_update': 'Stripe credentials',
+    // Student notes — staff-authored context attached to a student.
+    'student_note_create': 'Student notes',
+    'student_note_update': 'Student note edits',
+    'student_note_delete': 'Student note deletes',
   };
 
   @override

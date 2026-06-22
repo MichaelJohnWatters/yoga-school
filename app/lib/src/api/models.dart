@@ -2231,3 +2231,45 @@ class Conversation {
     return other.isNotEmpty ? other.first : null;
   }
 }
+
+/// One free-text note attached to a student, visible to all staff.
+/// Distinct from chat messages (which are conversations WITH the
+/// student) and audit entries (which describe system actions) —
+/// notes are private operational context like "recovering from
+/// knee surgery" or "always sits at the back, doesn't like hands-on
+/// adjustments".
+class StudentNote {
+  final String id;
+  final String userId;
+  final String authorId;
+  final String authorName;
+  final String body;
+  final DateTime createdAt;
+  /// Set on edit; null when the note hasn't been changed since creation.
+  /// Drives an "edited" marker in the UI, similar to chat messages.
+  final DateTime? updatedAt;
+
+  const StudentNote({
+    required this.id,
+    required this.userId,
+    required this.authorId,
+    required this.authorName,
+    required this.body,
+    required this.createdAt,
+    this.updatedAt,
+  });
+
+  factory StudentNote.fromJson(Map<String, dynamic> j) => StudentNote(
+        id: j['id'] as String,
+        userId: j['user_id'] as String,
+        authorId: j['author_id'] as String,
+        authorName: j['author_name'] as String,
+        body: j['body'] as String,
+        createdAt: DateTime.parse(j['created_at'] as String),
+        updatedAt: (j['updated_at'] as String?) != null
+            ? DateTime.tryParse(j['updated_at'] as String)
+            : null,
+      );
+
+  bool get wasEdited => updatedAt != null;
+}

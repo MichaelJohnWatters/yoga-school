@@ -16,6 +16,7 @@ import '../../widgets/yoga_primitives.dart';
 import 'admin_students_screen.dart';
 import 'manager_shell.dart';
 import 'money_dialogs.dart';
+import 'student_notes_card.dart';
 
 final adminStudentDetailProvider =
     FutureProvider.autoDispose.family<AdminStudentDetail, String>((ref, id) async {
@@ -95,6 +96,11 @@ class _Body extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final active = detail.entitlements.where((e) => e.isActive).toList();
     final history = detail.entitlements.where((e) => !e.isActive).toList();
+    // Current user id from bootstrap — the Notes card uses it to gate
+    // the per-row edit/delete affordances to the note's author. Server
+    // enforces the same rule independently, so a stale value here only
+    // hides a button that wouldn't have worked anyway.
+    final currentUserId = ref.watch(bootstrapProvider).asData?.value.me.id ?? '';
     return ListView(
       children: [
         ManagerPageHeader(
@@ -133,6 +139,14 @@ class _Body extends ConsumerWidget {
             ),
           ],
         ),
+        // Notes hero — full width above the wallet/bookings columns so
+        // injury info, preferences, and front-desk-relevant context are
+        // the first thing a staff member sees on opening the record.
+        StudentNotesCard(
+          studentId: detail.id,
+          currentUserId: currentUserId,
+        ),
+        const SizedBox(height: 16),
         IntrinsicHeight(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,

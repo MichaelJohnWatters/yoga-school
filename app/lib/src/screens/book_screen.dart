@@ -940,6 +940,14 @@ class _ClassListRow extends StatelessWidget {
     // "Book" / "Join waitlist" CTAs.
     final isPast = row.endsAt.toLocal().isBefore(DateTime.now());
     final stripe = _parseRoomAccent(row.roomColor);
+    // Card background gets a very low-alpha wash of the room colour
+    // (12% — quieter than the manager Schedule's 18% because the
+    // student card is bigger and a stronger tint would compete with
+    // the body copy). Past cards stay neutral and rely on the global
+    // Opacity below to fade.
+    final cardBg = (stripe != null && !isPast)
+        ? Color.alphaBlend(stripe.withValues(alpha: 0.12), y.surface)
+        : y.surface;
     return Opacity(
       opacity: isPast ? 0.55 : 1.0,
       child: GestureDetector(
@@ -955,7 +963,7 @@ class _ClassListRow extends StatelessWidget {
             Container(
               padding: const EdgeInsets.fromLTRB(18, 13, 14, 13),
               decoration: BoxDecoration(
-                color: y.surface,
+                color: cardBg,
                 borderRadius: BorderRadius.circular(y.radiusCard),
                 border: Border.all(color: y.border),
               ),

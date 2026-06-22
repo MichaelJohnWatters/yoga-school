@@ -12,7 +12,7 @@
 #   priya@studio52.dev / dev123456   (manager)
 # The sign-in screen has a dev dropdown that populates these for you.
 
-.PHONY: go flutter firebase seed-firebase reset analyze check-leaks macos
+.PHONY: go flutter firebase seed-firebase reset analyze check-leaks check-tls caddy macos
 
 # Firebase CLI requires Node ≥ 20.
 NODE_BIN := $(HOME)/.nvm/versions/node/v20.20.1/bin
@@ -47,6 +47,24 @@ analyze:
 # the pipeline rather than landing silently.
 check-leaks:
 	./scripts/check-error-leaks.sh
+
+# Local HTTPS reverse proxy. Requires `brew install mkcert caddy &&
+# mkcert -install` once per machine, then `(cd dev-certs && mkcert
+# localhost 127.0.0.1 ::1)` once per checkout. App URL becomes
+# https://localhost:5443 — same origin for API + Flutter, no CORS.
+caddy:
+	@test -f dev-certs/localhost+2.pem || { \
+		echo "Missing dev-certs/localhost+2.pem — generate with:"; \
+		echo "  mkdir -p dev-certs && (cd dev-certs && mkcert localhost 127.0.0.1 ::1)"; \
+		exit 1; \
+	}
+	caddy run --config Caddyfile.dev --adapter caddyfile
+
+# End-to-end TLS smoke test: cert trusted by the system + HTTPS endpoint
+# reachable through the proxy + HTTP/2 negotiated. Skips with a clear
+# message if the proxy isn't running so CI can call it unconditionally.
+check-tls:
+	./scripts/check-tls.sh
 
 macos:
 	cd app && flutter run -d macos

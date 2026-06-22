@@ -26,6 +26,10 @@ var (
 	authBypassRoutes = map[string]bool{
 		"POST /dev/reset-test-state": true,
 		"POST /dev/fill-class":       true,
+		// Load-balancer probe — must be reachable without a token.
+		// See handleHealthz for the rationale (and the prod checklist
+		// item about firewalling the port off the public internet).
+		"GET /healthz": true,
 	}
 	roleBypassRoutes = map[string]bool{}
 )
@@ -49,6 +53,13 @@ var staffAllowedRoutes = map[string]bool{
 	"GET /api/v1/admin/enrollments/{id}/roster":   true,
 	"GET /api/v1/admin/students":                  true,
 	"GET /api/v1/admin/students/{id}":             true,
+	// Student notes — staff-tier by design (the whole point is letting
+	// instructors share context). Author-only edit/delete is enforced
+	// inside the store, not at the route gate.
+	"GET /api/v1/admin/students/{id}/notes":  true,
+	"POST /api/v1/admin/students/{id}/notes": true,
+	"PATCH /api/v1/admin/notes/{id}":         true,
+	"DELETE /api/v1/admin/notes/{id}":        true,
 }
 
 // staffOnlyRoutes declares non-admin routes that still require staff

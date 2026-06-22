@@ -50,6 +50,13 @@ done
 echo "seeding Firebase users in project ${PROJECT_ID}:"
 create_user "maya@studio52.dev"  "dev123456" "Maya (student · unlimited)"
 create_user "priya@studio52.dev" "dev123456" "Priya (manager)"
+# Instructors — DB seed in seed.go already inserts these as users with
+# role=instructor; Firebase Auth accounts here let them actually log in
+# and exercise the staff-tier routes (schedule read, roster, attendance,
+# scan check-in). Without these the instructor flow is untestable.
+create_user "asha@studio52.dev"  "dev123456" "Asha (instructor)"
+create_user "jonas@studio52.dev" "dev123456" "Jonas (instructor)"
+create_user "mara@studio52.dev"  "dev123456" "Mara (instructor)"
 # Community students — covers the main pass-shape permutations so dev
 # testing can hit each booking/wallet code path. Same password as Maya.
 # (See seed.go for the per-student pass configuration that backs these.)

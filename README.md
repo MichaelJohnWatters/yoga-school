@@ -1,5 +1,50 @@
 # yoga-school
 
+## Local dev — TLS proxy
+
+Dev mirrors prod-shape TLS via [mkcert](https://github.com/FiloSottile/mkcert) +
+[Caddy](https://caddyserver.com/). Same origin (`https://localhost:5443`) for
+both API and Flutter web, so cookies, service workers, HTTP/2, and CORS
+all behave the way they will in production.
+
+**One-time per machine:**
+
+```bash
+brew install mkcert caddy
+mkcert -install                                  # installs a local CA root
+```
+
+**One-time per checkout:**
+
+```bash
+mkdir -p dev-certs
+(cd dev-certs && mkcert localhost 127.0.0.1 ::1) # gitignored
+```
+
+**Run:**
+
+- `tilt up` brings up the `yoga-caddy` resource alongside the rest.
+- Or manually: `make caddy` in its own shell (foreground).
+
+**Verify:** `make check-tls` — asserts the proxy is reachable, the cert
+is trusted by the system, HTTP/2 is negotiated, and the API path
+proxies through. Skips cleanly when the proxy isn't running.
+
+**Bypass:** `app/lib/src/api/api_client.dart` points at the proxy by
+default. To bypass it and hit the Go server directly, edit `_devBaseUrl`
+back to `http://localhost:8080/api/v1` (loses CORS-free + HTTP/2).
+
+**Convention vs force.** Caddy is "all app traffic goes through HTTPS"
+by *convention* — the Flutter client's base URL points at the proxy, so
+every browser-originated call lands on `:5443` first. The Go server
+itself still listens on plain `:8080` and accepts direct calls from
+anything that knows the port (curl, Postman, another browser tab). That's
+fine locally — your machine has no untrusted callers — and useful for
+poking the API in isolation. In prod the equivalent gap is closed by
+the deployment: the Go port is firewalled to the internal network and
+only the load-balancer / reverse proxy can reach it. See the prod
+checklist below.
+
 ## Before shipping to prod
 
 A running list of dev-only shortcuts + things that need to be reconfigured
@@ -19,6 +64,15 @@ they're addressed; add new entries as they accumulate.
 
 ### Server
 
+- [ ] **TLS + direct port access.** The Go server listens on plain HTTP
+  on `:8080` and has no opinion about who reaches it. In dev that's
+  acceptable (loopback only); in prod the deployment layer is responsible
+  for terminating TLS at the edge (load balancer / reverse proxy with a
+  managed cert) AND firewalling `:8080` so nothing on the public
+  internet can bypass the proxy. The same applies to `/healthz` — it
+  should remain reachable from the load-balancer's internal network but
+  not from outside it. Mirrors the dev setup (Caddy → Go) but with the
+  trust boundary moved to the deployment perimeter.
 - [ ] `POST /dev/reset-test-state` and `POST /dev/fill-class` (in
   `server/internal/api/api.go`) are unauthenticated, gated only by the
   presence of `FIREBASE_AUTH_EMULATOR_HOST`. They 404 in prod-shaped

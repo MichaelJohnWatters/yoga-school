@@ -45,6 +45,13 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 
+	// Liveness + readiness in one — a deploy platform (Fly, k8s, ALB,
+	// whatever) pings /healthz and gates traffic on a 2xx. We include a
+	// trivial DB ping so "DB is unreachable" trips the health check too,
+	// triggering a restart rather than letting the API serve 500s.
+	// Unauthenticated by design: the prober isn't logging in.
+	r.Get("/healthz", s.handleHealthz)
+
 	// Dev-only test reset endpoint. Lets integration tests wipe
 	// non-seed bookings/purchases/etc. between scenarios so each test
 	// starts from a clean baseline without restarting the server. Gated
@@ -77,6 +84,13 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/admin/enrollments/{id}/roster", s.handleAdminSeriesRoster)
 			r.Get("/admin/students", s.handleAdminListStudents)
 			r.Get("/admin/students/{id}", s.handleAdminGetStudent)
+			// Student notes — staff-tier so instructors can read + write
+			// context about students (injuries, preferences, etc).
+			// Author-only edit/delete is enforced in the store.
+			r.Get("/admin/students/{id}/notes", s.handleAdminListStudentNotes)
+			r.Post("/admin/students/{id}/notes", s.handleAdminCreateStudentNote)
+			r.Patch("/admin/notes/{id}", s.handleAdminUpdateStudentNote)
+			r.Delete("/admin/notes/{id}", s.handleAdminDeleteStudentNote)
 		})
 
 		// Manager routes — manager + owner only. Money mutators, config,
@@ -2630,6 +2644,68 @@ func queryInt(r *http.Request, key string) int {
 	return n
 }
 
+// ---- student notes -------------------------------------------------------
+
+// handleAdminListStudentNotes returns the staff-visible notes for a
+// student newest-first. Available to any staff member (instructors
+// + managers); the store scopes by studio_id so cross-tenant reads
+// are impossible even with a leaked path.
+func (s *Server) handleAdminListStudentNotes(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	studentID := chi.URLParam(r, "id")
+	notes, err := s.store.ListStudentNotes(r.Context(), u.StudioID, studentID)
+	if err != nil {
+		respondErr(w, err, "listStudentNotes")
+		return
+	}
+	writeJSON(w, http.StatusOK, notes)
+}
+
+func (s *Server) handleAdminCreateStudentNote(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	studentID := chi.URLParam(r, "id")
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	id, err := s.store.CreateStudentNote(r.Context(), u.StudioID, u.ID, studentID, body.Body)
+	if err != nil {
+		respondErr(w, err, "createStudentNote")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (s *Server) handleAdminUpdateStudentNote(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	noteID := chi.URLParam(r, "id")
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := s.store.UpdateStudentNote(r.Context(), u.StudioID, u.ID, noteID, body.Body); err != nil {
+		respondErr(w, err, "updateStudentNote")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminDeleteStudentNote(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	noteID := chi.URLParam(r, "id")
+	if err := s.store.DeleteStudentNote(r.Context(), u.StudioID, u.ID, noteID); err != nil {
+		respondErr(w, err, "deleteStudentNote")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---- helpers -------------------------------------------------------------
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -2696,4 +2772,31 @@ func cors(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleHealthz answers the load balancer's "are you alive?" probe.
+// Returns 200 when the DB is reachable, 503 otherwise. A failing
+// healthz tells the platform to stop sending traffic and (depending on
+// config) restart the process — which is the right reaction to a stuck
+// or disconnected DB, and the wrong reaction to e.g. a Firebase outage,
+// so we deliberately only probe the DB here.
+//
+// Short context timeout — the prober itself runs on a tight schedule,
+// and an answer that takes 30s is worse than no answer (it ties up
+// goroutines + makes the prober think we're slow rather than down).
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.store.DB().PingContext(ctx); err != nil {
+		// Plain text body — the prober just reads the status code, but
+		// curling /healthz in incident triage gives the operator a hint
+		// of WHY it's down.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("db ping failed: " + err.Error() + "\n"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
