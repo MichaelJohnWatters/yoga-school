@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/studio52/yoga-school/server/internal/auth"
@@ -30,33 +29,44 @@ type testRig struct {
 	studioID string
 	mgrEmail string
 	mgrID    string
+	// curEmail points at the identity the stub verifier resolves bearer
+	// tokens to. Defaults to the manager; as() repoints it so a test can
+	// exercise a route as a student/instructor.
+	curEmail *string
+}
+
+// as switches the identity subsequent do() calls authenticate as, by email.
+// The user must already exist (seed it first).
+func (r *testRig) as(email string) *testRig {
+	*r.curEmail = email
+	return r
 }
 
 func newRig(t *testing.T) *testRig {
 	t.Helper()
-	store := openTestStore(t)
-	srv := NewServer(store, nil)
+	st := openTestStore(t)
+	srv := NewServer(st, nil)
 
-	studioID := uuid.NewString()
-	themeID := uuid.NewString()
-	mgrID := uuid.NewString()
+	studioID := store.NewID()
+	themeID := store.NewID()
+	mgrID := store.NewID()
 	mgrEmail := "manager@test.com"
 
-	mustExec(t, store, `INSERT INTO studios (id, name, welcome_message)
+	mustExec(t, st, `INSERT INTO studios (id, name, welcome_message)
 		VALUES (?, 'Test', 'Welcome')`, studioID)
-	mustExec(t, store, `INSERT INTO themes (id, studio_id, name, mode, tokens)
+	mustExec(t, st, `INSERT INTO themes (id, studio_id, name, mode, tokens)
 		VALUES (?, ?, 'T', 'light', '{"primary":"#000"}')`, themeID, studioID)
-	mustExec(t, store, `UPDATE studios SET active_theme_id = ? WHERE id = ?`, themeID, studioID)
-	mustExec(t, store, `INSERT INTO users (id, studio_id, role, email, full_name)
+	mustExec(t, st, `UPDATE studios SET active_theme_id = ? WHERE id = ?`, themeID, studioID)
+	mustExec(t, st, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'manager', ?, 'Manager')`, mgrID, studioID, mgrEmail)
 	// Seed an instructor + room + class_type so create-class tests can run.
-	mustExec(t, store, `INSERT INTO users (id, studio_id, role, email, full_name)
+	mustExec(t, st, `INSERT INTO users (id, studio_id, role, email, full_name)
 		VALUES (?, ?, 'instructor', 'inst@test.com', 'Inst')`,
-		uuid.NewString(), studioID)
-	mustExec(t, store, `INSERT INTO rooms (id, studio_id, name) VALUES (?, ?, 'Studio A')`,
-		uuid.NewString(), studioID)
-	mustExec(t, store, `INSERT INTO class_types (id, studio_id, name) VALUES (?, ?, 'Yoga')`,
-		uuid.NewString(), studioID)
+		store.NewID(), studioID)
+	mustExec(t, st, `INSERT INTO rooms (id, studio_id, name) VALUES (?, ?, 'Studio A')`,
+		store.NewID(), studioID)
+	mustExec(t, st, `INSERT INTO class_types (id, studio_id, name) VALUES (?, ?, 'Yoga')`,
+		store.NewID(), studioID)
 
 	// Stub verifier: any non-empty token resolves to the manager. Tests that
 	// need a different identity can override via rig.asEmail(...).
@@ -75,6 +85,7 @@ func newRig(t *testing.T) *testRig {
 		studioID: studioID,
 		mgrEmail: mgrEmail,
 		mgrID:    mgrID,
+		curEmail: currentEmail,
 	}
 }
 
@@ -125,8 +136,13 @@ func storeDB(s *store.Store) *sql.DB { return store.TestDB(s) }
 
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	db, err := sql.Open("sqlite",
-		"file::memory:?_pragma=foreign_keys(1)&cache=shared")
+	// Unique DB name per rig. cache=shared lets the pooled connections behind
+	// a single *sql.DB see the same in-memory database, while the unique name
+	// keeps each rig isolated — without it every rig in the process shares one
+	// DB, and the global (unscoped) UserByEmail lookup then resolves a
+	// duplicate "manager@test.com" to an arbitrary studio's manager.
+	dsn := "file:" + store.NewID() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -171,8 +187,11 @@ func TestAPI_AuthBadToken_Returns401(t *testing.T) {
 	}
 }
 
-func TestAPI_StudentRouteForbiddenForNonManager_ButThisRigIsManager(t *testing.T) {
-	// Sanity: our rig is wired with manager role, so admin routes succeed.
+// TestAPI_AdminRoute_AllowedForManager is a sanity check that the rig is
+// wired correctly: an admin endpoint must respond 200 when the caller is a
+// manager. The negative side (instructor/student rejected) lives in the
+// role matrix in matrix_test.go.
+func TestAPI_AdminRoute_AllowedForManager(t *testing.T) {
 	r := newRig(t)
 	res := r.do(http.MethodGet, "/admin/staff", nil)
 	if res.StatusCode != http.StatusOK {
@@ -389,9 +408,123 @@ func TestAPI_ClassesRange_RejectsNoArgs(t *testing.T) {
 	}
 }
 
+func TestAPI_ReportRevenue_DefaultsWithoutRange(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/revenue", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Errorf("no range: got %d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestAPI_ReportRevenue_AcceptsRange(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/revenue?from=2026-06-01&to=2026-06-30&granularity=week", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Errorf("range: got %d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestAPI_ReportRevenue_RejectsBadRange(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/revenue?from=nope&to=2026-06-30", nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad from: got %d want 400", res.StatusCode)
+	}
+	res = r.do(http.MethodGet, "/admin/reports/revenue?from=2026-06-30&to=2026-06-01", nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("inverted range: got %d want 400", res.StatusCode)
+	}
+}
+
+func TestAPI_ReportRevenue_CSVExport(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet,
+		"/admin/reports/revenue?from=2026-06-01&to=2026-06-30&format=csv", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("csv: got %d want 200", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Errorf("content-type = %q, want text/csv", ct)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.HasPrefix(string(body), "period_start,currency,card,cash,total,gross,discount") {
+		t.Errorf("csv header missing, got: %q", string(body)[:min(80, len(body))])
+	}
+}
+
+func TestAPI_ReportInstructorPay_CSVExport(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/instructor-pay?format=csv", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("csv: got %d want 200", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.HasPrefix(string(body), "instructor,classes_taught,rate,pay") {
+		t.Errorf("csv header missing, got: %q", string(body)[:min(80, len(body))])
+	}
+}
+
+func TestAPI_ReportCustomers_OK(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet,
+		"/admin/reports/customers?from=2026-06-01&to=2026-06-30&sort=spend", nil)
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("customers: got %d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestAPI_ReportCustomers_CSVExport(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/customers?format=csv", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("csv: got %d want 200", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.HasPrefix(string(body), "name,email,joined_at,visits,no_shows,spend,last_seen,active_pass") {
+		t.Errorf("csv header missing, got: %q", string(body)[:min(80, len(body))])
+	}
+}
+
+func TestAPI_BuilderSchema_OK(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodGet, "/admin/reports/builder/schema", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("schema: got %d want 200", res.StatusCode)
+	}
+	body := decode[map[string]any](t, res)
+	if _, ok := body["datasets"]; !ok {
+		t.Errorf("schema missing datasets key: %v", body)
+	}
+}
+
+func TestAPI_BuilderRun_OK(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodPost, "/admin/reports/builder/run", map[string]any{
+		"dataset": "customers",
+		"columns": []string{"name", "email"},
+	})
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("run: got %d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestAPI_BuilderRun_RejectsUnknownDataset(t *testing.T) {
+	r := newRig(t)
+	res := r.do(http.MethodPost, "/admin/reports/builder/run", map[string]any{
+		"dataset": "secrets",
+	})
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("unknown dataset: got %d want 400", res.StatusCode)
+	}
+}
+
 func TestAPI_ClassDetail_NotFound(t *testing.T) {
 	r := newRig(t)
-	res := r.do(http.MethodGet, "/classes/"+uuid.NewString(), nil)
+	res := r.do(http.MethodGet, "/classes/"+store.NewID(), nil)
 	if res.StatusCode != http.StatusNotFound {
 		t.Errorf("missing class: got %d want 404", res.StatusCode)
 	}
@@ -399,7 +532,7 @@ func TestAPI_ClassDetail_NotFound(t *testing.T) {
 
 func TestAPI_ProductDetail_NotFound(t *testing.T) {
 	r := newRig(t)
-	res := r.do(http.MethodGet, "/products/"+uuid.NewString(), nil)
+	res := r.do(http.MethodGet, "/products/"+store.NewID(), nil)
 	if res.StatusCode != http.StatusNotFound {
 		t.Errorf("missing product: got %d want 404", res.StatusCode)
 	}
@@ -408,7 +541,7 @@ func TestAPI_ProductDetail_NotFound(t *testing.T) {
 func TestAPI_CheckinScan_InvalidToken_Returns404(t *testing.T) {
 	r := newRig(t)
 	res := r.do(http.MethodPost, "/admin/checkin/scan", map[string]any{
-		"token": "no-such-code", "class_id": uuid.NewString(),
+		"token": "no-such-code", "class_id": store.NewID(),
 	})
 	if res.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(res.Body)
@@ -416,12 +549,21 @@ func TestAPI_CheckinScan_InvalidToken_Returns404(t *testing.T) {
 	}
 }
 
-func TestAPI_CheckinScan_MissingFields_Returns404(t *testing.T) {
+// TestAPI_CheckinScan_EmptyTokenMapsToInvalidTokenAs404 pins the contract
+// that a blank token gets handled the same as a token that doesn't match a
+// student — both surface as invalid_token, which the handler maps to 404.
+// Arguably this should be 400 ("you didn't send a token"), but treating it
+// as 404 keeps the client error-surface symmetric (one error per outcome).
+// If the handler ever splits the cases, update this test.
+func TestAPI_CheckinScan_EmptyTokenMapsToInvalidTokenAs404(t *testing.T) {
 	r := newRig(t)
 	res := r.do(http.MethodPost, "/admin/checkin/scan", map[string]any{})
-	// Empty token surfaces as invalid_token (404 per handler mapping).
 	if res.StatusCode != http.StatusNotFound {
-		t.Errorf("missing fields: got %d want 404", res.StatusCode)
+		t.Errorf("empty token: got %d want 404 (invalid_token mapping)", res.StatusCode)
+	}
+	body := decode[map[string]any](t, res)
+	if body["code"] != "invalid_token" {
+		t.Errorf("error code: got %v want invalid_token", body["code"])
 	}
 }
 

@@ -13,13 +13,70 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
+import 'buy_screen.dart';
+
+/// Pick the entitlement we should pre-select when the booking sheet opens
+/// with multiple eligible passes. The user can still swap rows; this is
+/// only the default highlight + the pass that's consumed if they tap
+/// Book without picking.
+///
+/// Sort order — use-it-before-you-lose-it:
+///   1. **Soonest expiry first.** A credit (or unlimited) expiring in two
+///      days ranks ahead of one expiring next month, regardless of kind.
+///      Empty / never-expires expiries sort to the end.
+///   2. **Credit before unlimited within the same expiry bracket.** When
+///      two passes share a deadline, burn the consumable one first —
+///      using an unlimited while a still-valid credit sits around wastes
+///      the credit's residual value once it eventually expires unused.
+///   3. **Fewest credits left first** (credit vs credit tiebreaker).
+///      Drains near-empty packs so the user isn't left with a stray
+///      one-credit remnant they forget about.
+///
+/// Pure function — no Riverpod, no state. Easy to unit-test later.
+EligibleEntitlement pickDefaultEntitlement(List<EligibleEntitlement> list) {
+  assert(list.isNotEmpty, 'pickDefaultEntitlement called with empty list');
+  // Copy + sort to avoid mutating the caller's list (the server payload
+  // may be shared via the Future returned to multiple consumers).
+  final sorted = [...list]..sort((a, b) {
+    final ea = _expiryOrInfinity(a.expiresAt);
+    final eb = _expiryOrInfinity(b.expiresAt);
+    final byExpiry = ea.compareTo(eb);
+    if (byExpiry != 0) return byExpiry;
+    if (a.passKind != b.passKind) {
+      // 'credit' < 'unlimited' alphabetically — but we want that order
+      // explicitly anyway, so just hardcode the rule instead of leaning
+      // on string comparison.
+      return a.passKind == 'credit' ? -1 : 1;
+    }
+    if (a.passKind == 'credit') {
+      final ca = a.creditsRemaining ?? 1 << 30;
+      final cb = b.creditsRemaining ?? 1 << 30;
+      return ca.compareTo(cb);
+    }
+    return 0;
+  });
+  return sorted.first;
+}
+
+/// Map an entitlement's expiry to a DateTime, treating null (the wire
+/// representation of "never expires") as a far-future sentinel so it
+/// sorts AFTER every dated pass.
+DateTime _expiryOrInfinity(DateTime? raw) => raw ?? DateTime(9999);
 
 class BookingSheet extends ConsumerStatefulWidget {
   final ClassRow classRow;
-  const BookingSheet({super.key, required this.classRow});
+  /// Optional close callback. When supplied, the sheet calls this on a
+  /// successful book / cancel / waitlist mutation instead of
+  /// `Navigator.of(context).pop(true)`. The desktop layout passes its
+  /// own callback so the sheet can dismiss without relying on a nested
+  /// Navigator with one route (where pop is a no-op and the
+  /// onDidRemovePage hook never fires — that's the bug this fixes).
+  final VoidCallback? onClose;
+  const BookingSheet({super.key, required this.classRow, this.onClose});
 
   @override
   ConsumerState<BookingSheet> createState() => _BookingSheetState();
@@ -27,16 +84,95 @@ class BookingSheet extends ConsumerStatefulWidget {
 
 class _BookingSheetState extends ConsumerState<BookingSheet> {
   late Future<List<EligibleEntitlement>> _eligible;
+  // Server-side preview for the currently-selected entitlement. Tells
+  // the UI whether the user can book, whether +1 is eligible, and why
+  // not if it isn't — without any client-side eligibility logic.
+  BookingPreview? _preview;
   String? _selectedEntitlementId;
   bool _plusOne = false;
+  final _friendName = TextEditingController();
   bool _submitting = false;
   String? _conflict;
+  // Becomes true once eligibility resolves to an empty list — the user
+  // has no pass that covers this class. Drives the bottom CTA to switch
+  // from "Book this class" to "Buy pass and book".
+  bool _eligibleEmpty = false;
+  // Set when the eligibility request itself failed (vs. resolved-but-
+  // empty). We suppress the bottom Book CTA in this case — without
+  // eligibility we can't decide between "Book this class" and "Buy pass
+  // and book", so showing either would mislead.
+  bool _eligibleErrored = false;
+  // Monotonic id for in-flight preview requests. Drop responses whose
+  // id is older than the latest issued — guards against a slow earlier
+  // selection clobbering a faster later one when the user picks quickly.
+  int _previewSeq = 0;
+
+  /// Close the sheet after a successful mutation. Routes through the
+  /// caller-supplied [BookingSheet.onClose] when one was provided
+  /// (desktop docked-panel case); otherwise falls back to the mobile
+  /// default of popping the route with a `true` result.
+  void _close(BuildContext context) {
+    final cb = widget.onClose;
+    if (cb != null) {
+      cb();
+    } else {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _friendName.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
     final api = ref.read(apiClientProvider);
     _eligible = api.eligibleEntitlements(widget.classRow.id);
+    _eligible.then((list) {
+      if (!mounted) return;
+      if (list.isEmpty) {
+        setState(() => _eligibleEmpty = true);
+        return;
+      }
+      // Pick a smarter default than "first in the list" — use-it-before-
+      // you-lose-it logic so a credit expiring tomorrow ranks ahead of an
+      // unlimited that's safe for weeks. See pickDefaultEntitlement.
+      final pick = pickDefaultEntitlement(list).id;
+      setState(() => _selectedEntitlementId ??= pick);
+      _fetchPreview(_selectedEntitlementId!);
+    }).catchError((_) {
+      if (!mounted) return;
+      setState(() => _eligibleErrored = true);
+    });
+  }
+
+  Future<void> _fetchPreview(String entitlementId) async {
+    final reqId = ++_previewSeq;
+    try {
+      final p = await ref.read(apiClientProvider).bookingPreview(
+            classId: widget.classRow.id,
+            entitlementId: entitlementId,
+          );
+      if (!mounted || reqId != _previewSeq) return;
+      setState(() {
+        _preview = p;
+        // If the server says +1 isn't allowed for this selection but the
+        // user had toggled it on for a previous selection, clear it now
+        // so we don't send a request the server would reject.
+        if (!p.plusOneEligible) _plusOne = false;
+      });
+    } catch (_) {
+      // Preview failure shouldn't block the user — fall through and let
+      // CreateBooking surface the real error if they try to book.
+    }
+  }
+
+  void _onPickEntitlement(String id) {
+    setState(() => _selectedEntitlementId = id);
+    _fetchPreview(id);
   }
 
   @override
@@ -44,7 +180,9 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
     final y = context.yoga;
     final c = widget.classRow;
     final boot = ref.watch(bootstrapProvider).value;
-    final plusOneAllowed = boot?.studio.allowStudentPlusOne ?? false;
+    // Server-authoritative gate for the +1 toggle. Until the preview
+    // arrives we hide the toggle to avoid showing-then-hiding it.
+    final plusOneEligible = _preview?.plusOneEligible ?? false;
     final cutoffHours = boot?.studio.freeCancelCutoffHours ?? 12;
     final localStart = c.startsAt.toLocal();
     const dowFull = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -131,25 +269,30 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                 _BookedActions(
                   classRow: c,
                   cutoffHours: cutoffHours,
-                  onCancelled: () => Navigator.of(context).pop(true),
+                  onCancelled: () => _close(context),
                 )
               else if (c.bookingState == BookingState.full)
                 _FullClassActions(
-                  classId: c.id,
-                  onJoined: () => Navigator.of(context).pop(true),
+                  classRow: c,
+                  onChanged: () => _close(context),
                 )
               else
                 _PayWithSection(
                   eligible: _eligible,
                   selected: _selectedEntitlementId,
-                  onSelect: (id) => setState(() => _selectedEntitlementId = id),
+                  onSelect: _onPickEntitlement,
                 ),
-              if (c.bookingState == BookingState.available && plusOneAllowed) ...[
+              if (c.bookingState == BookingState.available &&
+                  plusOneEligible) ...[
                 const SizedBox(height: 12),
                 _PlusOneToggle(
                   on: _plusOne,
                   onChanged: (v) => setState(() => _plusOne = v),
                 ),
+                if (_plusOne) ...[
+                  const SizedBox(height: 8),
+                  _FriendNameField(controller: _friendName),
+                ],
               ],
               if (_conflict != null) ...[
                 const SizedBox(height: 12),
@@ -164,19 +307,76 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
               ],
               if (c.bookingState == BookingState.available) ...[
                 const SizedBox(height: 14),
-                YButton(
-                  label: _submitting ? 'Booking…' : 'Book this class',
-                  onTap: _submitting ? null : _book,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Free cancellation until $cutoffHours hours before. After that, your credit is used.',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: y.muted,
+                // Server-authoritative: if BookingPreview says canBook is
+                // false (class started, full, no credits, etc.), hide the
+                // Book button and show the reason instead. Until the
+                // preview resolves we keep the button enabled — the worst
+                // case is a doomed request that surfaces _conflict.
+                if (_preview != null && !_preview!.canBook) ...[
+                  Container(
+                    key: const Key('booking-block-message'),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: y.surface2,
+                      borderRadius: BorderRadius.circular(y.radiusCard),
+                    ),
+                    child: Text(
+                      _preview!.blockMessage.isEmpty
+                          ? "You can't book this class right now."
+                          : _preview!.blockMessage,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: y.muted,
+                      ),
+                    ),
                   ),
-                ),
+                ] else if (_eligibleErrored) ...[
+                  // Eligibility lookup failed — we don't know whether to
+                  // offer "Book" or "Buy pass and book", so show the
+                  // failure inline and let the user retry by reopening.
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: y.surface2,
+                      borderRadius: BorderRadius.circular(y.radiusCard),
+                    ),
+                    child: Text(
+                      "Couldn't check your passes. Close and try again.",
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: y.muted,
+                      ),
+                    ),
+                  ),
+                ] else if (_eligibleEmpty) ...[
+                  // No pass covers this class — take the user through the
+                  // Buy flow, then auto-book this class once the new pass
+                  // is in their wallet.
+                  YButton(
+                    key: const Key('booking-buy-and-book-button'),
+                    label: 'Buy pass and book',
+                    onTap: _submitting ? null : _buyPassAndBook,
+                  ),
+                ] else ...[
+                  YButton(
+                    key: const Key('booking-book-button'),
+                    label: _submitting ? 'Booking…' : 'Book this class',
+                    onTap: _submitting ? null : _book,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Free cancellation until $cutoffHours hours before. After that, your credit is used.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                    ),
+                  ),
+                ],
               ],
             ],
           ),
@@ -188,9 +388,19 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
   Future<void> _book() async {
     final api = ref.read(apiClientProvider);
     final eligible = await _eligible;
-    final id = _selectedEntitlementId ?? (eligible.isNotEmpty ? eligible.first.id : null);
+    // Defensive fallback to the smart-picked entitlement in case the
+    // user managed to tap Book before initState's pick landed in state.
+    final id = _selectedEntitlementId ??
+        (eligible.isEmpty ? null : pickDefaultEntitlement(eligible).id);
     if (id == null) {
       setState(() => _conflict = 'No eligible pass — buy one first.');
+      return;
+    }
+    // Friend's name required for +1 — the server enforces this too, but
+    // catching client-side gives faster feedback and a friendlier message.
+    final friendName = _friendName.text.trim();
+    if (_plusOne && friendName.isEmpty) {
+      setState(() => _conflict = "Tell us your friend's name first.");
       return;
     }
     setState(() {
@@ -202,8 +412,9 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
         classId: widget.classRow.id,
         entitlementId: id,
         plusOne: _plusOne,
+        plusOneName: friendName,
       );
-      if (mounted) Navigator.of(context).pop(true);
+      if (mounted) _close(context);
     } on BookingConflict catch (e) {
       setState(() {
         _submitting = false;
@@ -212,9 +423,124 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
     } catch (e) {
       setState(() {
         _submitting = false;
-        _conflict = 'Something went wrong: $e';
+        _conflict = ApiError.fromAny(e).message;
       });
     }
+  }
+
+  void _buyPassAndBook() {
+    final classRow = widget.classRow;
+    final localStart = classRow.startsAt.toLocal();
+    final classDay =
+        DateTime(localStart.year, localStart.month, localStart.day);
+    // Capture nav before pop — after pop, this State's context is being
+    // torn down and Navigator.of(context) is unsafe.
+    final nav = Navigator.of(context);
+    nav.pop(false);
+    nav.push(MaterialPageRoute(
+      builder: (ctx) => Scaffold(
+        // Bare AppBar gives web users a way back; iOS/Android system
+        // back still works without it.
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () => Navigator.of(ctx).maybePop(),
+          ),
+        ),
+        body: BuyScreen(
+          coversClassTypeId: classRow.classTypeId,
+          bookAfterPurchaseClassId: classRow.id,
+          bookAfterPurchaseDay: classDay,
+        ),
+      ),
+    ));
+  }
+}
+
+class _FriendNameField extends StatelessWidget {
+  final TextEditingController controller;
+  const _FriendNameField({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: y.surface,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        border: Border.all(color: y.borderStrong),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "FRIEND'S NAME",
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: y.muted,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(height: 2),
+          TextField(
+            controller: controller,
+            textCapitalization: TextCapitalization.words,
+            style: TextStyle(
+              fontSize: 14.5,
+              fontWeight: FontWeight.w600,
+              color: y.text,
+            ),
+            decoration: const InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              contentPadding: EdgeInsets.symmetric(vertical: 4),
+              hintText: 'e.g. Sam Patel',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Banner shown inside the booked-actions section when the caller's
+/// booking carries a +1 guest. Includes the friend's name so the student
+/// remembers who they brought — useful when re-opening the sheet days
+/// after booking.
+class _PlusOneBookedBanner extends StatelessWidget {
+  final String friendName;
+  const _PlusOneBookedBanner({required this.friendName});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: y.accentSoft,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.person_add_alt_1, size: 16, color: y.accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '+1 for your friend · $friendName',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: y.accent,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -274,37 +600,53 @@ class _PlusOneToggle extends StatelessWidget {
 }
 
 class _FullClassActions extends ConsumerStatefulWidget {
-  final String classId;
-  final VoidCallback onJoined;
-  const _FullClassActions({required this.classId, required this.onJoined});
+  final ClassRow classRow;
+  final VoidCallback onChanged;
+  const _FullClassActions({required this.classRow, required this.onChanged});
 
   @override
   ConsumerState<_FullClassActions> createState() => _FullClassActionsState();
 }
 
 class _FullClassActionsState extends ConsumerState<_FullClassActions> {
-  bool _joining = false;
+  bool _busy = false;
   String? _error;
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    final pos = widget.classRow.waitlistPosition;
+    final joined = pos != null;
+    // Tone the explanatory card: accent for "you'll be notified" pre-join,
+    // success-leaning for "you're in the queue" post-join.
+    final note = joined
+        ? "You're #$pos on the waitlist. We'll notify you the moment a spot opens — you'll have 60 minutes to claim it. No charge until you claim."
+        : "We'll notify you if a spot opens — you'll have 60 minutes to claim it. No charge until you claim.";
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
+          key: joined
+              ? const Key('booking-waitlist-joined-note')
+              : const Key('booking-waitlist-pre-join-note'),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: y.accentSoft,
+            color: joined ? y.primarySoft : y.accentSoft,
             borderRadius: BorderRadius.circular(y.radiusCard),
           ),
           child: Row(
             children: [
-              Icon(Icons.list_alt, size: 18, color: y.accent),
+              Icon(
+                joined
+                    ? Icons.check_circle_outline_rounded
+                    : Icons.list_alt,
+                size: 18,
+                color: joined ? y.primary : y.accent,
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  "We'll notify you if a spot opens — you'll have 60 minutes to claim it.",
+                  note,
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -327,28 +669,70 @@ class _FullClassActionsState extends ConsumerState<_FullClassActions> {
           ),
         ],
         const SizedBox(height: 14),
-        YButton(
-          label: _joining ? 'Joining…' : 'Join waitlist',
-          onTap: _joining ? null : _join,
-        ),
+        if (joined)
+          YButton(
+            key: const Key('booking-leave-waitlist-button'),
+            label: _busy ? 'Leaving…' : 'Leave waitlist',
+            variant: YButtonVariant.outline,
+            onTap: _busy ? null : _leave,
+          )
+        else
+          YButton(
+            key: const Key('booking-join-waitlist-button'),
+            label: _busy ? 'Joining…' : 'Join waitlist',
+            onTap: _busy ? null : _join,
+          ),
       ],
     );
   }
 
   Future<void> _join() async {
     setState(() {
-      _joining = true;
+      _busy = true;
       _error = null;
     });
     try {
-      await ref.read(apiClientProvider).joinWaitlist(widget.classId);
-      widget.onJoined();
+      final pos =
+          await ref.read(apiClientProvider).joinWaitlist(widget.classRow.id);
+      if (!mounted) return;
+      _toast("You're #$pos on the waitlist — we'll notify you.");
+      // Pop the sheet — BookScreen refreshes the day, which re-fetches
+      // waitlistPosition for this row so the chip reflects the new state.
+      widget.onChanged();
     } catch (e) {
       setState(() {
-        _joining = false;
-        _error = 'Could not join waitlist: $e';
+        _busy = false;
+        _error = "Couldn't join waitlist: ${ApiError.fromAny(e).message}";
       });
     }
+  }
+
+  Future<void> _leave() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(apiClientProvider).leaveWaitlist(widget.classRow.id);
+      if (!mounted) return;
+      _toast("You've left the waitlist.");
+      widget.onChanged();
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = "Couldn't leave waitlist: ${ApiError.fromAny(e).message}";
+      });
+    }
+  }
+
+  void _toast(String msg) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+      );
   }
 }
 
@@ -395,31 +779,12 @@ class _PayWithSection extends StatelessWidget {
             }
             final list = snap.data ?? const <EligibleEntitlement>[];
             if (list.isEmpty) {
-              return Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: y.surface2,
-                  borderRadius: BorderRadius.circular(y.radiusCard),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.shopping_bag_outlined, color: y.muted, size: 18),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'No eligible pass — buy one first.',
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
-                          color: y.text,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
+              return const _NoEligiblePassCTA();
             }
-            final preselect = selected ?? list.first.id;
+            // Mirror the state's smart-pick rule so the highlighted row
+            // matches the entitlement the booking will actually consume
+            // even before _BookingSheetState's initState.then() lands.
+            final preselect = selected ?? pickDefaultEntitlement(list).id;
             return Column(
               children: [
                 for (final e in list) ...[
@@ -550,16 +915,71 @@ class _BookedActions extends ConsumerStatefulWidget {
 }
 
 class _BookedActionsState extends ConsumerState<_BookedActions> {
+  // Pre-fetched server preview. While null we still show the cancel
+  // button (assume it works); when the preview arrives we'll either
+  // confirm or hide the button + show the reason.
+  CancelPreview? _preview;
   bool _cancelling = false;
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    final id = widget.classRow.bookingId;
+    if (id != null) {
+      ref.read(apiClientProvider).cancelPreview(id).then((p) {
+        if (!mounted) return;
+        setState(() => _preview = p);
+      }).catchError((_) {
+        // Preview failure is non-fatal — leave the button enabled and
+        // let an actual cancel attempt surface the real error.
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    // Server says cancellation is blocked (e.g. class has started) —
+    // hide the cancel button outright and show why.
+    if (_preview != null && !_preview!.canCancel) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const YChip(
+              kind: YChipKind.booked,
+              label: 'You were booked',
+              leadingCheck: true),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: y.surface2,
+              borderRadius: BorderRadius.circular(y.radiusCard),
+            ),
+            child: Text(
+              _preview!.blockMessage.isEmpty
+                  ? "Cancellation isn't available for this booking."
+                  : _preview!.blockMessage,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    final friendName = widget.classRow.myPlusOneName;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const YChip(kind: YChipKind.booked, label: 'You\'re booked', leadingCheck: true),
+        if (friendName != null) ...[
+          const SizedBox(height: 10),
+          _PlusOneBookedBanner(friendName: friendName),
+        ],
         const SizedBox(height: 14),
         if (_error != null) ...[
           Text(_error!,
@@ -567,13 +987,16 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
           const SizedBox(height: 10),
         ],
         YButton(
+          key: const Key('booking-cancel-button'),
           label: _cancelling ? 'Cancelling…' : 'Cancel booking',
           variant: YButtonVariant.outline,
           onTap: _cancelling ? null : _cancel,
         ),
         const SizedBox(height: 8),
         Text(
-          'Free cancellation until ${widget.cutoffHours} hours before.',
+          friendName != null
+              ? 'Cancelling releases both seats. Free until ${widget.cutoffHours} hours before.'
+              : 'Free cancellation until ${widget.cutoffHours} hours before.',
           style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: y.muted),
         ),
       ],
@@ -581,9 +1004,23 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
   }
 
   Future<void> _cancel() async {
-    final api = ref.read(apiClientProvider);
     final id = widget.classRow.bookingId;
     if (id == null) return;
+    final api = ref.read(apiClientProvider);
+    // Ask the server what would happen right now — single source of truth.
+    // Avoids the client and server disagreeing about whether we're past
+    // the cutoff (TZ, clock skew, etc.).
+    CancelPreview preview;
+    try {
+      preview = await api.cancelPreview(id);
+    } catch (e) {
+      setState(() => _error =
+          "Couldn't check cancel policy: ${ApiError.fromAny(e).message}");
+      return;
+    }
+    if (!mounted) return;
+    final ok = await _showCancelConfirm(context, preview: preview);
+    if (ok != true || !mounted) return;
     setState(() {
       _cancelling = true;
       _error = null;
@@ -594,8 +1031,158 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
     } catch (e) {
       setState(() {
         _cancelling = false;
-        _error = 'Could not cancel: $e';
+        _error = "Couldn't cancel: ${ApiError.fromAny(e).message}";
       });
     }
+  }
+
+  /// Confirm-dialog body. Branches on the cancel outcome (late / free)
+  /// AND on whether a +1 is attached — the +1 path mentions the friend
+  /// by name and uses plural "credits" framing because the cascade
+  /// releases both bookings + (on free cancel) refunds both credits.
+  String _cancelBody({
+    required CancelPreview preview,
+    required String? friendName,
+  }) {
+    final hasPlusOne = friendName != null;
+    if (preview.isLate) {
+      if (hasPlusOne) {
+        return "You're past the free-cancellation window "
+            "(${widget.cutoffHours} hours before start). Cancelling now "
+            "releases your seat and your friend $friendName's, but both "
+            "credits stay used.";
+      }
+      return "You're past the free-cancellation window "
+          '(${widget.cutoffHours} hours before start). Cancelling now '
+          "will use your credit — you won't get it back to your wallet.";
+    }
+    if (preview.creditWillReturn) {
+      if (hasPlusOne) {
+        return "Both your credit and $friendName's come back to your "
+            "wallet, and both seats open up. Free until "
+            "${widget.cutoffHours} hours before the class.";
+      }
+      return 'Your credit will come back to your wallet. Free '
+          'cancellation is open until ${widget.cutoffHours} hours '
+          'before the class.';
+    }
+    // Unlimited pass — nothing to refund, just seats opening up.
+    if (hasPlusOne) {
+      return "You can cancel for free. Both your seat and $friendName's "
+          "open up — unlimited passes don't carry credits to refund.";
+    }
+    return 'You can cancel for free. Unlimited passes don\'t carry a '
+        'credit to refund — the seat just opens up for someone else.';
+  }
+
+  /// Primary-action label on the confirm dialog. "Cancel & use credit"
+  /// becomes plural when a +1 is attached so the action's consequence
+  /// matches the body copy above.
+  String _cancelCta({required bool isLate, required bool hasPlusOne}) {
+    if (isLate) {
+      return hasPlusOne ? 'Cancel & use credits' : 'Cancel & use credit';
+    }
+    return hasPlusOne ? 'Cancel both' : 'Cancel booking';
+  }
+
+  Future<bool?> _showCancelConfirm(
+    BuildContext context, {
+    required CancelPreview preview,
+  }) {
+    final y = context.yoga;
+    final friend = widget.classRow.myPlusOneName;
+    final hasPlusOne = friend != null;
+    // Title shifts when a +1 is attached so the user understands the
+    // action is releasing two seats, not one.
+    final title = preview.isLate
+        ? (hasPlusOne ? 'Cancel both seats late?' : 'Cancel late?')
+        : (hasPlusOne ? 'Cancel both bookings?' : 'Cancel this booking?');
+    final body = _cancelBody(preview: preview, friendName: friend);
+    return showDialog<bool>(
+      context: context,
+      barrierColor: const Color(0x66100A05),
+      builder: (ctx) => AlertDialog(
+        backgroundColor: y.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(y.radiusCard),
+        ),
+        title: Text(
+          title,
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w800,
+            color: preview.isLate ? const Color(0xFFA33B2E) : y.text,
+          ),
+        ),
+        content: Text(
+          body,
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w500,
+            color: y.text,
+            height: 1.45,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Keep booking',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: y.muted,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              _cancelCta(
+                isLate: preview.isLate,
+                hasPlusOne: widget.classRow.myPlusOneName != null,
+              ),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: preview.isLate ? const Color(0xFFA33B2E) : y.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoEligiblePassCTA extends StatelessWidget {
+  const _NoEligiblePassCTA();
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: y.surface2,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.shopping_bag_outlined, color: y.muted, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'No eligible pass — buy one first.',
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: y.text,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

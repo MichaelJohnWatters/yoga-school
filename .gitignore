@@ -31,3 +31,7 @@ server/coverage.html
 
 # Local Claude state
 .claude/
+
+# Firebase emulator log — produced on every `firebase emulators:start`,
+# noisy + machine-specific, never useful in source control.
+firebase-debug.log

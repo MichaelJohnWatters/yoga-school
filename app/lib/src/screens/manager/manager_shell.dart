@@ -6,11 +6,15 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../auth/auth_state.dart';
+
 import '../../api/models.dart';
+import '../../api/api_error.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import 'admin_audit_screen.dart';
 import 'admin_dashboard_screen.dart';
+import 'admin_discounts_screen.dart';
 import 'admin_product_editor_screen.dart';
 import 'admin_products_screen.dart';
 import 'admin_reports_screen.dart';
@@ -26,6 +30,7 @@ enum ManagerSection {
   dashboard,
   schedule,
   products,
+  discounts,
   series,
   students,
   roster,
@@ -51,6 +56,7 @@ bool isSectionVisible(ManagerSection s, AccessTier tier) {
       return true;
     case ManagerSection.dashboard:
     case ManagerSection.products:
+    case ManagerSection.discounts:
     case ManagerSection.reports:
     case ManagerSection.audit:
     case ManagerSection.settings:
@@ -164,6 +170,7 @@ class _ManagerShellState extends State<ManagerShell> {
         ManagerSection.dashboard => 'Dashboard',
         ManagerSection.schedule => 'Schedule',
         ManagerSection.products => 'Products',
+        ManagerSection.discounts => 'Discounts',
         ManagerSection.series => 'Series',
         ManagerSection.students => 'Students',
         ManagerSection.roster => 'Roster',
@@ -238,7 +245,7 @@ class _MobileTopBar extends StatelessWidget {
   }
 }
 
-class _Sidebar extends StatelessWidget {
+class _Sidebar extends ConsumerWidget {
   final ManagerSection active;
   final ValueChanged<ManagerSection> onSelect;
   final Me manager;
@@ -251,7 +258,7 @@ class _Sidebar extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
     return Container(
       decoration: BoxDecoration(
@@ -306,43 +313,107 @@ class _Sidebar extends StatelessWidget {
               ),
           const Spacer(),
           Container(
-            padding: const EdgeInsets.only(top: 10, left: 10, right: 10),
             decoration: BoxDecoration(
               border: Border(top: BorderSide(color: y.border)),
             ),
-            child: Row(
-              children: [
-                YAvatar(name: manager.fullName, size: 30),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        manager.fullName,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: y.text,
-                        ),
+            child: InkWell(
+              onTap: () => _showProfileMenu(context, ref),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.only(top: 10, left: 10, right: 10, bottom: 4),
+                child: Row(
+                  children: [
+                    YAvatar(name: manager.fullName, size: 30),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            manager.fullName,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700,
+                              color: y.text,
+                            ),
+                          ),
+                          Text(
+                            _roleLabel(manager.role),
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                              color: y.muted,
+                            ),
+                          ),
+                        ],
                       ),
-                      Text(
-                        _roleLabel(manager.role),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: y.muted,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                    Icon(Icons.more_horiz, size: 18, color: y.muted),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _showProfileMenu(BuildContext context, WidgetRef ref) async {
+    final y = context.yoga;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    // Anchor the menu just above the profile row in the sidebar.
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final bottomLeft = box.localToGlobal(Offset(0, box.size.height), ancestor: overlay);
+    final result = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        bottomLeft.dx + 12,
+        bottomLeft.dy - 120,
+        overlay.size.width - bottomLeft.dx - 220,
+        12,
+      ),
+      color: y.surface,
+      elevation: 6,
+      items: [
+        PopupMenuItem<String>(
+          enabled: false,
+          height: 36,
+          child: Text(
+            manager.email,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: y.muted,
+            ),
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          value: 'signout',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.logout, size: 16, color: y.text),
+              const SizedBox(width: 10),
+              Text(
+                'Sign out',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: y.text,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (result == 'signout') {
+      await ref.read(authServiceProvider).signOut();
+    }
   }
 
   static String _roleLabel(String r) {
@@ -410,6 +481,7 @@ const _items = <_SidebarItem>[
   _SidebarItem(ManagerSection.dashboard, 'Dashboard', Icons.dashboard_outlined),
   _SidebarItem(ManagerSection.schedule, 'Schedule', Icons.calendar_today_outlined),
   _SidebarItem(ManagerSection.products, 'Products', Icons.shopping_bag_outlined),
+  _SidebarItem(ManagerSection.discounts, 'Discounts', Icons.local_offer_outlined),
   _SidebarItem(ManagerSection.series, 'Series', Icons.school_outlined),
   _SidebarItem(ManagerSection.students, 'Students', Icons.person_outline),
   _SidebarItem(ManagerSection.roster, 'Roster', Icons.fact_check_outlined),
@@ -474,6 +546,7 @@ class _Content extends StatelessWidget {
               productId: productEditId!.isEmpty ? null : productEditId,
               onClose: onCloseProductEditor,
             ),
+      ManagerSection.discounts => const AdminDiscountsScreen(),
       ManagerSection.series => seriesRosterId == null
           ? AdminSeriesScreen(onView: onOpenSeriesRoster)
           : AdminSeriesRosterScreen(
@@ -583,7 +656,7 @@ class _RosterPicker extends ConsumerWidget {
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
         error: (e, _) => Center(
           child: Text(
-            "Can't load: $e",
+            "Can't load: ${ApiError.fromAny(e).message}",
             style: TextStyle(color: y.muted),
           ),
         ),
@@ -729,6 +802,10 @@ class ManagerCard extends StatelessWidget {
   final VoidCallback? onAction;
   final Widget child;
   final EdgeInsets padding;
+  /// When true, wraps the child in Expanded so it fills remaining vertical
+  /// space inside the card. Only safe when the card itself sits in a bounded
+  /// parent (e.g. an Expanded inside a Column).
+  final bool fill;
   const ManagerCard({
     super.key,
     this.title,
@@ -736,6 +813,7 @@ class ManagerCard extends StatelessWidget {
     this.onAction,
     required this.child,
     this.padding = const EdgeInsets.all(18),
+    this.fill = false,
   });
 
   @override
@@ -785,7 +863,7 @@ class ManagerCard extends StatelessWidget {
               ),
             ),
           ],
-          child,
+          if (fill) Expanded(child: child) else child,
         ],
       ),
     );

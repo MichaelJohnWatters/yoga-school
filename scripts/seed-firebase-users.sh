@@ -48,6 +48,16 @@ for i in {1..20}; do
 done
 
 echo "seeding Firebase users in project ${PROJECT_ID}:"
-create_user "maya@studio52.dev"  "dev123456" "Maya (student)"
+create_user "maya@studio52.dev"  "dev123456" "Maya (student · unlimited)"
 create_user "priya@studio52.dev" "dev123456" "Priya (manager)"
+# Community students — covers the main pass-shape permutations so dev
+# testing can hit each booking/wallet code path. Same password as Maya.
+# (See seed.go for the per-student pass configuration that backs these.)
+create_user "aria.lin@studio52.dev"     "dev123456" "Aria (multi-pass: 10-pack + new unlimited)"
+create_user "ben.carter@studio52.dev"   "dev123456" "Ben (unlimited + reformer pack)"
+create_user "chen.wei@studio52.dev"     "dev123456" "Chen (reformer-only, 2/5)"
+create_user "diego.rivera@studio52.dev" "dev123456" "Diego (drop-in, no credits left)"
+create_user "grace.okoye@studio52.dev"  "dev123456" "Grace (yoga 5-pack, 4/5 credits)"
+create_user "ivy.nakamura@studio52.dev" "dev123456" "Ivy (10-pack + reformer pack)"
+create_user "kira.walker@studio52.dev"  "dev123456" "Kira (current 10-pack + depleted past)"
 echo "done."

@@ -8,12 +8,12 @@ import (
 
 // AdminDashboard powers GET /admin/dashboard — see the design's KDashboard.
 type AdminDashboard struct {
-	Date                  string             `json:"date"`
-	OccupancyToday        AdminOccupancy     `json:"occupancy_today"`
-	RevenueToday          AdminRevenueToday  `json:"revenue_today"`
-	NewBookingsToday      int                `json:"new_bookings_today"`
-	UnmarkedAttendance    int                `json:"unmarked_attendance_count"`
-	ClassesToday          []ClassRow         `json:"classes_today"`
+	Date               string            `json:"date"`
+	OccupancyToday     AdminOccupancy    `json:"occupancy_today"`
+	RevenueToday       AdminRevenueToday `json:"revenue_today"`
+	NewBookingsToday   int               `json:"new_bookings_today"`
+	UnmarkedAttendance int               `json:"unmarked_attendance_count"`
+	ClassesToday       []ClassRow        `json:"classes_today"`
 }
 
 type AdminOccupancy struct {
@@ -23,18 +23,24 @@ type AdminOccupancy struct {
 }
 
 type AdminRevenueToday struct {
-	TotalMinor int    `json:"total_minor"`
-	CardMinor  int    `json:"card_minor"`
-	CashMinor  int    `json:"cash_minor"`
-	Currency   string `json:"currency"`
+	TotalMinor    int    `json:"total_minor"`
+	CardMinor     int    `json:"card_minor"`
+	CashMinor     int    `json:"cash_minor"`
+	GrossMinor    int    `json:"gross_minor"`
+	DiscountMinor int    `json:"discount_minor"`
+	Currency      string `json:"currency"`
 }
 
 // AdminDashboardFor returns the dashboard payload for a given manager's
 // studio. We use the manager's own ID as the "viewer" for ClassesToday so
 // booking_state stays consistent with the rest of the API.
+//
+// "Today" is computed in the studio's timezone so a Tokyo studio rolls
+// over at Tokyo's midnight, not UTC's.
 func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string) (*AdminDashboard, error) {
-	now := time.Now().UTC()
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	loc := s.StudioLocation(ctx, studioID)
+	now := time.Now()
+	dayStart := startOfDayIn(now, loc)
 	dayEnd := dayStart.Add(24 * time.Hour)
 	yesterdayStart := dayStart.Add(-24 * time.Hour)
 
@@ -50,7 +56,7 @@ func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string
 		 WHERE c.studio_id = ?
 		   AND c.status    = 'scheduled'
 		   AND c.starts_at >= ? AND c.starts_at < ?`,
-		studioID, dayStart.Format(time.RFC3339), dayEnd.Format(time.RFC3339),
+		studioID, dayStart.UTC().Format(time.RFC3339), dayEnd.UTC().Format(time.RFC3339),
 	).Scan(&totalCap, &booked); err != nil {
 		return nil, err
 	}
@@ -69,20 +75,23 @@ func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string
 	}
 	out.RevenueToday.Currency = currency
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT payment_method, COALESCE(SUM(amount_minor), 0)
+		SELECT payment_method,
+		       COALESCE(SUM(amount_minor), 0),
+		       COALESCE(SUM(list_price_minor), 0),
+		       COALESCE(SUM(discount_minor), 0)
 		  FROM purchases
 		 WHERE studio_id = ? AND status = 'completed'
 		   AND created_at >= ?
 		 GROUP BY payment_method`,
-		studioID, dayStart.Format(time.RFC3339),
+		studioID, dayStart.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var method string
-		var amt int
-		if err := rows.Scan(&method, &amt); err != nil {
+		var amt, gross, disc int
+		if err := rows.Scan(&method, &amt, &gross, &disc); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -94,6 +103,8 @@ func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string
 			out.RevenueToday.CardMinor += amt
 		}
 		out.RevenueToday.TotalMinor += amt
+		out.RevenueToday.GrossMinor += gross
+		out.RevenueToday.DiscountMinor += disc
 	}
 	rows.Close()
 
@@ -101,7 +112,7 @@ func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM bookings
 		 WHERE studio_id = ? AND created_at >= ?`,
-		studioID, dayStart.Format(time.RFC3339),
+		studioID, dayStart.UTC().Format(time.RFC3339),
 	).Scan(&out.NewBookingsToday); err != nil {
 		return nil, err
 	}
@@ -119,7 +130,7 @@ func (s *Store) AdminDashboardFor(ctx context.Context, studioID, viewerID string
 		   AND c.status    = 'scheduled'
 		   AND c.starts_at >= ? AND c.starts_at < ?
 		   AND b.status    = 'booked'`,
-		studioID, yesterdayStart.Format(time.RFC3339), dayStart.Format(time.RFC3339),
+		studioID, yesterdayStart.UTC().Format(time.RFC3339), dayStart.UTC().Format(time.RFC3339),
 	).Scan(&out.UnmarkedAttendance); err != nil {
 		return nil, err
 	}
@@ -148,7 +159,9 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			c.starts_at, c.ends_at, c.capacity,
 			(SELECT COUNT(*) FROM bookings b
 			    WHERE b.class_id = c.id AND b.status = 'booked') AS booked_count,
-			NULL AS my_booking_id
+			NULL AS my_booking_id,
+			c.recurrence_rule_id,
+			c.enrollment_id
 		FROM classes c
 		JOIN class_types ct ON ct.id = c.class_type_id
 		JOIN users i        ON i.id = c.instructor_id
@@ -159,7 +172,7 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 		  AND c.starts_at <  ?
 		ORDER BY c.starts_at`
 	rows, err := s.db.QueryContext(ctx, q, studioID,
-		from.Format(time.RFC3339), to.Format(time.RFC3339))
+		from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, err
 	}
@@ -167,9 +180,11 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 	out := []ClassRow{}
 	for rows.Next() {
 		var (
-			r         ClassRow
-			myBooking sql.NullString
-			photoURL  sql.NullString
+			r            ClassRow
+			myBooking    sql.NullString
+			photoURL     sql.NullString
+			ruleID       sql.NullString
+			enrollmentID sql.NullString
 		)
 		if err := rows.Scan(
 			&r.ID, &r.Title,
@@ -177,13 +192,21 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			&r.InstructorID, &r.InstructorName, &photoURL,
 			&r.RoomID, &r.RoomName,
 			&r.StartsAt, &r.EndsAt, &r.Capacity,
-			&r.BookedCount, &myBooking,
+			&r.BookedCount, &myBooking, &ruleID, &enrollmentID,
 		); err != nil {
 			return nil, err
 		}
 		if photoURL.Valid {
 			s := photoURL.String
 			r.InstructorPhotoURL = &s
+		}
+		if ruleID.Valid {
+			s := ruleID.String
+			r.RecurrenceRuleID = &s
+		}
+		if enrollmentID.Valid {
+			s := enrollmentID.String
+			r.EnrollmentID = &s
 		}
 		start, _ := time.Parse(time.RFC3339, r.StartsAt)
 		end, _ := time.Parse(time.RFC3339, r.EndsAt)

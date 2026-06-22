@@ -13,6 +13,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'src/api/api_client.dart';
+import 'src/api/api_error.dart';
+import 'src/api/models.dart';
 import 'src/firebase_options.dart';
 import 'src/screens/customer_display.dart';
 import 'src/screens/desktop/desktop_shell.dart';
@@ -33,6 +35,28 @@ Future<void> main() async {
   if (kDebugMode) {
     // Dev: route Firebase Auth at the local emulator on :9099.
     await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
+    // Dev-only diagnostic — KEEP THIS. Replaces Flutter's default red
+    // ErrorWidget (which silently collapses to a small box when a build
+    // throws) with an inline message that surfaces the exception text
+    // right where the widget would have rendered. Without this, a null
+    // cast or missing-key bug looks like an empty page + a wall of
+    // "Unexpected null value" in the console — painful to track down.
+    // Release builds skip this block entirely so prod sees Flutter's
+    // stock ErrorWidget.
+    ErrorWidget.builder = (details) => Container(
+          padding: const EdgeInsets.all(12),
+          color: const Color(0x33FF3333),
+          alignment: Alignment.center,
+          child: Text(
+            'Render error: ${details.exceptionAsString()}',
+            style: const TextStyle(
+              color: Color(0xFFA33B2E),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        );
   }
   runApp(const ProviderScope(child: YogaApp()));
 }
@@ -50,28 +74,46 @@ class YogaApp extends ConsumerWidget {
     }
     final user = ref.watch(firebaseUserProvider);
     final boot = ref.watch(bootstrapProvider);
+    final prefMode = ref.watch(themeModePrefProvider);
 
-    // Theme defaults to Warm Clay light until we have studio config in hand.
+    // Default-while-loading uses the Warm Clay preset for both slots so
+    // the splash → app transition stays calm even before bootstrap lands.
     final defaultTokens = YogaTokens.derive(
       yogaPresets['clay']!.light,
       dark: false,
     );
-    final studioTokens = boot.maybeWhen(
-      data: (b) {
-        final semantic =
-            YogaSemanticTokens.fromHexMap(b.studio.activeThemeTokens);
-        return YogaTokens.derive(
-          semantic,
-          dark: b.studio.activeThemeMode == 'dark',
-        );
-      },
-      orElse: () => defaultTokens,
-    );
+
+    YogaTokens lightTokens = defaultTokens;
+    YogaTokens darkTokens = defaultTokens;
+    boot.whenData((b) {
+      final lightSemantic =
+          YogaSemanticTokens.fromHexMap(b.studio.activeThemeTokens);
+      lightTokens = YogaTokens.derive(lightSemantic, dark: false);
+
+      // Dark slot is optional. When the manager hasn't picked one, dark
+      // theme falls back to the light tokens so a "dark" user pref (or
+      // system dark mode) doesn't render a broken half-themed UI.
+      final darkMap = b.studio.activeDarkThemeTokens;
+      if (darkMap != null) {
+        final darkSemantic = YogaSemanticTokens.fromHexMap(darkMap);
+        darkTokens = YogaTokens.derive(darkSemantic, dark: true);
+      } else {
+        darkTokens = lightTokens;
+      }
+    });
+
+    final themeMode = switch (prefMode) {
+      ThemeModePref.light => ThemeMode.light,
+      ThemeModePref.dark => ThemeMode.dark,
+      ThemeModePref.system => ThemeMode.system,
+    };
 
     return MaterialApp(
       title: 'Studio 52',
       debugShowCheckedModeBanner: false,
-      theme: buildYogaTheme(studioTokens),
+      theme: buildYogaTheme(lightTokens),
+      darkTheme: buildYogaTheme(darkTokens),
+      themeMode: themeMode,
       home: user.when(
         data: (u) {
           if (u == null) return const SignInScreen();
@@ -122,7 +164,7 @@ class _SignedInRoot extends ConsumerWidget {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '$e',
+                    ApiError.fromAny(e).message,
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),

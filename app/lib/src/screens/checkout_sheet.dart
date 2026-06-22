@@ -9,16 +9,30 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
+import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
+import 'book_screen.dart';
 import 'buy_screen.dart';
 import 'home_screen.dart';
 import 'purchase_success_screen.dart';
 
 class CheckoutSheet extends ConsumerStatefulWidget {
   final Product product;
-  const CheckoutSheet({super.key, required this.product});
+  /// When non-null, the student entered Buy from a specific class they
+  /// couldn't book. After payment, we auto-create that booking with the
+  /// new entitlement and route to a "you're booked" success screen.
+  final String? bookAfterPurchaseClassId;
+  /// Local-day of the class above — passed so BookScreen can refresh
+  /// the right day even if the user's selection has moved on.
+  final DateTime? bookAfterPurchaseDay;
+  const CheckoutSheet({
+    super.key,
+    required this.product,
+    this.bookAfterPurchaseClassId,
+    this.bookAfterPurchaseDay,
+  });
 
   @override
   ConsumerState<CheckoutSheet> createState() => _CheckoutSheetState();
@@ -27,6 +41,13 @@ class CheckoutSheet extends ConsumerStatefulWidget {
 class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
   bool _submitting = false;
   String? _error;
+  final _discountCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _discountCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -85,6 +106,20 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               _SavedCard(),
               const SizedBox(height: 8),
               _DifferentCard(),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _discountCtrl,
+                enabled: !_submitting,
+                textCapitalization: TextCapitalization.characters,
+                decoration: InputDecoration(
+                  labelText: 'Discount code (optional)',
+                  hintText: 'WELCOME10',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  isDense: true,
+                ),
+              ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Text(
@@ -98,6 +133,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               ],
               const SizedBox(height: 18),
               YButton(
+                key: const Key('checkout-pay-button'),
                 label: _submitting ? 'Processing…' : 'Pay ${p.formattedPrice()}',
                 onTap: _submitting ? null : _submit,
               ),
@@ -131,27 +167,181 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     });
     try {
       final api = ref.read(apiClientProvider);
-      final result = await api.createPurchase(productId: widget.product.id);
+      // Studio rule: one active pass at a time. If the student already has
+      // an active entitlement, warn them — even if it's a credit pack with
+      // 1 ticket left — before taking their money a second time.
+      final existing = await api.myEntitlements();
+      final duplicate = existing.firstWhereOrNull(
+        (e) => e.isActive && e.sourceProductId == widget.product.id,
+      );
+      final anyActive = existing.firstWhereOrNull((e) => e.isActive);
+      if (mounted && (duplicate != null || anyActive != null)) {
+        final clash = duplicate ?? anyActive!;
+        final proceed = await _confirmDuplicate(clash, isSameProduct: duplicate != null);
+        if (proceed != true) {
+          if (mounted) setState(() => _submitting = false);
+          return;
+        }
+      }
+      final code = _discountCtrl.text.trim();
+      final result = await api.createPurchase(
+        productId: widget.product.id,
+        discountCode: code.isEmpty ? null : code,
+      );
       // Invalidate caches that depend on entitlements/bookings.
       ref.invalidate(upcomingBookingsProvider);
       ref.invalidate(productsProvider);
+      // If the student came from a "Buy pass and book" flow, immediately
+      // book the originally-tapped class with the freshly-minted
+      // entitlement. We swallow booking failures here and fall through to
+      // the regular success screen — the pass still landed in their
+      // wallet, and the booking is a best-effort follow-up.
+      var bookedClass = false;
+      final pendingClassId = widget.bookAfterPurchaseClassId;
+      if (pendingClassId != null) {
+        try {
+          await api.createBooking(
+            classId: pendingClassId,
+            entitlementId: result.entitlement.id,
+          );
+          bookedClass = true;
+          ref.invalidate(upcomingBookingsProvider);
+          // Tells the Book tab (sitting behind this flow) to refresh
+          // the class's day so the new booking is visible the moment
+          // the user dismisses the success screen.
+          ref
+              .read(classesChangedTickProvider.notifier)
+              .bump(day: widget.bookAfterPurchaseDay);
+        } catch (_) {}
+      }
       if (!mounted) return;
-      Navigator.of(context).pop(true);
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => PurchaseSuccessScreen(
-            product: widget.product,
-            entitlement: result.entitlement,
-          ),
-          fullscreenDialog: true,
+      // Capture the navigator BEFORE pop — after pop the sheet's context
+      // is detached and Navigator.of(context) is unsafe.
+      final nav = Navigator.of(context);
+      nav.pop(true);
+      final successPage = MaterialPageRoute(
+        builder: (_) => PurchaseSuccessScreen(
+          product: widget.product,
+          entitlement: result.entitlement,
+          autoBooked: bookedClass,
         ),
+        fullscreenDialog: true,
       );
+      // In the buy+book flow we replace the BuyScreen route so tapping
+      // "Done" on the success screen returns straight to the Book tab,
+      // not back into Buy.
+      if (pendingClassId != null) {
+        nav.pushReplacement(successPage);
+      } else {
+        nav.push(successPage);
+      }
+    } on BookingConflict catch (e) {
+      setState(() {
+        _submitting = false;
+        _error = e.message;
+      });
     } catch (e) {
       setState(() {
         _submitting = false;
-        _error = 'Payment failed: $e';
+        _error = 'Payment failed: ${ApiError.fromAny(e).message}';
       });
     }
+  }
+
+  Future<bool?> _confirmDuplicate(
+    WalletEntitlement existing, {
+    required bool isSameProduct,
+  }) {
+    final y = context.yoga;
+    final title = isSameProduct
+        ? 'You already own this pass'
+        : 'You already have an active pass';
+    final remaining = existing.isUnlimited
+        ? 'Active until '
+            '${_shortDate(existing.expiresAt ?? DateTime.now())}'
+        : '${existing.creditsRemaining ?? 0} of '
+            '${existing.creditsTotal ?? 0} classes left';
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: y.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(y.radiusCard),
+          ),
+          title: Text(
+            title,
+            style: TextStyle(
+              color: y.text,
+              fontWeight: FontWeight.w800,
+              fontSize: 17,
+            ),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${existing.label} · $remaining',
+                style: TextStyle(
+                  color: y.text,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                isSameProduct
+                    ? 'Buying again will mint a second ${widget.product.name}. The studio recommends finishing your current pass first.'
+                    : 'You can only use one pass at a time. Buying ${widget.product.name} now leaves your current pass untouched until this one expires.',
+                style: TextStyle(
+                  color: y.muted,
+                  fontSize: 12.5,
+                  height: 1.45,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(
+                'Not now',
+                style: TextStyle(
+                  color: y.muted,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(
+                'Buy anyway',
+                style: TextStyle(
+                  color: y.primary,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static String _shortDate(DateTime d) {
+    const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${d.day} ${m[d.month - 1]}';
+  }
+}
+
+extension _FirstWhereOrNull<T> on Iterable<T> {
+  T? firstWhereOrNull(bool Function(T) test) {
+    for (final e in this) {
+      if (test(e)) return e;
+    }
+    return null;
   }
 }
 

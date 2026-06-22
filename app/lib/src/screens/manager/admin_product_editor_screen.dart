@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
@@ -141,7 +142,7 @@ class _AdminProductEditorScreenState
       _toast(_isCreate ? 'Product created.' : 'Saved.');
       widget.onClose();
     } catch (e) {
-      _toast('Save failed: $e');
+      _toast('Save failed: ${ApiError.fromAny(e).message}');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -156,7 +157,7 @@ class _AdminProductEditorScreenState
       _toast('Product archived.');
       widget.onClose();
     } catch (e) {
-      _toast('Archive failed: $e');
+      _toast('Archive failed: ${ApiError.fromAny(e).message}');
     } finally {
       if (mounted) setState(() => _archiving = false);
     }
@@ -184,7 +185,7 @@ class _AdminProductEditorScreenState
         return _buildScaffold(p);
       },
       loading: () => const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-      error: (e, _) => Center(child: Text("Can't load product: $e")),
+      error: (e, _) => Center(child: Text("Can't load product: ${ApiError.fromAny(e).message}")),
     );
   }
 
@@ -568,7 +569,7 @@ class _ClassTypeChips extends ConsumerWidget {
               ),
             ),
           ),
-          error: (e, _) => Text("Can't load types: $e"),
+          error: (e, _) => Text("Can't load types: ${ApiError.fromAny(e).message}"),
         ),
       ],
     );

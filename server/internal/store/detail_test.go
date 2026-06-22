@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestGetClass_PopulatesBookingStateAndWaitlist(t *testing.T) {
@@ -23,7 +21,7 @@ func TestGetClass_PopulatesBookingStateAndWaitlist(t *testing.T) {
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO waitlist_entries (id, class_id, user_id, position)
 			 VALUES (?, ?, ?, ?)`,
-			uuid.NewString(), class, other, i,
+			NewID(), class, other, i,
 		); err != nil {
 			t.Fatalf("seed waitlist: %v", err)
 		}
@@ -63,7 +61,7 @@ func TestGetClass_BookedStateAfterCallerBooks(t *testing.T) {
 
 	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 5)
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
-	bookingID, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false)
+	bookingID, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false, "")
 	if err != nil {
 		t.Fatalf("book: %v", err)
 	}
@@ -93,7 +91,7 @@ func TestGetProduct_ReturnsCoverageAndDisciplines(t *testing.T) {
 		t.Fatalf("class type: %v", err)
 	}
 
-	productID := uuid.NewString()
+	productID := NewID()
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO products
 		   (id, studio_id, name, description, price_minor, billing_type, pass_kind, credits)
@@ -142,7 +140,7 @@ func TestGetProduct_NotFoundWhenArchived(t *testing.T) {
 	f := newFixture(t, s)
 	ctx := context.Background()
 
-	productID := uuid.NewString()
+	productID := NewID()
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO products
 		   (id, studio_id, name, price_minor, billing_type, pass_kind, is_archived)

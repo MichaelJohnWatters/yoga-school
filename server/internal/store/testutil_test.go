@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // newTestStore returns an in-memory SQLite store with the production schema
@@ -63,11 +61,11 @@ type fixture struct {
 func newFixture(t *testing.T, s *Store) fixture {
 	t.Helper()
 	f := fixture{
-		studioID:     uuid.NewString(),
-		studentID:    uuid.NewString(),
-		instructorID: uuid.NewString(),
-		roomID:       uuid.NewString(),
-		classTypeID:  uuid.NewString(),
+		studioID:     NewID(),
+		studentID:    NewID(),
+		instructorID: NewID(),
+		roomID:       NewID(),
+		classTypeID:  NewID(),
 	}
 	ctx := context.Background()
 	exec := func(q string, args ...any) {
@@ -76,7 +74,7 @@ func newFixture(t *testing.T, s *Store) fixture {
 			t.Fatalf("fixture exec %q: %v", q, err)
 		}
 	}
-	themeID := uuid.NewString()
+	themeID := NewID()
 	exec(`INSERT INTO studios (id, name, allow_student_plus_one, welcome_message)
 	      VALUES (?, 'Test Studio', 0, 'Welcome')`, f.studioID)
 	exec(`INSERT INTO themes (id, studio_id, name, mode, tokens)
@@ -109,7 +107,7 @@ func (f fixture) setPlusOneAllowed(t *testing.T, s *Store, allowed bool) {
 // insertClass inserts a scheduled class.
 func (f fixture) insertClass(t *testing.T, s *Store, startsAt time.Time, capacity int) string {
 	t.Helper()
-	id := uuid.NewString()
+	id := NewID()
 	end := startsAt.Add(60 * time.Minute)
 	_, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO classes
@@ -136,9 +134,9 @@ func (f fixture) insertEntitlement(t *testing.T, s *Store, kind string, credits 
 // user — useful when a test needs two students competing for a seat.
 func (f fixture) insertEntitlementFor(t *testing.T, s *Store, userID, kind string, credits int) string {
 	t.Helper()
-	id := uuid.NewString()
-	purchaseID := uuid.NewString()
-	productID := uuid.NewString()
+	id := NewID()
+	purchaseID := NewID()
+	productID := NewID()
 	ctx := context.Background()
 	exec := func(q string, args ...any) {
 		t.Helper()
@@ -157,19 +155,57 @@ func (f fixture) insertEntitlementFor(t *testing.T, s *Store, userID, kind strin
 		id, f.studioID, userID, productID, kind,
 		sqlInt(kind == "credit", credits), sqlInt(kind == "credit", credits))
 	exec(`INSERT INTO purchases
-	      (id, studio_id, user_id, product_id, amount_minor, currency,
+	      (id, studio_id, user_id, product_id, list_price_minor, amount_minor, currency,
 	       payment_method, initiated_by, actor_role, status, resulting_entitlement_id)
-	      VALUES (?, ?, ?, ?, 1000, 'GBP', 'dev_stub', ?, 'student', 'completed', ?)`,
+	      VALUES (?, ?, ?, ?, 1000, 1000, 'GBP', 'dev_stub', ?, 'student', 'completed', ?)`,
 		purchaseID, f.studioID, userID, productID, userID, id)
 	exec(`INSERT INTO entitlement_class_types (entitlement_id, class_type_id)
 	      VALUES (?, ?)`, id, f.classTypeID)
 	return id
 }
 
+// insertBookedSeat directly inserts a 'booked' row for the fixture's student
+// — bypasses CreateBooking so tests can set up bookings against classes that
+// are already in the past (CreateBooking refuses those).
+func (f fixture) insertBookedSeat(t *testing.T, s *Store, classID, entitlementID string) string {
+	t.Helper()
+	id := NewID()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO bookings
+		    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one,
+		     booked_by_role, cancel_cutoff_hours, status, checkin_token)
+		    VALUES (?, ?, ?, ?, ?, 0, 'student', 12, 'booked', ?)`,
+		id, f.studioID, classID, f.studentID, entitlementID, NewID()); err != nil {
+		t.Fatalf("insert booked seat: %v", err)
+	}
+	return id
+}
+
+// insertCancelledLateSeat seeds a booking that's already been cancelled past
+// the cutoff — used by tests that need the terminal 'cancelled_late_burned'
+// state without driving it through the (now-refused-on-past-class) cancel
+// path.
+func (f fixture) insertCancelledLateSeat(t *testing.T, s *Store, classID, entitlementID string) string {
+	t.Helper()
+	id := NewID()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO bookings
+		    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one,
+		     booked_by_role, cancel_cutoff_hours, status, outcome,
+		     cancelled_at, checkin_token)
+		    VALUES (?, ?, ?, ?, ?, 0, 'student', 12, 'cancelled',
+		            'cancelled_late_burned',
+		            strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?)`,
+		id, f.studioID, classID, f.studentID, entitlementID, NewID()); err != nil {
+		t.Fatalf("insert cancelled-late seat: %v", err)
+	}
+	return id
+}
+
 // insertOtherStudent creates a second student in the same studio.
 func insertOtherStudent(t *testing.T, s *Store, studioID string) string {
 	t.Helper()
-	id := uuid.NewString()
+	id := NewID()
 	if _, err := s.db.ExecContext(context.Background(),
 		`INSERT INTO users (id, studio_id, role, email, full_name)
 		 VALUES (?, ?, 'student', ?, 'Other')`,
