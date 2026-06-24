@@ -437,9 +437,10 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
         plusOneName: friendName,
       );
       if (!mounted) return;
-      // Celebrate the booking, then close the sheet.
-      await showBookingSuccessAnimation(context);
-      if (mounted) _close(context);
+      // Float a celebratory animation on the root overlay, then close the
+      // sheet straight away — the overlay is non-blocking and removes itself.
+      showBookingSuccessAnimation(context);
+      _close(context);
     } on BookingConflict catch (e) {
       setState(() {
         _submitting = false;
