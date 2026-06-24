@@ -43,7 +43,9 @@ class SplashScreen extends ConsumerWidget {
                   b.studio.welcomeMessage,
                   style: TextStyle(
                     fontSize: 13.5,
-                    color: onImage ? Colors.white.withValues(alpha: 0.85) : y.muted,
+                    color: onImage
+                        ? Colors.white.withValues(alpha: 0.85)
+                        : y.muted,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -108,16 +110,14 @@ class SplashScreen extends ConsumerWidget {
         children: [
           if (onImage)
             Positioned.fill(
-              child: Image.network(
-                splashImage,
+              child: Image(
+                image: studioImageProvider(splashImage),
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => const SizedBox.shrink(),
               ),
             ),
           if (onImage)
-            Positioned.fill(
-              child: Container(color: const Color(0x66000000)),
-            ),
+            Positioned.fill(child: Container(color: const Color(0x66000000))),
           SafeArea(child: body),
           // Bottom home-indicator pill (matches yoga-onboard.jsx:42-44).
           Positioned(

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -111,6 +112,11 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/themes", s.handleCreateTheme)
 			r.Patch("/admin/themes/{id}", s.handleUpdateTheme)
 			r.Post("/admin/themes/{id}/activate", s.handleActivateTheme)
+			// Media library — manager-uploaded images, reusable across the
+			// app. Manager-only (this group); the role matrix enforces it.
+			r.Get("/admin/media", s.handleListMedia)
+			r.Post("/admin/media", s.handleUploadMedia)
+			r.Delete("/admin/media/{id}", s.handleDeleteMedia)
 			// Rooms management. Read sits on the staff group (above) so
 			// instructors can see the list when teaching; create/rename/
 			// delete are manager-only — same shape as themes.
@@ -1044,6 +1050,77 @@ func (s *Server) handleListThemes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.ListMedia(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("list media: %v", err)
+		writeError(w, http.StatusInternalServerError, "list media error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	// Bound the in-memory parse to the store's ceiling plus a little slack for
+	// multipart framing. Anything larger is rejected before we buffer it.
+	if err := r.ParseMultipartForm(store.MaxMediaBytes + 1<<20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing 'file' field")
+		return
+	}
+	defer file.Close()
+	// LimitReader one past the cap so an oversized file reads as cap+1 and the
+	// store's size check rejects it cleanly.
+	data, err := io.ReadAll(io.LimitReader(file, store.MaxMediaBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read upload")
+		return
+	}
+	mime := hdr.Header.Get("Content-Type")
+	if mime == "" || mime == "application/octet-stream" {
+		mime = http.DetectContentType(data)
+	}
+
+	row, err := s.store.UploadMedia(r.Context(), u.StudioID, u.ID, hdr.Filename, mime, data)
+	if errors.Is(err, store.ErrMediaStorageUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, "image storage isn't set up for this studio")
+		return
+	}
+	var rejected store.MediaRejected
+	if errors.As(err, &rejected) {
+		writeError(w, http.StatusBadRequest, rejected.Msg)
+		return
+	}
+	if err != nil {
+		log.Printf("upload media: %v", err)
+		writeError(w, http.StatusInternalServerError, "upload failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, row)
+}
+
+func (s *Server) handleDeleteMedia(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.DeleteMedia(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "media not found")
+		return
+	}
+	if err != nil {
+		log.Printf("delete media: %v", err)
+		writeError(w, http.StatusInternalServerError, "delete media error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // writeContrastError shapes a ContrastError into the structured 400 the

@@ -48,6 +48,16 @@ https://localhost:5443 {
 		}
 	}
 
+	# Firebase Storage emulator download endpoint → :9199. Media images
+	# (splash, etc.) are served from this same https origin so the browser
+	# doesn't block the emulator's plain-http URL as mixed content. Paired
+	# with MEDIA_PUBLIC_URL_BASE=https://localhost:5443 on the server, which
+	# builds the download URLs against this origin. Dev-only; prod serves
+	# from firebasestorage.googleapis.com directly.
+	handle /v0/* {
+		reverse_proxy localhost:9199
+	}
+
 	# Everything else → Flutter web dev server on :5173. Caddy handles
 	# WebSocket upgrades natively, so hot reload keeps working over the
 	# proxied connection.

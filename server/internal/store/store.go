@@ -22,15 +22,30 @@ type PushDispatcher interface {
 	Dispatch(userID, notifType, title, body, payloadJSON string)
 }
 
+// MediaStorage abstracts the blob backend for manager-uploaded images.
+// Put stores bytes at the given path and returns a publicly-fetchable URL;
+// Delete removes them. The store records a `media` row regardless of the
+// backend, so swapping Firebase Storage for S3/local disk later touches only
+// the implementation, not any call site. A nil MediaStorage disables uploads
+// (the API layer returns a clear "not configured" error).
+type MediaStorage interface {
+	Put(ctx context.Context, path, mime string, data []byte) (url string, err error)
+	Delete(ctx context.Context, path string) error
+}
+
 type Store struct {
 	db         *sql.DB
 	sealer     *secrets.Sealer
 	dispatcher PushDispatcher
+	media      MediaStorage
 }
 
 // SetPushDispatcher wires the FCM fan-out into the store. Calling this with
 // nil is allowed and disables push (tests + dev without Firebase keys).
 func (s *Store) SetPushDispatcher(d PushDispatcher) { s.dispatcher = d }
+
+// SetMediaStorage wires the blob backend for image uploads. nil disables it.
+func (s *Store) SetMediaStorage(m MediaStorage) { s.media = m }
 
 // DB returns the underlying handle. Exposed for the push package, which
 // reads device_tokens and prunes dead rows independently of store methods.
@@ -99,14 +114,14 @@ type ThemeTokens struct {
 }
 
 type Studio struct {
-	ID                     string      `json:"id"`
-	Name                   string      `json:"name"`
-	Timezone               string      `json:"timezone"`
-	Currency               string      `json:"currency"`
-	FreeCancelCutoffHours  int         `json:"free_cancel_cutoff_hours"`
-	AllowStudentPlusOne    bool        `json:"allow_student_plus_one"`
-	WelcomeMessage         string      `json:"welcome_message"`
-	BuyLayout              string      `json:"buy_layout"`
+	ID                    string `json:"id"`
+	Name                  string `json:"name"`
+	Timezone              string `json:"timezone"`
+	Currency              string `json:"currency"`
+	FreeCancelCutoffHours int    `json:"free_cancel_cutoff_hours"`
+	AllowStudentPlusOne   bool   `json:"allow_student_plus_one"`
+	WelcomeMessage        string `json:"welcome_message"`
+	BuyLayout             string `json:"buy_layout"`
 	// Light slot — always present (StudioConfig fails if the active light
 	// theme is missing). Kept under the legacy `active_theme_*` names so
 	// existing client code keeps reading the light tokens by default.

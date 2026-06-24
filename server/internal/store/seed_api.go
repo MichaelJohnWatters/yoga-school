@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,14 @@ import (
 )
 
 func ptr[T any](v T) *T { return &v }
+
+// seedSplashImage is a real studio photo bundled into the binary so the
+// bootstrap-api seed can populate the media library through the actual
+// UploadMedia path (and show off the splash). Only used when media storage is
+// wired; otherwise the seed step lands in the skipped-steps summary.
+//
+//go:embed seeddata/studio_class.webp
+var seedSplashImage []byte
 
 // seedReport accumulates the best-effort failures across a bootstrap-api run.
 // Individual steps still log as they happen (so the failure is visible inline),
@@ -948,6 +957,20 @@ func (s *Store) seedBreadthAPI(ctx context.Context, manager string, futureClasse
 	})
 	rep.try("theme_activate", func() error {
 		return s.ActivateTheme(ctx, StudioID, manager, ThemeClay)
+	})
+	// Populate the media library through the real upload path, then show it
+	// off by setting the active theme's splash to the uploaded image. Skips
+	// cleanly (ErrMediaStorageUnavailable) when no Storage bucket is wired —
+	// the bootstrap then notes "media_upload" in its skipped summary.
+	rep.try("media_upload", func() error {
+		item, err := s.UploadMedia(ctx, StudioID, manager,
+			"studio_class.webp", "image/webp", seedSplashImage)
+		if err != nil {
+			return err
+		}
+		return s.UpdateTheme(ctx, StudioID, manager, ThemeClay, ThemePatch{
+			SplashImageURL: ptr(item.URL),
+		})
 	})
 	rep.try("studio_config_update", func() error {
 		return s.UpdateStudioConfig(ctx, StudioID, manager, StudioConfigPatch{
