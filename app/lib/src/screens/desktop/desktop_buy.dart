@@ -1,5 +1,6 @@
 // Desktop Buy — grouped layout at desktop width.
-// Memberships render as 2-up cards; class packs as 2-up rows below.
+// Memberships (cards) and class packs (rows) each flow two-per-row via the
+// shared _TwoUp grid, so both sections stay balanced at any product count.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -46,7 +47,8 @@ class DesktopBuy extends ConsumerWidget {
             padding: EdgeInsets.symmetric(vertical: 40),
             child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           ),
-          error: (e, _) => Text("Can't load products: ${ApiError.fromAny(e).message}"),
+          error: (e, _) =>
+              Text("Can't load products: ${ApiError.fromAny(e).message}"),
         ),
       ],
     );
@@ -66,20 +68,16 @@ class _Body extends StatelessWidget {
       children: [
         if (memberships.isNotEmpty) ...[
           const YSectionHead(title: 'Memberships'),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          _TwoUp(
             children: [
-              for (var i = 0; i < memberships.length; i++) ...[
-                if (i > 0) const SizedBox(width: 12),
-                Expanded(child: _MembershipCard(product: memberships[i])),
-              ],
+              for (final m in memberships) _MembershipCard(product: m),
             ],
           ),
           const SizedBox(height: 22),
         ],
         if (packs.isNotEmpty) ...[
           const YSectionHead(title: 'Class packs'),
-          _Packs2Up(items: packs),
+          _TwoUp(children: [for (final p in packs) _PackRow(product: p)]),
         ],
       ],
     );
@@ -113,7 +111,11 @@ class _MembershipCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.autorenew, size: 14, color: fill ? y.onPrimary : y.primary),
+                Icon(
+                  Icons.autorenew,
+                  size: 14,
+                  color: fill ? y.onPrimary : y.primary,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   'Membership',
@@ -137,7 +139,9 @@ class _MembershipCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              product.description.isEmpty ? product.terms() : product.description,
+              product.description.isEmpty
+                  ? product.terms()
+                  : product.description,
               style: TextStyle(
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
@@ -178,33 +182,29 @@ class _MembershipCard extends StatelessWidget {
   }
 }
 
-class _Packs2Up extends StatelessWidget {
-  final List<Product> items;
-  const _Packs2Up({required this.items});
+/// Lays children out two-per-row at desktop width. Cards in a row stretch to
+/// equal height; a lone trailing child spans the full width rather than
+/// sitting half-empty — so a section looks balanced at any count (1 → full,
+/// 2 → side-by-side, 3 → pair + full, 4 → 2×2, …).
+class _TwoUp extends StatelessWidget {
+  final List<Widget> children;
+  const _TwoUp({required this.children});
 
   @override
   Widget build(BuildContext context) {
-    // 2-up rows: pair items.
-    final rows = <List<Product>>[];
-    for (var i = 0; i < items.length; i += 2) {
-      rows.add(items.sublist(i, (i + 2).clamp(0, items.length)));
-    }
     return Column(
       children: [
-        for (var i = 0; i < rows.length; i++) ...[
-          if (i > 0) const SizedBox(height: 10),
+        for (var i = 0; i < children.length; i += 2) ...[
+          if (i > 0) const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (var k = 0; k < 2; k++) ...[
-                if (k > 0) const SizedBox(width: 12),
-                Expanded(
-                  child: k < rows[i].length
-                      ? _PackRow(product: rows[i][k])
-                      : const SizedBox.shrink(),
-                ),
-              ],
-            ],
+            children: i + 1 < children.length
+                ? [
+                    Expanded(child: children[i]),
+                    const SizedBox(width: 12),
+                    Expanded(child: children[i + 1]),
+                  ]
+                : [Expanded(child: children[i])],
           ),
         ],
       ],
@@ -293,11 +293,7 @@ class _GateChip extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: fg,
-        ),
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: fg),
       ),
     );
   }
