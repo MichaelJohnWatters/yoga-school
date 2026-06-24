@@ -16,6 +16,7 @@ import '../api/api_client.dart';
 import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
+import '../widgets/booking_success.dart';
 import '../widgets/yoga_primitives.dart';
 import 'buy_screen.dart';
 import 'chat_screen.dart';
@@ -435,6 +436,9 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
         plusOne: _plusOne,
         plusOneName: friendName,
       );
+      if (!mounted) return;
+      // Celebrate the booking, then close the sheet.
+      await showBookingSuccessAnimation(context);
       if (mounted) _close(context);
     } on BookingConflict catch (e) {
       setState(() {
