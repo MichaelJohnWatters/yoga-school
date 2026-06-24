@@ -170,6 +170,10 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/enrollments/{id}/join", s.handleJoinEnrollment)
 		r.Get("/bookings", s.handleListBookings)
 		r.Post("/bookings", s.handleCreateBooking)
+		// Add a +1 to a class the caller is already booked on (the
+		// "add a friend after the fact" flow). Charged to the parent
+		// booking's entitlement — see AddPlusOneToBooking.
+		r.Post("/classes/{id}/plus-one", s.handleAddPlusOne)
 		r.Get("/bookings/preview", s.handleBookingPreview)
 		r.Delete("/bookings/{id}", s.handleCancelBooking)
 		r.Get("/bookings/{id}/cancel-preview", s.handleCancelPreview)
@@ -189,6 +193,8 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/me/notifications/feed", s.handleNotificationsFeed)
 		r.Post("/me/notifications/{id}/read", s.handleMarkNotificationRead)
 		r.Post("/me/notifications/read-all", s.handleMarkAllNotificationsRead)
+		r.Post("/me/notifications/clear-read", s.handleClearReadNotifications)
+		r.Delete("/me/notifications/{id}", s.handleDeleteNotification)
 		r.Post("/classes/{id}/waitlist", s.handleJoinWaitlist)
 		r.Delete("/classes/{id}/waitlist", s.handleLeaveWaitlist)
 		r.Get("/promotions", s.handleListPromotions)
@@ -203,6 +209,11 @@ func (s *Server) Routes() http.Handler {
 		r.Patch("/conversations/{id}/messages/{mid}", s.handleEditMessage)
 		r.Delete("/conversations/{id}/messages/{mid}", s.handleDeleteMessage)
 		r.Post("/conversations/{id}/read", s.handleMarkConversationRead)
+		// Class group chat. Open (or lazy-create) the chat for a class —
+		// students reach it from the class detail / their booking; staff
+		// from the class detail or the roster. Eligibility (booked /
+		// waitlisted / instructor / staff) is enforced in the store.
+		r.Post("/classes/{id}/chat", s.handleOpenClassChat)
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireStaff)
 			r.Post("/conversations", s.handleCreateConversation)
@@ -530,6 +541,29 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
+type addPlusOneReq struct {
+	EntitlementID string `json:"entitlement_id"`
+	PlusOneName   string `json:"plus_one_name"`
+}
+
+func (s *Server) handleAddPlusOne(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := chi.URLParam(r, "id")
+	var req addPlusOneReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	id, err := s.store.AddPlusOneToBooking(
+		r.Context(), u.StudioID, u.ID, classID, req.EntitlementID, req.PlusOneName,
+	)
+	if err != nil {
+		respondErr(w, err, "addPlusOne")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
 func (s *Server) handleCancelBooking(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
@@ -790,6 +824,33 @@ func (s *Server) handleMarkAllNotificationsRead(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"marked": n})
+}
+
+func (s *Server) handleDeleteNotification(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.DeleteNotification(r.Context(), u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "notification not found")
+		return
+	}
+	if err != nil {
+		log.Printf("delete notification: %v", err)
+		writeError(w, http.StatusInternalServerError, "delete notification error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleClearReadNotifications(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	n, err := s.store.ClearReadNotifications(r.Context(), u.ID)
+	if err != nil {
+		log.Printf("clear read notifications: %v", err)
+		writeError(w, http.StatusInternalServerError, "clear read error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"cleared": n})
 }
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -1653,14 +1714,20 @@ func (s *Server) handleAdminSeriesRoster(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	action := r.URL.Query().Get("action")
-	rows, err := s.store.ListAudit(r.Context(), u.StudioID, action, 200)
+	qp := r.URL.Query()
+	limit, _ := strconv.Atoi(qp.Get("limit"))
+	page, err := s.store.ListAudit(r.Context(), u.StudioID, store.AuditQuery{
+		Action: qp.Get("action"),
+		Search: qp.Get("q"),
+		Cursor: qp.Get("cursor"),
+		Limit:  limit,
+	})
 	if err != nil {
 		log.Printf("audit: %v", err)
 		writeError(w, http.StatusInternalServerError, "audit error")
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleAdminReports(w http.ResponseWriter, r *http.Request) {
@@ -2545,9 +2612,27 @@ func (s *Server) handleAddConversationMembers(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleOpenClassChat resolves (and lazy-creates) the class chat for the
+// classID in the URL. For a recurring class the chat is anchored to the
+// series so all instances share one room; for a one-off it's anchored to
+// the single class. Eligibility (booked / waitlisted / instructor of any
+// matching class / staff in the studio) is enforced by the store, which
+// returns ErrNotMember for ineligible callers and ErrNotFound for a class
+// outside the caller's studio.
+func (s *Server) handleOpenClassChat(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	classID := chi.URLParam(r, "id")
+	conv, err := s.store.OpenOrCreateClassConversation(r.Context(), u.StudioID, u.ID, classID)
+	if err != nil {
+		respondErr(w, err, "open class chat")
+		return
+	}
+	writeJSON(w, http.StatusOK, conv)
+}
+
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	out, err := s.store.ListConversations(r.Context(), u.StudioID, u.ID)
+	out, err := s.store.ListConversations(r.Context(), u.StudioID, u.ID, u.Role != "student")
 	if err != nil {
 		respondErr(w, err, "list conversations")
 		return

@@ -552,3 +552,226 @@ func TestCancelPreview_RefusesPastClass(t *testing.T) {
 		t.Errorf("BlockReason = %q; want class_already_started", p.BlockReason)
 	}
 }
+
+// TestAddPlusOne_SucceedsAfterSoloBook is the happy path for "add a friend
+// after the fact": a student books solo on a credit pass, then later adds a
+// +1 charged to that same pass (one more credit), creating a child booking
+// row that points at the parent.
+func TestAddPlusOne_SucceedsAfterSoloBook(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	ent := f.insertEntitlement(t, s, "credit", 5)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false, ""); err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+
+	if _, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, ent, "Test Friend"); err != nil {
+		t.Fatalf("add +1: %v", err)
+	}
+
+	// 5 - 1 (solo) - 1 (+1) = 3 credits.
+	var remaining int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT credits_remaining FROM entitlements WHERE id = ?`, ent,
+	).Scan(&remaining); err != nil {
+		t.Fatalf("read credits: %v", err)
+	}
+	if remaining != 3 {
+		t.Errorf("credits_remaining: got %d want 3", remaining)
+	}
+
+	// Two booked rows; the +1 carries the friend's name and a parent link.
+	var plusOnes int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM bookings
+		 WHERE class_id = ? AND status = 'booked'
+		   AND is_plus_one = 1 AND plus_one_name = 'Test Friend'
+		   AND parent_booking_id IS NOT NULL`, class,
+	).Scan(&plusOnes); err != nil {
+		t.Fatalf("count +1: %v", err)
+	}
+	if plusOnes != 1 {
+		t.Errorf("plus_one rows: got %d want 1", plusOnes)
+	}
+}
+
+// TestAddPlusOne_UnlimitedParentPaysWithCreditPass is the case that drove the
+// "student can choose the pass" design: a student books solo on an UNLIMITED
+// pass (which can't fund a +1), then brings a friend by picking a separate
+// CREDIT pass. The +1 succeeds and only the credit pass is decremented.
+func TestAddPlusOne_UnlimitedParentPaysWithCreditPass(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	unlimited := f.insertEntitlement(t, s, "unlimited", 0)
+	credit := f.insertEntitlement(t, s, "credit", 4)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, unlimited, false, ""); err != nil {
+		t.Fatalf("solo book on unlimited: %v", err)
+	}
+
+	if _, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, credit, "Test Friend"); err != nil {
+		t.Fatalf("add +1 on credit pass: %v", err)
+	}
+
+	// Only the chosen credit pass is charged: 4 - 1 = 3.
+	var remaining int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT credits_remaining FROM entitlements WHERE id = ?`, credit,
+	).Scan(&remaining); err != nil {
+		t.Fatalf("read credits: %v", err)
+	}
+	if remaining != 3 {
+		t.Errorf("credit pass: got %d want 3", remaining)
+	}
+}
+
+// TestCancelBooking_RefundsPlusOneToItsOwnPass verifies the per-seat refund:
+// a free cancel of an unlimited-parent booking with a credit-pass +1 returns
+// the credit to the +1's pass (and nothing to the unlimited).
+func TestCancelBooking_RefundsPlusOneToItsOwnPass(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	unlimited := f.insertEntitlement(t, s, "unlimited", 0)
+	credit := f.insertEntitlement(t, s, "credit", 4)
+	parentID, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, unlimited, false, "")
+	if err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+	if _, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, credit, "Test Friend"); err != nil {
+		t.Fatalf("add +1: %v", err)
+	}
+	// credit now 3. Free-cancel the parent → cascade cancels the +1 and
+	// refunds 1 credit to the credit pass (back to 4).
+	if err := s.CancelBooking(ctx, f.studentID, parentID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	var remaining int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT credits_remaining FROM entitlements WHERE id = ?`, credit,
+	).Scan(&remaining); err != nil {
+		t.Fatalf("read credits: %v", err)
+	}
+	if remaining != 4 {
+		t.Errorf("credit pass after free cancel: got %d want 4 (refunded)", remaining)
+	}
+}
+
+// Adding a +1 without an existing seat on the class is refused — there's
+// nothing to hang the guest off.
+func TestAddPlusOne_RequiresExistingBooking(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	ent := f.insertEntitlement(t, s, "credit", 5)
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, ent, "Test Friend")
+	assertBookingErr(t, err, "not_booked")
+}
+
+// A second +1 on the same class is refused (one guest per booking).
+func TestAddPlusOne_RefusesSecondPlusOne(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	ent := f.insertEntitlement(t, s, "credit", 5)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, true, "Friend One"); err != nil {
+		t.Fatalf("book with +1: %v", err)
+	}
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, ent, "Friend Two")
+	assertBookingErr(t, err, "plus_one_exists")
+}
+
+// Picking an unlimited pass to fund the +1 is refused — guests need a credit
+// pass (an unlimited would let one subscription bring free guests).
+func TestAddPlusOne_RefusesUnlimitedChosenPass(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	credit := f.insertEntitlement(t, s, "credit", 5)
+	unlimited := f.insertEntitlement(t, s, "unlimited", 0)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, credit, false, ""); err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, unlimited, "Test Friend")
+	assertBookingErr(t, err, "plus_one_unlimited_not_allowed")
+}
+
+// No spare credit on the chosen pass → refused.
+func TestAddPlusOne_RefusesWithoutSpareCredit(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	ent := f.insertEntitlement(t, s, "credit", 1)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false, ""); err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+	// The solo book spent the last credit, so the chosen pass now has none.
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, ent, "Test Friend")
+	assertBookingErr(t, err, "no_credits")
+}
+
+// The +1 path enforces the same class-type coverage as a normal booking: a
+// credit pass that doesn't cover this class's type (e.g. a Reformer pass on a
+// Yoga class) can't fund a guest. Guards the ect.class_type_id join in
+// AddPlusOneToBooking.
+func TestAddPlusOne_RefusesPassNotCoveringClassType(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	f.setPlusOneAllowed(t, s, true)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	parentPass := f.insertEntitlement(t, s, "credit", 5)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, parentPass, false, ""); err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+
+	// A second credit pass with its coverage stripped — it no longer covers
+	// this class's type, so it can't pay for the +1.
+	otherPass := f.insertEntitlement(t, s, "credit", 5)
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM entitlement_class_types WHERE entitlement_id = ?`, otherPass,
+	); err != nil {
+		t.Fatalf("drop coverage: %v", err)
+	}
+
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, otherPass, "Test Friend")
+	assertBookingErr(t, err, "entitlement_ineligible")
+}
+
+// Gate off at the studio level → refused even with a valid booking + credits.
+func TestAddPlusOne_RefusesWhenGateOff(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+
+	class := f.insertClass(t, s, time.Now().UTC().Add(48*time.Hour), 10)
+	ent := f.insertEntitlement(t, s, "credit", 5)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false, ""); err != nil {
+		t.Fatalf("solo book: %v", err)
+	}
+	_, err := s.AddPlusOneToBooking(ctx, f.studioID, f.studentID, class, ent, "Test Friend")
+	assertBookingErr(t, err, "plus_one_not_allowed")
+}

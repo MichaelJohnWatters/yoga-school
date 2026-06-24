@@ -50,6 +50,15 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Pin the pool to a single connection. SQLite is single-writer, and with
+	// multiple pooled connections two writers collide on the write lock — and
+	// a read→write upgrade returns SQLITE_BUSY *immediately*, before
+	// busy_timeout can retry it (the deadlock-avoidance case). The detached
+	// auto-promote goroutine after a booking cancel is the path that hit this.
+	// One connection serialises all access so writes queue instead of racing;
+	// the throughput cost is negligible at this app's scale.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		return nil, err
 	}

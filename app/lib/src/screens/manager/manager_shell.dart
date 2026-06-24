@@ -25,10 +25,12 @@ import 'admin_series_screen.dart';
 import 'admin_settings_screen.dart';
 import 'admin_student_detail_screen.dart';
 import 'admin_students_screen.dart';
+import 'admin_templates_screen.dart';
 
 enum ManagerSection {
   dashboard,
   schedule,
+  templates,
   products,
   discounts,
   series,
@@ -55,6 +57,7 @@ bool isSectionVisible(ManagerSection s, AccessTier tier) {
     case ManagerSection.roster:
       return true;
     case ManagerSection.dashboard:
+    case ManagerSection.templates:
     case ManagerSection.products:
     case ManagerSection.discounts:
     case ManagerSection.reports:
@@ -169,6 +172,7 @@ class _ManagerShellState extends State<ManagerShell> {
   static String _sectionLabel(ManagerSection s) => switch (s) {
         ManagerSection.dashboard => 'Dashboard',
         ManagerSection.schedule => 'Schedule',
+        ManagerSection.templates => 'Templates',
         ManagerSection.products => 'Products',
         ManagerSection.discounts => 'Discounts',
         ManagerSection.series => 'Series',
@@ -480,6 +484,7 @@ class _SidebarItem {
 const _items = <_SidebarItem>[
   _SidebarItem(ManagerSection.dashboard, 'Dashboard', Icons.dashboard_outlined),
   _SidebarItem(ManagerSection.schedule, 'Schedule', Icons.calendar_today_outlined),
+  _SidebarItem(ManagerSection.templates, 'Templates', Icons.event_repeat_outlined),
   _SidebarItem(ManagerSection.products, 'Products', Icons.shopping_bag_outlined),
   _SidebarItem(ManagerSection.discounts, 'Discounts', Icons.local_offer_outlined),
   _SidebarItem(ManagerSection.series, 'Series', Icons.school_outlined),
@@ -537,6 +542,7 @@ class _Content extends StatelessWidget {
       ManagerSection.dashboard =>
         AdminDashboardScreen(me: me, onOpenRoster: onOpenRoster),
       ManagerSection.schedule => AdminScheduleScreen(onOpenRoster: onOpenRoster),
+      ManagerSection.templates => const AdminTemplatesScreen(),
       ManagerSection.roster => rosterClassId == null
           ? _RosterPicker(onPick: onOpenRoster)
           : AdminRosterScreen(classId: rosterClassId!),

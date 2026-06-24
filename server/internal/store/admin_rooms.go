@@ -199,8 +199,8 @@ func (s *Store) DeleteRoom(ctx context.Context, studioID, actorID, roomID string
 	//   * active recurrence rules (recurrence_rules.room_id) — a rule
 	//     with no future sessions still blocks because the next
 	//     materialisation would fail,
-	//   * class templates (class_templates.room_id) — templates spawn
-	//     new classes and the FK would refuse mid-spawn otherwise.
+	//   * class template slots (class_template_slots.room_id) — templates
+	//     spawn new classes and the FK would refuse mid-spawn otherwise.
 	var classCount, ruleCount, tplCount int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM classes WHERE room_id = ?`, roomID,
@@ -213,7 +213,7 @@ func (s *Store) DeleteRoom(ctx context.Context, studioID, actorID, roomID string
 		return err
 	}
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM class_templates WHERE room_id = ?`, roomID,
+		`SELECT COUNT(*) FROM class_template_slots WHERE room_id = ?`, roomID,
 	).Scan(&tplCount); err != nil {
 		return err
 	}

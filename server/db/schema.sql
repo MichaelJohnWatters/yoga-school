@@ -156,15 +156,32 @@ CREATE TABLE IF NOT EXISTS classes (
 );
 
 -- ===== Class templates ==================================================
--- A template captures the "recipe" for a recurring class. Generating from a
--- template creates N concrete `classes` rows linked back via
--- template_batch_id; the whole batch can be undone in one call.
+-- A template captures the "recipe" for a recurring weekly schedule. It owns
+-- one or more *slots* (class_template_slots) — each slot is a full class
+-- shape pinned to a weekday/time (e.g. "Thu 18:30 Vinyasa w/ Mara" +
+-- "Sat 09:30 Slow Flow w/ Ben"). Generating fans out to weeks × slots
+-- concrete `classes` rows, all linked back via template_batch_id; the whole
+-- batch can be undone in one call.
 
 CREATE TABLE IF NOT EXISTS class_templates (
   id            TEXT PRIMARY KEY,
   studio_id     TEXT NOT NULL REFERENCES studios(id),
   created_by    TEXT NOT NULL REFERENCES users(id),
   title         TEXT NOT NULL,
+  weeks         INTEGER NOT NULL,
+  starts_on     TEXT NOT NULL,                -- first week's Monday anchor (YYYY-MM-DD)
+  status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','reverted')),
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_class_templates_studio ON class_templates(studio_id, created_at);
+
+-- One row per recurring slot within a template. seq is app-assigned (no
+-- AUTOINCREMENT — keeps SQLite-dev / Postgres-prod portable).
+CREATE TABLE IF NOT EXISTS class_template_slots (
+  id            TEXT PRIMARY KEY,
+  template_id   TEXT NOT NULL REFERENCES class_templates(id),
+  seq           INTEGER NOT NULL,
   class_type_id TEXT NOT NULL REFERENCES class_types(id),
   instructor_id TEXT NOT NULL REFERENCES users(id),
   room_id       TEXT NOT NULL REFERENCES rooms(id),
@@ -173,13 +190,9 @@ CREATE TABLE IF NOT EXISTS class_templates (
   start_minute  INTEGER NOT NULL,
   duration_mins INTEGER NOT NULL,
   capacity      INTEGER NOT NULL,
-  weeks         INTEGER NOT NULL,
-  starts_on     TEXT NOT NULL,                -- first session date (YYYY-MM-DD)
-  status        TEXT NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active','reverted')),
-  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  title         TEXT                          -- optional per-slot override of the template title
 );
-CREATE INDEX IF NOT EXISTS idx_class_templates_studio ON class_templates(studio_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_class_template_slots ON class_template_slots(template_id, seq);
 CREATE INDEX IF NOT EXISTS idx_classes_studio_time ON classes(studio_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_classes_enrollment ON classes(enrollment_id);
 
@@ -414,14 +427,25 @@ CREATE TABLE IF NOT EXISTS notifications (
   id          TEXT PRIMARY KEY,
   studio_id   TEXT NOT NULL REFERENCES studios(id),
   user_id     TEXT NOT NULL REFERENCES users(id),
-  type        TEXT NOT NULL, -- booking_confirmed | waitlist_promoted | class_cancelled | system | ...
+  type        TEXT NOT NULL, -- booking_confirmed | waitlist_promoted | class_cancelled | chat_message | system | ...
   title       TEXT NOT NULL,
   body        TEXT,
   payload     TEXT NOT NULL DEFAULT '{}',
   read_at     TEXT,
+  -- Collapse key for upserts. NULL = per-event row (bookings, cancels,
+  -- waitlist promotes — every event gets its own bell entry). For
+  -- chat-style fan-outs we set this to "chat:<conversation_id>" so a
+  -- conversation only ever has one row per user — the row's title /
+  -- body / created_at refresh on each new message rather than spawning
+  -- N entries in a busy class chat. Partial unique index enforces
+  -- one row per (user, dedup_key) when the key is set.
+  dedup_key   TEXT,
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notifications_dedup
+  ON notifications(user_id, dedup_key)
+  WHERE dedup_key IS NOT NULL;
 
 -- Per-user notification category opt-outs. One row per user; absence means
 -- "send me everything" (no row = defaults).
@@ -510,13 +534,30 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_studio_time ON audit_log(studio_id, created_at);
+-- Serves the action-filtered, keyset-paginated activity log: equality on
+-- (studio_id, action) then created_at for the seek + sort, so a filtered page
+-- is an index range scan with no separate sort step.
+CREATE INDEX IF NOT EXISTS idx_audit_studio_action_time
+  ON audit_log(studio_id, action, created_at);
 
 -- ===== Group chat + direct messages =====================================
--- A `conversation` is either a staff-created `group` (named, many members)
--- or a `dm` (no title, exactly two members, staff-initiated to a student).
--- Membership in `conversation_members` is the access-control list: only
--- members read or post. There is no studio-wide "everyone" room — every
--- participant has an explicit row.
+-- A `conversation` is one of:
+--   * `group` — staff-created, named, many members. Membership is the ACL
+--     stored in `conversation_members`.
+--   * `dm`    — no title, exactly two members, staff-initiated to a
+--     student. Same ACL model.
+--   * `class` — auto-membership chat anchored to a class. Membership is
+--     NOT materialised; it's computed at read time from
+--     bookings ∪ waitlist_entries ∪ instructor ∪ (any staff in studio).
+--     A class chat anchors to either the recurrence series
+--     (recurrence_rule_id, preferred for repeating classes) or a single
+--     one-off class (class_id). The CHECK enforces exactly one anchor is
+--     set when kind='class' and none otherwise. Partial unique indexes
+--     stop us double-creating per series / per class.
+--
+-- For all kinds, `conversation_members` still stores `last_read_seq`
+-- rows lazily so unread counts and read receipts work; for class chats
+-- the row is written the first time the user opens the thread.
 --
 -- Messages carry a per-conversation monotonic `seq` ASSIGNED IN GO (not a
 -- DB sequence) so the schema ports unchanged to Postgres. The pattern
@@ -528,14 +569,35 @@ CREATE INDEX IF NOT EXISTS idx_audit_studio_time ON audit_log(studio_id, created
 -- (messages.seq > members.last_read_seq).
 
 CREATE TABLE IF NOT EXISTS conversations (
-  id          TEXT PRIMARY KEY,
-  studio_id   TEXT NOT NULL REFERENCES studios(id),
-  kind        TEXT NOT NULL CHECK (kind IN ('group','dm')),
-  title       TEXT,                    -- NULL for dm; client derives from members
-  created_by  TEXT NOT NULL REFERENCES users(id),
-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  id                  TEXT PRIMARY KEY,
+  studio_id           TEXT NOT NULL REFERENCES studios(id),
+  kind                TEXT NOT NULL CHECK (kind IN ('group','dm','class')),
+  title               TEXT,            -- NULL for dm; client derives from members
+  -- Class-chat anchors. Exactly one of (recurrence_rule_id, class_id) is
+  -- set iff kind='class'; both NULL otherwise. Enforced by table CHECK.
+  recurrence_rule_id  TEXT REFERENCES recurrence_rules(id),
+  class_id            TEXT REFERENCES classes(id),
+  created_by          TEXT NOT NULL REFERENCES users(id),
+  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK (
+    (kind <> 'class' AND recurrence_rule_id IS NULL AND class_id IS NULL)
+    OR
+    (kind = 'class' AND (
+      (recurrence_rule_id IS NOT NULL AND class_id IS NULL)
+      OR
+      (recurrence_rule_id IS NULL AND class_id IS NOT NULL)
+    ))
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_studio ON conversations(studio_id, created_at);
+-- One class chat per recurrence series.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_class_series
+  ON conversations(recurrence_rule_id)
+  WHERE recurrence_rule_id IS NOT NULL;
+-- One class chat per one-off class (i.e. a class with no recurrence_rule_id).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_class_oneoff
+  ON conversations(class_id)
+  WHERE class_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS conversation_members (
   conversation_id TEXT NOT NULL REFERENCES conversations(id),

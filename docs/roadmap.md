@@ -22,6 +22,27 @@ returning cold can see what's recent without trawling `git log`. Trim
 the list when it gets longer than ~15 items — old wins live in commit
 history.
 
+- ✅ **Class group chat** — auto-membership chat for everyone on a class:
+  active `bookings` ∪ active `waitlist_entries` ∪ the class's instructor
+  ∪ any staff (instructor / manager) in the studio. New `kind='class'`
+  on `conversations` with a nullable `recurrence_rule_id` (preferred,
+  for repeating classes) or `class_id` (one-off) anchor; CHECK enforces
+  exactly one. Membership is **computed on read** from those four
+  sources, so cancel / refund / waitlist-leave drops the user out for
+  free — no booking-side hook to maintain. `conversation_members` rows
+  are written lazily for `last_read_seq` only. Lazy-create on first
+  open via `POST /classes/:id/chat`; audited as `class_chat_create`.
+  Entry points: "Group chat" affordance on the student booking sheet
+  (`booking_sheet.dart`) and a header action on the manager roster
+  (`admin_roster_screen.dart`). Student-side **Archived tab** in
+  Messages: a class chat falls out of Inbox when (a) no future booking
+  or waitlist on the anchor AND (b) at least one past instance ended
+  >12h ago — pure derived filter, no `archived_at` column. Staff side
+  stays unarchived. DMs + manually-created groups don't auto-archive.
+  Tests: store eligibility (booked / waitlisted / instructor / staff /
+  outsider / cross-studio), lazy-create idempotency, series anchor,
+  one-off archive, plus-one payer membership; audit-matrix case for
+  `class_chat_create`.
 - ✅ **Student notes per student** — hero card on the manager
   student-detail page. `user_notes` table, staff-tier CRUD with
   author-only edit/delete, audit-logged (`student_note_create` /
@@ -106,6 +127,12 @@ Four DB roles, three functional tiers. Keep this aligned with
 - ☐ **Subscription pause** — vacation hold on unlimiteds. Add
   `paused_at` / `pause_until` to `entitlements`, freeze the consumption
   clock while paused.
+- ☐ **Buy-a-credit to add a +1** — the post-hoc "Add a friend" on a
+  booked class only appears when the student already holds a qualifying
+  credit pass. An unlimited-only member (no credit pack) currently sees
+  an informational hint but no inline path. Offer a "buy a single-class
+  pass → add the +1" flow in the booking sheet, reusing the Buy screen
+  the same way "Buy pass and book" does at booking time.
 
 ## Instructor — making their job easier
 
@@ -138,6 +165,15 @@ Four DB roles, three functional tiers. Keep this aligned with
 - ☐ **Capacity overrides** — bump a single class's capacity for a
   popular session.
 - ☐ **Tax reports** — VAT / sales tax breakdown per period for HMRC.
+- ☐ **Void should fully release seats** — `VoidEntitlement` already
+  cancels the student's *future* bookings paid by that pass (test:
+  `TestVoidEntitlement_CancelsFutureBookingsOnThatPass`), but silently:
+  no per-booking `booking_cancel` audit row, no count in the `void`
+  detail, **no waitlist promotion** on the freed seats, and no student
+  notification. Make it behave like a real cancellation (promote the
+  next waiter, notify, record what was dropped). Also: make the
+  bootstrap-api void demo target a pass that has a booking so the
+  cancellation is visible in the seed.
 
 ## Operational / cross-role
 
@@ -157,6 +193,33 @@ Four DB roles, three functional tiers. Keep this aligned with
 - ☐ **Hover sweep for GestureDetector pills** — `YButton` got the
   hover treatment but sidebar nav, layout-mode pills, action chips are
   still flat. Convert to InkWell+Material as we did for YButton.
+- ✅ **Audit log pagination** — keyset cursor on `(created_at DESC, id
+  DESC)` with server-side action filter + free-text search + infinite
+  scroll; index `idx_audit_studio_action_time`. The reference
+  implementation for the rest below.
+- ☐ **Pagination for the other list screens** — decided per-data shape
+  (see the audit log as the keyset reference):
+  - *Bounded lists* (products, class types, rooms, staff, discounts,
+    promotions — tens of rows): **no pagination**; keep fetching all.
+  - *Stable, moderate lists* (students roster, purchases, reports
+    tables): plain **offset `LIMIT…OFFSET`** is fine — they don't churn
+    at the cursor, so offset's insert-drift doesn't bite.
+  - *High-churn time feeds* (notifications, chat already done): **keyset
+    cursor** like the audit log.
+  - Rule of thumb: push filters/search into SQL (so they search the
+    whole table, not a loaded page) and add a composite index ordered
+    **Equality cols → Sort col** for any filtered+sorted list. `LIKE`
+    free-text can't be indexed — revisit with FTS5 only if volume demands.
+- ☐ **bootstrap-api seed: cover the last few audit actions** — the API
+  seed produces ~42 of the action types. Still uncovered because they
+  need awkward state: `attendance_scan` (a live check-in QR/token),
+  `theme_create` (contrast-valid token set), `stripe_credentials_update`,
+  `purchase_pending`. Add if/when we want 100% coverage in the seed.
+- ☐ **Real Stripe wiring** — already scoped in `products.go` (`STRIPE
+  TODO` markers): the purchase intent/confirm flow is stubbed. Needs the
+  `stripe-go` SDK, per-studio key resolution, the public `/stripe/webhook`
+  route, a `stripe_price_id` editor field, and a test-mode account to
+  simulate cards. A project, not a quick task.
 
 ## Big rewrites — flagged so they don't sneak in
 

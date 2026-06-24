@@ -161,7 +161,17 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			    WHERE b.class_id = c.id AND b.status = 'booked') AS booked_count,
 			NULL AS my_booking_id,
 			c.recurrence_rule_id,
-			c.enrollment_id
+			c.enrollment_id,
+			-- Messages in this class's group chat (series chat when the class
+			-- recurs, else the one-off class chat). Drives the schedule's
+			-- chat badge so busy class chats draw a manager's eye.
+			(SELECT COUNT(*) FROM messages m
+			   JOIN conversations cv ON cv.id = m.conversation_id
+			  WHERE cv.kind = 'class' AND m.deleted_at IS NULL
+			    AND ((c.recurrence_rule_id IS NOT NULL
+			          AND cv.recurrence_rule_id = c.recurrence_rule_id)
+			      OR (c.recurrence_rule_id IS NULL
+			          AND cv.class_id = c.id))) AS chat_message_count
 		FROM classes c
 		JOIN class_types ct ON ct.id = c.class_type_id
 		JOIN users i        ON i.id = c.instructor_id
@@ -194,6 +204,7 @@ func (s *Store) AdminClassesFor(ctx context.Context, studioID string, from, to t
 			&r.RoomID, &r.RoomName, &roomColor,
 			&r.StartsAt, &r.EndsAt, &r.Capacity,
 			&r.BookedCount, &myBooking, &ruleID, &enrollmentID,
+			&r.ChatMessageCount,
 		); err != nil {
 			return nil, err
 		}
