@@ -11,8 +11,7 @@ import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
 import 'manager_shell.dart';
 
-final adminProductsProvider =
-    FutureProvider<List<AdminProduct>>((ref) async {
+final adminProductsProvider = FutureProvider<List<AdminProduct>>((ref) async {
   return ref.watch(apiClientProvider).adminListProducts();
 });
 
@@ -33,42 +32,45 @@ class AdminProductsScreen extends ConsumerWidget {
     return RefreshOnMount(
       onMount: () => ref.invalidate(adminProductsProvider),
       child: LayoutBuilder(
-      builder: (context, constraints) {
-        final isNarrow = constraints.maxWidth < _kNarrow;
-        final padH = isNarrow ? 14.0 : 30.0;
-        final padV = isNarrow ? 18.0 : 26.0;
-        return Padding(
-          padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ManagerPageHeader(
-                title: 'Products',
-                sub: 'Passes & memberships available to students',
-                actions: [
-                  YButton(label: '+ New product', small: true, onTap: onNew),
-                ],
-              ),
-              Expanded(
-                child: data.when(
-                  data: (rows) =>
-                      _ProductList(rows: rows, onEdit: onEdit, isNarrow: isNarrow),
-                  loading: () => const Center(
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  error: (e, _) => Center(
-                    child: Text(
-                      "Can't load products: ${ApiError.fromAny(e).message}",
-                      style: TextStyle(color: context.yoga.muted),
+        builder: (context, constraints) {
+          final isNarrow = constraints.maxWidth < _kNarrow;
+          final padH = isNarrow ? 14.0 : 30.0;
+          final padV = isNarrow ? 18.0 : 26.0;
+          return Padding(
+            padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ManagerPageHeader(
+                  title: 'Products',
+                  sub: 'Passes & memberships available to students',
+                  actions: [
+                    YButton(label: '+ New product', small: true, onTap: onNew),
+                  ],
+                ),
+                Expanded(
+                  child: data.when(
+                    data: (rows) => _ProductList(
+                      rows: rows,
+                      onEdit: onEdit,
+                      isNarrow: isNarrow,
+                    ),
+                    loading: () => const Center(
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    error: (e, _) => Center(
+                      child: Text(
+                        "Can't load products: ${ApiError.fromAny(e).message}",
+                        style: TextStyle(color: context.yoga.muted),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
-          ),
-        );
-      },
-    ),
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -145,9 +147,7 @@ class _MobileRow extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
-          border: isLast
-              ? null
-              : Border(bottom: BorderSide(color: y.border)),
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -271,117 +271,114 @@ class _Row extends StatelessWidget {
         ? 'Unlimited'
         : '${p.credits ?? 0} credit${(p.credits ?? 0) == 1 ? '' : 's'}';
     final billing = p.billingType == 'recurring' ? '/month' : '';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-      decoration: BoxDecoration(
-        border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 14,
-            child: Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    p.name,
+    // Whole row opens the editor — the trailing chevron just signals it.
+    return InkWell(
+      onTap: onEdit,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 14,
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      p.name,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: y.text,
+                      ),
+                    ),
+                  ),
+                  if (p.isHero) ...[
+                    const SizedBox(width: 8),
+                    _SmallBadge(label: 'Hero', accent: false),
+                  ],
+                  if (p.isArchived) ...[
+                    const SizedBox(width: 8),
+                    _SmallBadge(label: 'Archived', accent: true),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 100,
+              child: Row(
+                children: [
+                  Text(
+                    p.formattedPrice(),
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: y.text,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
-                ),
-                if (p.isHero) ...[
-                  const SizedBox(width: 8),
-                  _SmallBadge(label: 'Hero', accent: false),
-                ],
-                if (p.isArchived) ...[
-                  const SizedBox(width: 8),
-                  _SmallBadge(label: 'Archived', accent: true),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 100,
-            child: Row(
-              children: [
-                Text(
-                  p.formattedPrice(),
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: y.text,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                  Text(
+                    billing,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: y.muted,
+                    ),
                   ),
-                ),
-                Text(
-                  billing,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: y.muted,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 100,
-            child: Text(
-              passSummary,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: y.muted,
+                ],
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 110,
-            child: Text(
-              '${p.usage.activePasses}',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: y.text,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 110,
-            child: Text(
-              p.formattedPriceFromMinor(p.usage.revenueMinor),
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: y.muted,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 56,
-            child: GestureDetector(
-              onTap: onEdit,
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 100,
               child: Text(
-                'Edit',
+                passSummary,
                 style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: y.primary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
                 ),
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 110,
+              child: Text(
+                '${p.usage.activePasses}',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: y.text,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 110,
+              child: Text(
+                p.formattedPriceFromMinor(p.usage.revenueMinor),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: y.muted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 56,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Icon(Icons.chevron_right, size: 18, color: y.muted),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -397,8 +394,9 @@ extension on AdminProduct {
     };
     final whole = minor ~/ 100;
     final cents = minor % 100;
-    final body =
-        cents == 0 ? '$whole' : '$whole.${cents.toString().padLeft(2, '0')}';
+    final body = cents == 0
+        ? '$whole'
+        : '$whole.${cents.toString().padLeft(2, '0')}';
     return '$symbol$body';
   }
 }

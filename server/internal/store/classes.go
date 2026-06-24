@@ -54,6 +54,10 @@ type ClassRow struct {
 	// Set on classes backed by a recurrence rule — the manager UI uses it
 	// to decide whether to show the this/future/all scope picker on edit.
 	RecurrenceRuleID *string `json:"recurrence_rule_id,omitempty"`
+	// Number of (non-deleted) messages in this class's group chat — the
+	// staff schedule renders a small chat badge so busy class chats draw
+	// attention. Only populated by the admin schedule query; 0 elsewhere.
+	ChatMessageCount int `json:"chat_message_count,omitempty"`
 }
 
 // ClassesForDay returns every class on the given day, with the caller's
@@ -544,6 +548,178 @@ func (s *Store) CreateBooking(ctx context.Context, studioID, userID, classID, en
 	return bookingID, nil
 }
 
+// AddPlusOneToBooking adds a +1 guest to a class the caller is ALREADY booked
+// on — the "add a friend after the fact" path, for when they booked solo and
+// later want to bring someone. It mirrors the +1 branch of CreateBooking but
+// without creating a primary seat: it finds the caller's existing booking and
+// hangs a child +1 row off it.
+//
+// The guest seat is charged to a CALLER-CHOSEN credit pass (entitlementID) —
+// not necessarily the one that paid for the original seat. A student who
+// booked solo on an unlimited pass can still bring a +1 by picking a credit
+// pass here. The chosen pass must be an active credit pass that covers this
+// class type and has a spare credit; CancelBooking refunds each cancelled
+// seat to its OWN entitlement, so a guest paid from a different pass refunds
+// correctly. Returns the new +1 booking ID.
+func (s *Store) AddPlusOneToBooking(ctx context.Context, studioID, userID, classID, entitlementID, plusOneName string) (string, error) {
+	plusOneName = strings.TrimSpace(plusOneName)
+	if plusOneName == "" {
+		return "", &BookingError{
+			Code:    "plus_one_name_required",
+			Message: "Tell us your friend's name when bringing a +1",
+		}
+	}
+	if entitlementID == "" {
+		return "", &BookingError{
+			Code:    "entitlement_required",
+			Message: "Pick a pass to pay for your +1",
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	// Class state + the studio's +1 toggle + a human title for the audit row.
+	var capacity, bookedCount, cutoffHours, plusOneAllowed int
+	var classStartStr, classTitle string
+	err = tx.QueryRowContext(ctx, `
+		SELECT c.starts_at,
+		       c.capacity,
+		       (SELECT COUNT(*) FROM bookings b
+		         WHERE b.class_id = c.id AND b.status = 'booked'),
+		       s.free_cancel_cutoff_hours,
+		       s.allow_student_plus_one,
+		       COALESCE(c.title,'')
+		  FROM classes c
+		  JOIN studios s ON s.id = c.studio_id
+		 WHERE c.id = ? AND c.studio_id = ? AND c.status = 'scheduled'`,
+		classID, studioID,
+	).Scan(&classStartStr, &capacity, &bookedCount, &cutoffHours, &plusOneAllowed, &classTitle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", &BookingError{Code: "class_not_found", Message: "class not found"}
+	}
+	if err != nil {
+		return "", err
+	}
+	if plusOneAllowed == 0 {
+		return "", &BookingError{Code: "plus_one_not_allowed", Message: "studio does not allow +1 guests"}
+	}
+	classStart, err := time.Parse(time.RFC3339, classStartStr)
+	if err != nil {
+		return "", err
+	}
+	if !time.Now().UTC().Before(classStart) {
+		return "", &BookingError{Code: "class_already_started", Message: "Class has already started"}
+	}
+
+	// The caller's primary (non-+1) seat — the +1 hangs off it. We only need
+	// its id for the parent link; the guest is paid from the chosen pass, not
+	// this booking's.
+	var parentBookingID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM bookings
+		 WHERE class_id = ? AND user_id = ? AND is_plus_one = 0 AND status = 'booked'
+		 LIMIT 1`,
+		classID, userID,
+	).Scan(&parentBookingID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", &BookingError{Code: "not_booked", Message: "Book the class before adding a +1"}
+	}
+	if err != nil {
+		return "", err
+	}
+
+	// Already brought someone?
+	var existing sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id FROM bookings
+		 WHERE class_id = ? AND user_id = ? AND is_plus_one = 1 AND status = 'booked'
+		 LIMIT 1`,
+		classID, userID,
+	).Scan(&existing); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if existing.Valid {
+		return "", &BookingError{Code: "plus_one_exists", Message: "You already have a +1 booked for this class."}
+	}
+
+	// One more seat has to fit.
+	if bookedCount+1 > capacity {
+		return "", &BookingError{Code: "class_full", Message: "class is full"}
+	}
+
+	// Validate the CHOSEN pass: active, covers this class type, not expired,
+	// a credit pass (unlimited can't fund a +1), with a spare credit.
+	var passKind string
+	var creditsR sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT e.pass_kind, e.credits_remaining
+		  FROM entitlements e
+		  JOIN entitlement_class_types ect ON ect.entitlement_id = e.id
+		  JOIN classes c                   ON c.id = ?
+		 WHERE e.id = ? AND e.user_id = ? AND e.studio_id = ?
+		   AND e.status = 'active'
+		   AND ect.class_type_id = c.class_type_id
+		   AND (e.expires_at IS NULL OR e.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		classID, entitlementID, userID, studioID,
+	).Scan(&passKind, &creditsR)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", &BookingError{Code: "entitlement_ineligible", Message: "That pass can't cover this class."}
+	}
+	if err != nil {
+		return "", err
+	}
+	if passKind == "unlimited" {
+		return "", &BookingError{
+			Code:    "plus_one_unlimited_not_allowed",
+			Message: "+1 guests need a credit pass — pick one of your credit passes.",
+		}
+	}
+	if !creditsR.Valid || creditsR.Int64 < 1 {
+		return "", &BookingError{Code: "no_credits", Message: "That pass has no credits left for a +1."}
+	}
+
+	plusOneID := NewID()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO bookings
+		    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one, plus_one_name, parent_booking_id,
+		     booked_by_role, cancel_cutoff_hours, status, checkin_token)
+		    VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'student', ?, 'booked', ?)`,
+		plusOneID, studioID, classID, userID, entitlementID, plusOneName, parentBookingID, cutoffHours,
+		NewID(),
+	); err != nil {
+		// uq_bookings_active_seat (class, user, is_plus_one=1) — a concurrent
+		// add raced us to the single +1 slot.
+		return "", &BookingError{Code: "plus_one_failed", Message: "You already have a +1 booked for this class."}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE entitlements SET credits_remaining = credits_remaining - 1 WHERE id = ?`,
+		entitlementID,
+	); err != nil {
+		return "", err
+	}
+	// Same action name as the at-booking-time +1 so the Activity log + abuse
+	// filters treat both paths identically; added_after_booking distinguishes
+	// them for anyone who cares to look.
+	if err := s.writeAuditTx(ctx, tx, studioID, userID,
+		"booking_plus_one", "booking", plusOneID, map[string]any{
+			"class_id":            classID,
+			"class_title":         classTitle,
+			"parent_booking_id":   parentBookingID,
+			"entitlement_id":      entitlementID,
+			"friend_name":         plusOneName,
+			"added_after_booking": true,
+		}); err != nil {
+		return "", fmt.Errorf("audit plus_one: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return plusOneID, nil
+}
+
 // CancelBooking marks a booking cancelled and records the business outcome.
 //
 //	cancelled_free         — cancelled outside the snapshotted cutoff window:
@@ -563,22 +739,18 @@ func (s *Store) CancelBooking(ctx context.Context, userID, bookingID string) err
 	var (
 		classStartStr string
 		cutoffHours   int
-		entitlementID string
-		passKind      string
 		studioID      string
 		classID       string
 		classTitle    string
 	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT c.starts_at, b.cancel_cutoff_hours, b.entitlement_id, e.pass_kind,
+		SELECT c.starts_at, b.cancel_cutoff_hours,
 		       b.studio_id, b.class_id, COALESCE(c.title,'')
 		  FROM bookings b
-		  JOIN classes      c ON c.id = b.class_id
-		  JOIN entitlements e ON e.id = b.entitlement_id
+		  JOIN classes c ON c.id = b.class_id
 		 WHERE b.id = ? AND b.user_id = ? AND b.status = 'booked'`,
 		bookingID, userID,
-	).Scan(&classStartStr, &cutoffHours, &entitlementID, &passKind,
-		&studioID, &classID, &classTitle)
+	).Scan(&classStartStr, &cutoffHours, &studioID, &classID, &classTitle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -603,14 +775,44 @@ func (s *Store) CancelBooking(ctx context.Context, userID, bookingID string) err
 		outcome = "cancelled_late_burned"
 	}
 
-	// Cancellation cascades to the +1 child row if one exists. The friend is
-	// the member's responsibility — letting the parent walk while the child
-	// stays 'booked' leaves an orphan seat held against capacity. The
-	// original booking consumed two seats, so a free cancel refunds two
-	// credits too. The checkin_token deliberately stays put on cancelled
+	// Snapshot the seats about to be cancelled (the parent + any +1 child)
+	// with each seat's own entitlement + pass kind. We refund per-seat to the
+	// pass that actually paid for it — the parent and the +1 can be on
+	// different passes now that a post-hoc +1 picks its own pass.
+	type cancelledSeat struct {
+		entitlementID string
+		passKind      string
+	}
+	seatRows, err := tx.QueryContext(ctx, `
+		SELECT b.entitlement_id, e.pass_kind
+		  FROM bookings b
+		  JOIN entitlements e ON e.id = b.entitlement_id
+		 WHERE (b.id = ? OR b.parent_booking_id = ?) AND b.status = 'booked'`,
+		bookingID, bookingID,
+	)
+	if err != nil {
+		return err
+	}
+	var cancelledSeats []cancelledSeat
+	for seatRows.Next() {
+		var st cancelledSeat
+		if err := seatRows.Scan(&st.entitlementID, &st.passKind); err != nil {
+			seatRows.Close()
+			return err
+		}
+		cancelledSeats = append(cancelledSeats, st)
+	}
+	seatRows.Close()
+	if err := seatRows.Err(); err != nil {
+		return err
+	}
+
+	// Cancellation cascades to the +1 child row if one exists. Letting the
+	// parent walk while the child stays 'booked' leaves an orphan seat held
+	// against capacity. The checkin_token deliberately stays put on cancelled
 	// rows so the scan endpoint can resolve a stale QR to a specific
 	// "was_cancelled" outcome instead of a generic "invalid_token".
-	res, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE bookings
 		   SET status       = 'cancelled',
 		       outcome      = ?,
@@ -618,23 +820,27 @@ func (s *Store) CancelBooking(ctx context.Context, userID, bookingID string) err
 		 WHERE (id = ? OR parent_booking_id = ?)
 		   AND status = 'booked'`,
 		outcome, bookingID, bookingID,
-	)
-	if err != nil {
+	); err != nil {
 		return err
 	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
+	rowsAffected := len(cancelledSeats)
 
-	// Free cancel refunds credits (one per cancelled row). Unlimited and
-	// late cancels keep the pass consumed.
-	if outcome == "cancelled_free" && passKind == "credit" {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE entitlements SET credits_remaining = credits_remaining + ? WHERE id = ?`,
-			rowsAffected, entitlementID,
-		); err != nil {
-			return err
+	// Free cancel refunds one credit per cancelled credit seat, each to its
+	// own pass. Unlimited seats and late cancels keep the pass consumed.
+	if outcome == "cancelled_free" {
+		refundByEntitlement := map[string]int{}
+		for _, st := range cancelledSeats {
+			if st.passKind == "credit" {
+				refundByEntitlement[st.entitlementID]++
+			}
+		}
+		for entID, n := range refundByEntitlement {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE entitlements SET credits_remaining = credits_remaining + ? WHERE id = ?`,
+				n, entID,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	// Audit the student's own cancel so support can trace "but I cancelled
@@ -661,10 +867,10 @@ func (s *Store) CancelBooking(ctx context.Context, userID, bookingID string) err
 	// goroutine isn't cancelled when the HTTP handler returns. One offer
 	// per cancelled row (a parent + +1 cascade frees two). Benign races
 	// ("no waiters" / "full") are expected and end the loop quietly.
-	seats := rowsAffected
+	freedSeats := rowsAffected
 	go func() {
 		ctx := context.Background()
-		for i := int64(0); i < seats; i++ {
+		for i := 0; i < freedSeats; i++ {
 			_, err := s.PromoteWaitlist(ctx, studioID, "", classID)
 			if err == nil {
 				continue

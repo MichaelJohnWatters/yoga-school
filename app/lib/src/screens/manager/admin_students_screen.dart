@@ -22,8 +22,10 @@ import 'money_dialogs.dart';
 // Students screen, so coming back fell through to the first-load spinner
 // every time. Keeping the family alive for the session is cheap (one
 // list of student summaries per query) and matches what the UI promises.
-final adminStudentsProvider =
-    FutureProvider.family<AdminStudentsList, String>((ref, q) async {
+final adminStudentsProvider = FutureProvider.family<AdminStudentsList, String>((
+  ref,
+  q,
+) async {
   return ref.watch(apiClientProvider).adminListStudents(query: q);
 });
 
@@ -128,8 +130,14 @@ class _AdminStudentsScreenState extends ConsumerState<AdminStudentsScreen> {
 }
 
 Future<void> _openGrant(
-    BuildContext context, WidgetRef ref, String studentId) async {
-  final saved = await showGrantPassDialog(context: context, studentId: studentId);
+  BuildContext context,
+  WidgetRef ref,
+  String studentId,
+) async {
+  final saved = await showGrantPassDialog(
+    context: context,
+    studentId: studentId,
+  );
   if (saved == true) {
     ref.invalidate(adminStudentsProvider);
   }
@@ -169,9 +177,8 @@ class _StudentsBody extends StatelessWidget {
       // around, so a real loading state is appropriate.
       return data.when(
         data: (_) => const SizedBox.shrink(), // covered by cached path
-        loading: () => const Center(
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
+        loading: () =>
+            const Center(child: CircularProgressIndicator(strokeWidth: 2)),
         error: (e, _) => Center(
           child: Text(
             "Can't load students: ${ApiError.fromAny(e).message}",
@@ -198,8 +205,7 @@ class _StudentsBody extends StatelessWidget {
             top: 8,
             right: 8,
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: y.surface,
                 borderRadius: BorderRadius.circular(999),
@@ -335,16 +341,14 @@ class _MobileRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final tap = s.hasActivePass ? onView : onGrant;
-    final actionLabel = s.hasActivePass ? 'View ›' : 'Grant ›';
+    // Whole row opens the student; no-pass rows keep a distinct "Grant"
+    // tap (it absorbs its own gesture) so granting stays one tap away.
     return InkWell(
-      onTap: tap,
+      onTap: onView,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
-          border: isLast
-              ? null
-              : Border(bottom: BorderSide(color: y.border)),
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -375,7 +379,7 @@ class _MobileRow extends StatelessWidget {
                   Text(
                     s.hasActivePass
                         ? '${s.activePassLabel}'
-                            '${s.activePassDetail.isEmpty ? '' : ' · ${s.activePassDetail}'}'
+                              '${s.activePassDetail.isEmpty ? '' : ' · ${s.activePassDetail}'}'
                         : 'No active pass',
                     style: TextStyle(
                       fontSize: 12,
@@ -395,14 +399,20 @@ class _MobileRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Text(
-              actionLabel,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                color: y.primary,
+            if (s.hasActivePass)
+              Icon(Icons.chevron_right, size: 18, color: y.muted)
+            else
+              GestureDetector(
+                onTap: onGrant,
+                child: Text(
+                  'Grant ›',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: y.primary,
+                  ),
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -415,8 +425,20 @@ class _MobileRow extends StatelessWidget {
     if (delta.inDays < 1) return 'today';
     if (delta.inDays < 7) return '${delta.inDays} d ago';
     if (delta.inDays < 30) return '${(delta.inDays / 7).floor()} wk ago';
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     final l = d.toLocal();
     return '${l.day} ${mons[l.month - 1]}';
   }
@@ -466,118 +488,123 @@ class _Row extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-      decoration: BoxDecoration(
-        border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 18,
-            child: Row(
-              children: [
-                YAvatar(name: s.fullName, size: 26),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        s.fullName,
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w800,
-                          color: y.text,
+    // Whole row opens the student. Grant-pass stays a distinct trailing
+    // action (it absorbs its own taps) so a no-pass row can still be
+    // granted without first opening the profile.
+    return InkWell(
+      onTap: onView,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 18,
+              child: Row(
+                children: [
+                  YAvatar(name: s.fullName, size: 26),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          s.fullName,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: y.text,
+                          ),
                         ),
-                      ),
-                      Text(
-                        s.email,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w500,
-                          color: y.muted,
+                        Text(
+                          s.email,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            color: y.muted,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 14,
+              child: s.hasActivePass
+                  ? Text(
+                      s.activePassLabel,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: y.text,
+                      ),
+                    )
+                  : Text(
+                      '—',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: y.muted,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 14,
+              child: Text(
+                s.activePassDetail.isEmpty ? '—' : s.activePassDetail,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 14,
-            child: s.hasActivePass
-                ? Text(
-                    s.activePassLabel,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: y.text,
-                    ),
-                  )
-                : Text(
-                    '—',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: y.muted,
-                    ),
-                  ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 14,
-            child: Text(
-              s.activePassDetail.isEmpty ? '—' : s.activePassDetail,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: y.muted,
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 110,
-            child: Text(
-              _last(s.lastVisit),
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: y.muted,
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 110,
+              child: Text(
+                _last(s.lastVisit),
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 88,
-            child: s.hasActivePass
-                ? GestureDetector(
-                    onTap: onView,
-                    child: Text(
-                      'View',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.primary,
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 88,
+              child: s.hasActivePass
+                  // Row is tappable now, so no explicit "View" — a chevron
+                  // signals the whole row opens the student.
+                  ? Align(
+                      alignment: Alignment.centerRight,
+                      child: Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: y.muted,
+                      ),
+                    )
+                  : GestureDetector(
+                      onTap: onGrant,
+                      child: Text(
+                        'Grant pass',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: y.primary,
+                        ),
                       ),
                     ),
-                  )
-                : GestureDetector(
-                    onTap: onGrant,
-                    child: Text(
-                      'Grant pass',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.primary,
-                      ),
-                    ),
-                  ),
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -588,8 +615,20 @@ class _Row extends StatelessWidget {
     if (delta.inDays < 1) return 'today';
     if (delta.inDays < 7) return '${delta.inDays} d ago';
     if (delta.inDays < 30) return '${(delta.inDays / 7).floor()} wk ago';
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     final l = d.toLocal();
     return '${l.day} ${mons[l.month - 1]}';
   }
@@ -607,9 +646,7 @@ class _EmptyState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            query.isEmpty
-                ? 'No students yet.'
-                : 'No matching students.',
+            query.isEmpty ? 'No students yet.' : 'No matching students.',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w800,

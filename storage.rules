@@ -1,0 +1,18 @@
+rules_version = '2';
+
+// Image uploads in this app are SERVER-MEDIATED: the Go API writes objects via
+// the Firebase Admin SDK, which bypasses these rules entirely (it's a
+// privileged credential). So these rules don't gate our upload path — they
+// exist mainly so the Storage emulator will start, and to express intent:
+//   - reads are public (studio imagery is shown to everyone anyway; download
+//     URLs additionally carry a token),
+//   - direct client writes are denied (only the manager-gated server route may
+//     add images).
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -22,11 +23,16 @@ type ThemeRow struct {
 	IsActiveLight bool   `json:"is_active_light"`
 	IsActiveDark  bool   `json:"is_active_dark"`
 	CreatedAt     string `json:"created_at"`
+	// Optional splash background for this theme. Either a network URL or an
+	// `asset:` reference to a built-in image bundled in the app. Nil/empty =
+	// no splash image (the plain themed background is used).
+	SplashImageURL *string `json:"splash_image_url"`
 }
 
 func (s *Store) ListThemes(ctx context.Context, studioID string) ([]ThemeRow, error) {
 	const q = `
 		SELECT t.id, t.name, t.is_preset, t.mode, t.tokens, t.created_at,
+		       t.splash_image_url,
 		       (CASE WHEN t.id = s.active_theme_id      THEN 1 ELSE 0 END) AS is_active_light,
 		       (CASE WHEN t.id = s.active_dark_theme_id THEN 1 ELSE 0 END) AS is_active_dark
 		  FROM themes t
@@ -41,12 +47,17 @@ func (s *Store) ListThemes(ctx context.Context, studioID string) ([]ThemeRow, er
 	out := make([]ThemeRow, 0)
 	for rows.Next() {
 		var (
-			r              ThemeRow
-			preset, l, d   int
-			tokensJSON     string
+			r            ThemeRow
+			preset, l, d int
+			tokensJSON   string
+			splash       sql.NullString
 		)
-		if err := rows.Scan(&r.ID, &r.Name, &preset, &r.Mode, &tokensJSON, &r.CreatedAt, &l, &d); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &preset, &r.Mode, &tokensJSON, &r.CreatedAt, &splash, &l, &d); err != nil {
 			return nil, err
+		}
+		if splash.Valid && splash.String != "" {
+			v := splash.String
+			r.SplashImageURL = &v
 		}
 		r.IsPreset = preset != 0
 		r.IsActiveLight = l != 0
@@ -97,6 +108,27 @@ type ThemePatch struct {
 	Name   *string      `json:"name,omitempty"`
 	Mode   *string      `json:"mode,omitempty"`
 	Tokens *ThemeTokens `json:"tokens,omitempty"`
+	// SplashImageURL: present + non-empty sets the splash; present + empty
+	// clears it; absent leaves it unchanged. Accepts a network URL or an
+	// `asset:` reference to a bundled built-in image.
+	SplashImageURL *string `json:"splash_image_url,omitempty"`
+}
+
+// validateSplashImageURL accepts an empty string (meaning "clear"), an
+// `asset:` reference to a bundled image, or an http(s) URL. Anything else is
+// rejected so a typo doesn't persist as a permanently-broken splash.
+func validateSplashImageURL(v string) error {
+	if v == "" {
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(v, "asset:"),
+		strings.HasPrefix(v, "http://"),
+		strings.HasPrefix(v, "https://"):
+		return nil
+	default:
+		return errors.New("splash_image_url must be an http(s) URL or an asset: reference")
+	}
 }
 
 func (s *Store) UpdateTheme(ctx context.Context, studioID, actorID, themeID string, p ThemePatch) error {
@@ -133,6 +165,19 @@ func (s *Store) UpdateTheme(ctx context.Context, studioID, actorID, themeID stri
 		}
 		set = append(set, "tokens = ?")
 		args = append(args, string(b))
+	}
+	if p.SplashImageURL != nil {
+		if err := validateSplashImageURL(*p.SplashImageURL); err != nil {
+			return err
+		}
+		set = append(set, "splash_image_url = ?")
+		if *p.SplashImageURL == "" {
+			// Store NULL rather than an empty string so read-side checks
+			// (and the bootstrap's COALESCE) treat "cleared" uniformly.
+			args = append(args, nil)
+		} else {
+			args = append(args, *p.SplashImageURL)
+		}
 	}
 	if len(set) == 0 {
 		return nil
@@ -172,6 +217,13 @@ func (s *Store) UpdateTheme(ctx context.Context, studioID, actorID, themeID stri
 	}
 	if p.Tokens != nil {
 		detail["tokens_updated"] = true
+	}
+	if p.SplashImageURL != nil {
+		if *p.SplashImageURL == "" {
+			detail["splash_image_cleared"] = true
+		} else {
+			detail["splash_image_url"] = *p.SplashImageURL
+		}
 	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "theme_update", "theme", themeID, detail)
 	return nil

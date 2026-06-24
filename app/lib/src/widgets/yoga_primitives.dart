@@ -1,10 +1,28 @@
 // Mobile primitives ported from design_handoff_yoga_school/yoga-ui.jsx.
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../screens/notifications_screen.dart';
 import '../theme/yoga_tokens.dart';
+
+/// Resolves a studio-configured image source to an [ImageProvider]. A value
+/// beginning with `asset:` refers to a bundled built-in image (e.g. the
+/// splash photos in `assets/splash/`); anything else is treated as a network
+/// URL. Keeps the splash render sites from each re-implementing the split.
+///
+/// Network URLs use [CachedNetworkImageProvider], which persists to disk via
+/// flutter_cache_manager — so the splash/studio image loads instantly from
+/// disk on later launches instead of re-downloading (a plain NetworkImage
+/// only caches in memory, which is cleared on restart).
+ImageProvider studioImageProvider(String src) {
+  const assetScheme = 'asset:';
+  if (src.startsWith(assetScheme)) {
+    return AssetImage(src.substring(assetScheme.length));
+  }
+  return CachedNetworkImageProvider(src);
+}
 
 /// Studio monogram tile. Real logo replaces "52" later.
 ///
@@ -144,11 +162,7 @@ class YAvatar extends StatelessWidget {
 class RefreshOnMount extends StatefulWidget {
   final VoidCallback onMount;
   final Widget child;
-  const RefreshOnMount({
-    super.key,
-    required this.onMount,
-    required this.child,
-  });
+  const RefreshOnMount({super.key, required this.onMount, required this.child});
 
   @override
   State<RefreshOnMount> createState() => _RefreshOnMountState();
@@ -171,6 +185,7 @@ class YStudioTopBar extends ConsumerWidget {
   final String studioName;
   final String userFullName;
   final String? userPhotoUrl;
+
   /// Tapping the avatar fires this — RootShell wires it to "switch to
   /// the Profile tab". Null on the Profile tab itself so the avatar is
   /// just a visual identity marker there (no self-navigation).
@@ -266,7 +281,9 @@ class _BellButton extends StatelessWidget {
     // screen readers and as a hover hint on desktop.
     return Tooltip(
       message: unread
-          ? (count == 1 ? '1 unread notification' : '$count unread notifications')
+          ? (count == 1
+                ? '1 unread notification'
+                : '$count unread notifications')
           : 'Notifications',
       child: Material(
         color: Colors.transparent,
@@ -284,8 +301,11 @@ class _BellButton extends StatelessWidget {
                   shape: BoxShape.circle,
                   border: Border.all(color: y.borderStrong),
                 ),
-                child: Icon(Icons.notifications_none_rounded,
-                    size: 20, color: y.text),
+                child: Icon(
+                  Icons.notifications_none_rounded,
+                  size: 20,
+                  color: y.text,
+                ),
               ),
               if (unread)
                 Positioned(
@@ -432,6 +452,13 @@ class YButton extends StatelessWidget {
           ? null
           : BoxDecoration(borderRadius: radius, border: border),
       constraints: const BoxConstraints(minHeight: 32),
+      // Center the label. With a bounded width (full-width buttons in a
+      // stretched Column / Expanded) the Container expands to fill and the
+      // text sits centered; under unbounded width (an inline button in a
+      // Row) it shrink-wraps to the label as before. Without this the
+      // Container hugged the text at the Material's left edge, so a
+      // stretched button looked left-aligned despite textAlign.center.
+      alignment: Alignment.center,
       child: Text(
         label,
         textAlign: TextAlign.center,

@@ -12,13 +12,17 @@ type Notification struct {
 	Type      string  `json:"type"`
 	Title     string  `json:"title"`
 	Body      string  `json:"body"`
+	// Raw JSON-encoded payload — the client decodes per-type fields it
+	// needs (e.g. chat_message carries conversation_id for tap routing).
+	Payload   string  `json:"payload"`
 	CreatedAt string  `json:"created_at"`
 	ReadAt    *string `json:"read_at,omitempty"`
 }
 
 func (s *Store) NotificationsFeed(ctx context.Context, userID string) ([]Notification, error) {
 	const q = `
-		SELECT id, type, title, COALESCE(body,''), created_at, read_at
+		SELECT id, type, title, COALESCE(body,''),
+		       COALESCE(payload,'{}'), created_at, read_at
 		  FROM notifications
 		 WHERE user_id = ?
 		 ORDER BY created_at DESC
@@ -34,7 +38,8 @@ func (s *Store) NotificationsFeed(ctx context.Context, userID string) ([]Notific
 			n      Notification
 			readAt sql.NullString
 		)
-		if err := rows.Scan(&n.ID, &n.Type, &n.Title, &n.Body, &n.CreatedAt, &readAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Type, &n.Title, &n.Body,
+			&n.Payload, &n.CreatedAt, &readAt); err != nil {
 			return nil, err
 		}
 		if readAt.Valid {
@@ -68,6 +73,41 @@ func (s *Store) MarkAllNotificationsRead(ctx context.Context, userID string) (in
 		UPDATE notifications
 		   SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		 WHERE user_id = ? AND read_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteNotification removes a single notification owned by userID (the
+// swipe-to-dismiss action). Scoped to user_id so one user can't clear
+// another's bell; ErrNotFound when nothing matches so the handler 404s.
+// Not audited — clearing your own feed is high-frequency and carries no
+// managerial significance, like the unaudited read-tracking.
+func (s *Store) DeleteNotification(ctx context.Context, userID, notificationID string) error {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM notifications WHERE id = ? AND user_id = ?`,
+		notificationID, userID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearReadNotifications deletes every already-read notification for userID,
+// returning how many were removed. Unread rows are deliberately left alone
+// so a bulk "clear" can never silently drop something the user hasn't seen.
+func (s *Store) ClearReadNotifications(ctx context.Context, userID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM notifications WHERE user_id = ? AND read_at IS NOT NULL`,
 		userID,
 	)
 	if err != nil {

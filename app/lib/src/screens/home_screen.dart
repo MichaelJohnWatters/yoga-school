@@ -12,6 +12,7 @@ import '../theme/yoga_tokens.dart';
 import '../widgets/polling.dart';
 import '../widgets/yoga_primitives.dart';
 import 'achievements_screen.dart';
+import 'booking_sheet.dart';
 import 'profile_screen.dart' show entitlementsProvider;
 
 final upcomingBookingsProvider =
@@ -238,20 +239,60 @@ class _BeginnersTip extends StatelessWidget {
   }
 }
 
-class _UpcomingList extends StatelessWidget {
+class _UpcomingList extends ConsumerWidget {
   final List<UpcomingBooking> items;
   const _UpcomingList({required this.items});
 
+  /// Fetches the full ClassRow for the booking then opens the standard
+  /// BookingSheet — same modal students use from the Book tab. The sheet
+  /// already covers cancel / +1 / chat-entry, so a tap from Home is the
+  /// quickest path to "I want to do something with this booking".
+  Future<void> _openSheet(
+    BuildContext context,
+    WidgetRef ref,
+    UpcomingBooking booking,
+  ) async {
+    try {
+      final detail = await ref
+          .read(apiClientProvider)
+          .getClass(booking.classId);
+      if (!context.mounted) return;
+      final changed = await showModalBottomSheet<bool>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: const Color(0x66100A05),
+        builder: (_) => BookingSheet(classRow: detail.row),
+      );
+      if (changed == true) {
+        ref.invalidate(upcomingBookingsProvider);
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Couldn't open: ${ApiError.fromAny(e).message}"),
+        ),
+      );
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hero = items.first;
     final rest = items.skip(1).take(2).toList();
     return Column(
       children: [
-        _HeroBookingCard(booking: hero),
+        _HeroBookingCard(
+          booking: hero,
+          onTap: () => _openSheet(context, ref, hero),
+        ),
         for (final b in rest) ...[
           const SizedBox(height: 8),
-          _CompactBookingCard(booking: b),
+          _CompactBookingCard(
+            booking: b,
+            onTap: () => _openSheet(context, ref, b),
+          ),
         ],
       ],
     );
@@ -391,7 +432,8 @@ class _PromoBanner extends StatelessWidget {
 
 class _HeroBookingCard extends StatelessWidget {
   final UpcomingBooking booking;
-  const _HeroBookingCard({required this.booking});
+  final VoidCallback? onTap;
+  const _HeroBookingCard({required this.booking, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -402,17 +444,23 @@ class _HeroBookingCard extends StatelessWidget {
     final start = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
     final endLocal = booking.endsAt.toLocal();
     final end = '${endLocal.hour}:${endLocal.minute.toString().padLeft(2, '0')}';
+    final radius = BorderRadius.circular(y.radiusCard);
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: y.surface,
-          borderRadius: BorderRadius.circular(y.radiusCard),
-          border: Border.all(color: y.border),
-          boxShadow: y.shadow,
-        ),
-        child: Row(
+      child: Material(
+        color: y.surface,
+        borderRadius: radius,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: radius,
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: y.border),
+              boxShadow: y.shadow,
+            ),
+            child: Row(
           children: [
             YDateTile(dow: dow, day: '${local.day}'),
             const SizedBox(width: 12),
@@ -463,6 +511,8 @@ class _HeroBookingCard extends StatelessWidget {
             const YChip(kind: YChipKind.booked, label: 'Booked', leadingCheck: true),
           ],
         ),
+          ),
+        ),
       ),
     );
   }
@@ -470,7 +520,8 @@ class _HeroBookingCard extends StatelessWidget {
 
 class _CompactBookingCard extends StatelessWidget {
   final UpcomingBooking booking;
-  const _CompactBookingCard({required this.booking});
+  final VoidCallback? onTap;
+  const _CompactBookingCard({required this.booking, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -479,43 +530,51 @@ class _CompactBookingCard extends StatelessWidget {
     const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     final dow = dows[(local.weekday + 6) % 7];
     final start = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
+    final radius = BorderRadius.circular(y.radiusCard);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-        decoration: BoxDecoration(
-          color: y.surface,
-          borderRadius: BorderRadius.circular(y.radiusCard),
-          border: Border.all(color: y.border),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    booking.title,
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w700,
-                      color: y.text,
-                    ),
-                  ),
-                  const SizedBox(height: 1),
-                  Text(
-                    '$dow ${local.day} · $start · ${booking.instructorName}',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w500,
-                      color: y.muted,
-                    ),
-                  ),
-                ],
-              ),
+      child: Material(
+        color: y.surface,
+        borderRadius: radius,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: radius,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: y.border),
             ),
-            const YChip(kind: YChipKind.booked, label: 'Booked', leadingCheck: true),
-          ],
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        booking.title,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w700,
+                          color: y.text,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        '$dow ${local.day} · $start · ${booking.instructorName}',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                          color: y.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const YChip(kind: YChipKind.booked, label: 'Booked', leadingCheck: true),
+              ],
+            ),
+          ),
         ),
       ),
     );

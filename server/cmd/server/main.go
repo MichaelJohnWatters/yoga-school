@@ -13,6 +13,7 @@ import (
 
 	"github.com/studio52/yoga-school/server/internal/api"
 	"github.com/studio52/yoga-school/server/internal/auth"
+	"github.com/studio52/yoga-school/server/internal/blob"
 	"github.com/studio52/yoga-school/server/internal/push"
 	"github.com/studio52/yoga-school/server/internal/secrets"
 	"github.com/studio52/yoga-school/server/internal/store"
@@ -22,7 +23,10 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "dev.db", "sqlite database path")
 	migrate := flag.Bool("migrate", false, "apply schema.sql then exit")
-	seed := flag.Bool("seed", false, "apply seed.sql after migrate")
+	seed := flag.Bool("seed", false, "apply the all-SQL dev seed after migrate")
+	bootstrapAPI := flag.Bool("bootstrap-api", false,
+		"seed a minimal bootstrap then build the rest through the real audited "+
+			"store methods (populates audit_log); applied after migrate")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -43,6 +47,25 @@ func main() {
 				log.Fatalf("seed: %v", err)
 			}
 			log.Printf("applied seed")
+		}
+		if *bootstrapAPI {
+			// Wire media storage so the seed can populate the image library
+			// through the real UploadMedia path. Optional: when no bucket is
+			// configured the seed's media step skips cleanly and is listed in
+			// the bootstrap's skipped-steps summary.
+			if bucket := os.Getenv("FIREBASE_STORAGE_BUCKET"); bucket != "" {
+				if app, err := auth.NewApp(ctx); err != nil {
+					log.Printf("media seed: firebase init failed, skipping uploads: %v", err)
+				} else if mb, err := blob.New(ctx, app, bucket); err != nil {
+					log.Printf("media seed: storage init failed, skipping uploads: %v", err)
+				} else {
+					st.SetMediaStorage(mb)
+				}
+			}
+			if err := st.SeedDevAPI(ctx); err != nil {
+				log.Fatalf("bootstrap-api: %v", err)
+			}
+			log.Printf("applied bootstrap-api seed")
 		}
 		return
 	}
@@ -77,6 +100,23 @@ func main() {
 		log.Print("auth emulator active — FCM dispatch will log-only")
 	}
 	st.SetPushDispatcher(push.New(messagingClient, st.DB()))
+
+	// Wire manager image uploads to Firebase Storage. Enabled only when a
+	// bucket is named (FIREBASE_STORAGE_BUCKET); dev can point at the Storage
+	// emulator via STORAGE_EMULATOR_HOST. Unset is fine — the media endpoints
+	// then return a clear "not configured" 503 instead of failing to boot,
+	// the same posture as the optional Stripe wiring below.
+	if bucket := os.Getenv("FIREBASE_STORAGE_BUCKET"); bucket != "" {
+		mb, err := blob.New(ctx, app, bucket)
+		if err != nil {
+			log.Printf("media storage init failed (uploads disabled): %v", err)
+		} else {
+			st.SetMediaStorage(mb)
+			log.Printf("media uploads enabled (bucket=%s)", bucket)
+		}
+	} else {
+		log.Print("FIREBASE_STORAGE_BUCKET unset — image uploads disabled")
+	}
 
 	// Wire the Stripe credentials Sealer from env. Unset is fine in dev —
 	// the manager settings panel refuses secret writes, no other code

@@ -11,7 +11,9 @@ import '../../api/api_client.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
+import '../../api/api_error.dart';
 import '../booking_sheet.dart' show BookingSheet;
+import '../chat_screen.dart';
 
 class DesktopBook extends ConsumerStatefulWidget {
   const DesktopBook({super.key});
@@ -875,7 +877,14 @@ class _EmptyPanel extends StatelessWidget {
 /// Render the mobile BookingSheet inside the docked panel. It pops itself
 /// with `Navigator.pop(true)` on success — we intercept by wrapping in a
 /// PopScope to feed [onChanged] instead of unmounting.
-class _DockedSheetWrapper extends StatelessWidget {
+///
+/// When the caller is booked / on the waitlist for the class, the panel
+/// switches to a tabbed layout: a "Class" tab carrying the booking sheet
+/// and a "Chat" tab embedding the class group chat. Mobile keeps the
+/// in-sheet chat row that pushes a separate page; on desktop the tab
+/// replaces it (BookingSheet suppresses its inline chat row whenever
+/// onClose is non-null, see booking_sheet.dart).
+class _DockedSheetWrapper extends ConsumerStatefulWidget {
   final ClassRow classRow;
   final VoidCallback onChanged;
   const _DockedSheetWrapper({
@@ -885,16 +894,141 @@ class _DockedSheetWrapper extends StatelessWidget {
   });
 
   @override
+  ConsumerState<_DockedSheetWrapper> createState() =>
+      _DockedSheetWrapperState();
+}
+
+class _DockedSheetWrapperState extends ConsumerState<_DockedSheetWrapper>
+    with SingleTickerProviderStateMixin {
+  late TabController _tab;
+
+  bool get _eligible =>
+      widget.classRow.bookingState == BookingState.booked ||
+      widget.classRow.waitlistPosition != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _tab = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DockedSheetWrapper old) {
+    super.didUpdateWidget(old);
+    // A book / waitlist mutation flips eligibility on; reset to the Class
+    // tab on a class swap so the new selection lands on details, not
+    // mid-conversation from the previous class.
+    if (old.classRow.id != widget.classRow.id) {
+      _tab.index = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // Use BookingSheet's onClose callback directly — that fires on every
-    // successful mutation (book / cancel / waitlist) and is the desktop
-    // signal to reload the day. The earlier nested-Navigator approach
-    // didn't work because popping the only route in a one-route
-    // navigator is a no-op and onDidRemovePage never fired, leaving the
-    // class list (and the active row's chip) stale after a cancel.
-    return BookingSheet(
-      classRow: classRow,
-      onClose: onChanged,
+    final sheet = BookingSheet(
+      classRow: widget.classRow,
+      onClose: widget.onChanged,
+    );
+    if (!_eligible) {
+      return sheet;
+    }
+    final y = context.yoga;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TabBar(
+          controller: _tab,
+          labelColor: y.text,
+          unselectedLabelColor: y.muted,
+          indicatorColor: y.primary,
+          indicatorWeight: 2,
+          tabs: const [
+            Tab(text: 'Class'),
+            Tab(text: 'Chat'),
+          ],
+        ),
+        Expanded(
+          child: TabBarView(
+            controller: _tab,
+            children: [
+              sheet,
+              _DockedChatPanel(classId: widget.classRow.id),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Resolves (or lazily creates) the class chat then hands off to the
+/// standard ChatThreadScreen embedded inside the docked panel. Same
+/// pattern as _RosterChatPanel in admin_roster_screen.dart — kept local
+/// rather than shared so each screen can tune the empty/loading copy.
+class _DockedChatPanel extends ConsumerStatefulWidget {
+  final String classId;
+  const _DockedChatPanel({required this.classId});
+
+  @override
+  ConsumerState<_DockedChatPanel> createState() => _DockedChatPanelState();
+}
+
+class _DockedChatPanelState extends ConsumerState<_DockedChatPanel> {
+  late Future<Conversation> _conv;
+
+  @override
+  void initState() {
+    super.initState();
+    _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DockedChatPanel old) {
+    super.didUpdateWidget(old);
+    if (old.classId != widget.classId) {
+      _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final me = ref.watch(bootstrapProvider).asData?.value.me;
+    return FutureBuilder<Conversation>(
+      future: _conv,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const Center(
+            child: CircularProgressIndicator(strokeWidth: 2),
+          );
+        }
+        if (snap.hasError || me == null) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                snap.hasError
+                    ? "Can't open chat: ${ApiError.fromAny(snap.error!).message}"
+                    : 'Loading…',
+                style: TextStyle(color: y.muted, fontSize: 13),
+              ),
+            ),
+          );
+        }
+        final conv = snap.data!;
+        return ChatThreadScreen(
+          conversationId: conv.id,
+          initialConversation: conv,
+          me: me,
+          backgroundColor: y.surface,
+        );
+      },
     );
   }
 }

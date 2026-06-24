@@ -57,8 +57,10 @@ String _scheduleKey(DateTime start, bool multiDay) {
 /// the postFrame invalidate in initState, navigation back to Schedule
 /// renders the cached classes instantly and refreshes silently behind
 /// the scenes.
-final adminScheduleProvider =
-    FutureProvider.family<List<ClassRow>, String>((ref, key) async {
+final adminScheduleProvider = FutureProvider.family<List<ClassRow>, String>((
+  ref,
+  key,
+) async {
   // Key format: "wk:YYYY-MM-DD" or "day:YYYY-MM-DD".
   final parts = key.split(':');
   final multiDay = parts[0] == 'wk';
@@ -161,184 +163,206 @@ class _AdminScheduleScreenState extends ConsumerState<AdminScheduleScreen> {
         final classes = ref.watch(adminScheduleProvider(_currentKey()));
         return PollingRefresh(
           surface: PollingSurface.schedule,
-          onPoll: () =>
-              ref.invalidate(adminScheduleProvider(_currentKey())),
+          onPoll: () => ref.invalidate(adminScheduleProvider(_currentKey())),
           child: Padding(
-          padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
-          child: Builder(
-            builder: (context) {
-              final rows = classes.asData?.value ?? const <ClassRow>[];
-              final rooms = <String>{for (final r in rows) r.roomName};
-              final classCount = rows.length;
-              final roomCount = rooms.length;
-              // Week view reads "X classes across N rooms" — the "across"
-              // phrasing tracks the design spec for a multi-day summary.
-              // Single-day views (Day / Rooms) use the simpler "·"
-              // separator since the layout already groups by room.
-              final subText = rows.isEmpty
-                  ? label
-                  : showsMultiDay
-                      ? '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+            padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+            child: Builder(
+              builder: (context) {
+                final rows = classes.asData?.value ?? const <ClassRow>[];
+                final rooms = <String>{for (final r in rows) r.roomName};
+                final classCount = rows.length;
+                final roomCount = rooms.length;
+                // Week view reads "X classes across N rooms" — the "across"
+                // phrasing tracks the design spec for a multi-day summary.
+                // Single-day views (Day / Rooms) use the simpler "·"
+                // separator since the layout already groups by room.
+                final subText = rows.isEmpty
+                    ? label
+                    : showsMultiDay
+                    ? '$label · $classCount class${classCount == 1 ? '' : 'es'}'
                           ' across $roomCount room${roomCount == 1 ? '' : 's'}'
-                      : '$label · $classCount class${classCount == 1 ? '' : 'es'}'
+                    : '$label · $classCount class${classCount == 1 ? '' : 'es'}'
                           ' · $roomCount room${roomCount == 1 ? '' : 's'}';
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ManagerPageHeader(
-                    title: 'Schedule',
-                    sub: subText,
-                    actions: [
-                      // Only "+ New class" lives in the page header now —
-                      // it's the one creation action and doesn't pair with
-                      // the per-view controls below.
-                      YButton(
-                        label: isNarrow ? '+ New' : '+ New class',
-                        small: true,
-                        onTap: () async {
-                          final newId = await showNewClassDialog(context);
-                          if (newId != null && mounted) {
-                            ref.invalidate(
-                                adminScheduleProvider(_currentKey()));
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  // Same-row controls: layout picker left, navigation
-                  // right. Pairing them makes the visual relationship
-                  // explicit — both are "how am I looking at the
-                  // schedule right now?" controls, so they share a row.
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        child: _LayoutPicker(
-                          view: _view,
-                          onChange: _setView,
-                          allowMultiDay: !isNarrow,
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ManagerPageHeader(
+                      title: 'Schedule',
+                      sub: subText,
+                      actions: [
+                        // Only "+ New class" lives in the page header now —
+                        // it's the one creation action and doesn't pair with
+                        // the per-view controls below.
+                        YButton(
+                          label: isNarrow ? '+ New' : '+ New class',
+                          small: true,
+                          onTap: () async {
+                            final newId = await showNewClassDialog(context);
+                            if (newId != null && mounted) {
+                              ref.invalidate(
+                                adminScheduleProvider(_currentKey()),
+                              );
+                            }
+                          },
                         ),
-                      ),
-                      const SizedBox(width: 16),
-                      YButton(
-                        label: 'Prev',
-                        variant: YButtonVariant.outline,
-                        small: true,
-                        onTap: () => _pageWeeks(-1),
-                      ),
-                      const SizedBox(width: 6),
-                      YButton(
-                        label: 'Next',
-                        variant: YButtonVariant.outline,
-                        small: true,
-                        onTap: () => _pageWeeks(1),
-                      ),
-                      const SizedBox(width: 6),
-                      YButton(
-                        label: 'Today',
-                        variant: YButtonVariant.outline,
-                        small: true,
-                        onTap: _goToday,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: Builder(
-                      builder: (_) {
-                        // First-ever load with no cache → spinner.
-                        // Subsequent re-fetches keep the cached rows
-                        // visible (asData?.value pattern above) and
-                        // skip the spinner.
-                        if (classes.isLoading && rows.isEmpty) {
-                          return const Center(
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          );
-                        }
-                        if (classes.hasError && rows.isEmpty) {
-                          return Center(
-                            child: Text(
-                              "Can't load schedule: ${classes.error}",
-                              style: TextStyle(color: y.muted),
-                            ),
-                          );
-                        }
-                        Future<void> onBlockTap(ClassRow row) async {
-                          await showClassActionsSheet(
-                            context: context,
-                            classRow: row,
-                            onOpenRoster: () {
-                              widget.onOpenRoster?.call(row.id);
-                            },
-                          );
-                          if (mounted) {
-                            ref.invalidate(
-                                adminScheduleProvider(_currentKey()));
-                          }
-                        }
-                        if (isNarrow && _view == _ScheduleView.day) {
-                          // On mobile the per-room lanes view is too
-                          // wide; fall back to a chronological list.
-                          return _MobileDayList(
-                            day: _day,
-                            rows: rows,
-                            onTap: onBlockTap,
-                          );
-                        }
-                        Widget body;
-                        switch (_view) {
-                          case _ScheduleView.week:
-                            body = _WeekGrid(
-                              weekStart: _weekStart,
-                              rows: rows,
-                              onTap: onBlockTap,
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    // Same-row controls: layout picker left, navigation
+                    // right. Pairing them makes the visual relationship
+                    // explicit — both are "how am I looking at the
+                    // schedule right now?" controls, so they share a row.
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: _LayoutPicker(
+                            view: _view,
+                            onChange: _setView,
+                            allowMultiDay: !isNarrow,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        YButton(
+                          label: 'Prev',
+                          variant: YButtonVariant.outline,
+                          small: true,
+                          onTap: () => _pageWeeks(-1),
+                        ),
+                        const SizedBox(width: 6),
+                        YButton(
+                          label: 'Next',
+                          variant: YButtonVariant.outline,
+                          small: true,
+                          onTap: () => _pageWeeks(1),
+                        ),
+                        const SizedBox(width: 6),
+                        YButton(
+                          label: 'Today',
+                          variant: YButtonVariant.outline,
+                          small: true,
+                          onTap: _goToday,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: Builder(
+                        builder: (_) {
+                          // First-ever load with no cache → spinner.
+                          // Subsequent re-fetches keep the cached rows
+                          // visible (asData?.value pattern above) and
+                          // skip the spinner.
+                          if (classes.isLoading && rows.isEmpty) {
+                            return const Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             );
-                            break;
-                          case _ScheduleView.day:
-                            body = _DayLanes(
+                          }
+                          if (classes.hasError && rows.isEmpty) {
+                            return Center(
+                              child: Text(
+                                "Can't load schedule: ${classes.error}",
+                                style: TextStyle(color: y.muted),
+                              ),
+                            );
+                          }
+                          Future<void> onBlockTap(ClassRow row) async {
+                            await showClassActionsSheet(
+                              context: context,
+                              classRow: row,
+                              onOpenRoster: () {
+                                widget.onOpenRoster?.call(row.id);
+                              },
+                            );
+                            if (mounted) {
+                              ref.invalidate(
+                                adminScheduleProvider(_currentKey()),
+                              );
+                            }
+                          }
+
+                          if (isNarrow && _view == _ScheduleView.day) {
+                            // On mobile the per-room lanes view is too
+                            // wide; fall back to a chronological list.
+                            return _MobileDayList(
                               day: _day,
                               rows: rows,
                               onTap: onBlockTap,
                             );
-                            break;
-                          case _ScheduleView.sections:
-                            body = _SectionsWeek(
-                              weekStart: _weekStart,
-                              rows: rows,
-                              onTap: onBlockTap,
-                            );
-                            break;
-                          case _ScheduleView.timeline:
-                            body = _TimelineWeek(
-                              weekStart: _weekStart,
-                              rows: rows,
-                              onTap: onBlockTap,
-                            );
-                            break;
-                        }
-                        return ManagerCard(
-                          padding: const EdgeInsets.all(14),
-                          fill: true,
-                          child: body,
-                        );
-                      },
+                          }
+                          Widget body;
+                          switch (_view) {
+                            case _ScheduleView.week:
+                              body = _WeekGrid(
+                                weekStart: _weekStart,
+                                rows: rows,
+                                onTap: onBlockTap,
+                              );
+                              break;
+                            case _ScheduleView.day:
+                              body = _DayLanes(
+                                day: _day,
+                                rows: rows,
+                                onTap: onBlockTap,
+                              );
+                              break;
+                            case _ScheduleView.sections:
+                              body = _SectionsWeek(
+                                weekStart: _weekStart,
+                                rows: rows,
+                                onTap: onBlockTap,
+                              );
+                              break;
+                            case _ScheduleView.timeline:
+                              body = _TimelineWeek(
+                                weekStart: _weekStart,
+                                rows: rows,
+                                onTap: onBlockTap,
+                              );
+                              break;
+                          }
+                          return ManagerCard(
+                            padding: const EdgeInsets.all(14),
+                            fill: true,
+                            child: body,
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                ],
-              );
-            },
+                  ],
+                );
+              },
+            ),
           ),
-        ),
         );
       },
     );
   }
 
   static String _longDay(DateTime d) {
-    const dow = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const dow = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     return '${dow[(d.weekday + 6) % 7]} ${d.day} ${mons[d.month - 1]}';
   }
 
@@ -354,8 +378,20 @@ class _AdminScheduleScreenState extends ConsumerState<AdminScheduleScreen> {
   }
 
   static String _short(DateTime d) {
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     return '${d.day} ${mons[d.month - 1]}';
   }
 }
@@ -369,6 +405,7 @@ class _AdminScheduleScreenState extends ConsumerState<AdminScheduleScreen> {
 class _LayoutPicker extends StatelessWidget {
   final _ScheduleView view;
   final ValueChanged<_ScheduleView> onChange;
+
   /// Mobile drops the multi-day layouts — 7 columns can't fit a phone.
   final bool allowMultiDay;
   const _LayoutPicker({
@@ -389,9 +426,7 @@ class _LayoutPicker extends StatelessWidget {
           decoration: BoxDecoration(
             color: on ? y.surface : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: on ? y.border : Colors.transparent,
-            ),
+            border: Border.all(color: on ? y.border : Colors.transparent),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -436,18 +471,26 @@ class _LayoutPicker extends StatelessWidget {
               child: Row(
                 children: [
                   if (allowMultiDay) ...[
-                    btn('Calendar', Icons.calendar_view_week_rounded,
-                        _ScheduleView.week),
+                    btn(
+                      'Calendar',
+                      Icons.calendar_view_week_rounded,
+                      _ScheduleView.week,
+                    ),
                     const SizedBox(width: 4),
-                    btn('Sections', Icons.view_agenda_outlined,
-                        _ScheduleView.sections),
+                    btn(
+                      'Sections',
+                      Icons.view_agenda_outlined,
+                      _ScheduleView.sections,
+                    ),
                     const SizedBox(width: 4),
-                    btn('Timeline', Icons.schedule_rounded,
-                        _ScheduleView.timeline),
+                    btn(
+                      'Timeline',
+                      Icons.schedule_rounded,
+                      _ScheduleView.timeline,
+                    ),
                     const SizedBox(width: 4),
                   ],
-                  btn('Rooms', Icons.view_column_outlined,
-                      _ScheduleView.day),
+                  btn('Rooms', Icons.view_column_outlined, _ScheduleView.day),
                 ],
               ),
             ),
@@ -533,14 +576,13 @@ class _DayLanes extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SizedBox(
-                    width: _gutterWidth,
-                    child: _TimeGutter(),
-                  ),
+                  SizedBox(width: _gutterWidth, child: _TimeGutter()),
                   for (var i = 0; i < rooms.length; i++)
                     Expanded(
                       child: _RoomLane(
-                        rows: rows.where((r) => r.roomName == rooms[i]).toList(),
+                        rows: rows
+                            .where((r) => r.roomName == rooms[i])
+                            .toList(),
                         showLeftBorder: true,
                         onTap: onTap,
                       ),
@@ -597,7 +639,9 @@ class _RoomLane extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         border: Border(
-          left: BorderSide(color: showLeftBorder ? y.border : Colors.transparent),
+          left: BorderSide(
+            color: showLeftBorder ? y.border : Colors.transparent,
+          ),
         ),
       ),
       child: Stack(
@@ -651,65 +695,109 @@ class _DayBlock extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(10),
         child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(10),
-          border: Border(left: BorderSide(color: edge, width: 3)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    row.title,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w800,
-                      color: y.text,
-                      height: 1.2,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (isFull)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: y.borderStrong),
-                    ),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border(left: BorderSide(color: edge, width: 3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
                     child: Text(
-                      'FULL',
+                      row.title,
                       style: TextStyle(
-                        fontSize: 9.5,
+                        fontSize: 11.5,
                         fontWeight: FontWeight.w800,
-                        color: y.muted,
+                        color: y.text,
+                        height: 1.2,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (row.chatMessageCount > 0) ...[
+                    const SizedBox(width: 4),
+                    _ChatBadge(count: row.chatMessageCount),
+                  ],
+                  if (isFull) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: y.borderStrong),
+                      ),
+                      child: Text(
+                        'FULL',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w800,
+                          color: y.muted,
+                        ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            Text(
-              '$hh – $endHH · ${row.instructorName}',
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-                color: y.muted,
+                  ],
+                ],
               ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
+              const SizedBox(height: 2),
+              Text(
+                '$hh – $endHH · ${row.instructorName}',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                  color: y.muted,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
+/// Small chat badge for a schedule block — a forum glyph + message count in
+/// the accent tone, so a class with chat activity catches a manager's eye at
+/// a glance. Shown only when the class chat has at least one message.
+class _ChatBadge extends StatelessWidget {
+  final int count;
+  const _ChatBadge({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: y.accentSoft,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: y.accent.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.forum_rounded, size: 9.5, color: y.accent),
+          const SizedBox(width: 2),
+          Text(
+            count > 99 ? '99+' : '$count',
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w800,
+              color: y.accent,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// Time-anchored week calendar. Each day column is a fixed-height canvas
 /// (one row per hour); class blocks are absolutely positioned by their
@@ -781,12 +869,19 @@ class _WeekGrid extends StatelessWidget {
             for (var i = 0; i < 7; i++)
               Expanded(
                 child: _DayColumn(
-                  date: DateTime(weekStart.year, weekStart.month,
-                      weekStart.day + i),
+                  date: DateTime(
+                    weekStart.year,
+                    weekStart.month,
+                    weekStart.day + i,
+                  ),
                   isToday: _sameDay(
-                      DateTime(weekStart.year, weekStart.month,
-                          weekStart.day + i),
-                      today),
+                    DateTime(
+                      weekStart.year,
+                      weekStart.month,
+                      weekStart.day + i,
+                    ),
+                    today,
+                  ),
                   classes: byDay[i] ?? const [],
                   firstHour: firstHour,
                   hourPx: _hourPx,
@@ -908,10 +1003,7 @@ class _DayColumn extends StatelessWidget {
                 // Faint horizontal hour lines for visual time scanning.
                 Positioned.fill(
                   child: CustomPaint(
-                    painter: _HourLinesPainter(
-                      color: y.border,
-                      hourPx: hourPx,
-                    ),
+                    painter: _HourLinesPainter(color: y.border, hourPx: hourPx),
                   ),
                 ),
                 if (classes.isEmpty)
@@ -928,8 +1020,7 @@ class _DayColumn extends StatelessWidget {
                     ),
                   )
                 else
-                  for (final c in classes)
-                    _positionedBlock(c, context),
+                  for (final c in classes) _positionedBlock(c, context),
               ],
             ),
           ),
@@ -941,8 +1032,8 @@ class _DayColumn extends StatelessWidget {
   Widget _positionedBlock(ClassRow c, BuildContext context) {
     final start = c.startsAt.toLocal();
     final end = c.endsAt.toLocal();
-    final startMinFromTop =
-        ((start.hour - firstHour) * 60 + start.minute).toDouble();
+    final startMinFromTop = ((start.hour - firstHour) * 60 + start.minute)
+        .toDouble();
     final durationMin = end.difference(start).inMinutes.toDouble();
     final top = startMinFromTop * (hourPx / 60);
     final height = (durationMin * (hourPx / 60)).clamp(minBlockPx, 999.0);
@@ -951,10 +1042,7 @@ class _DayColumn extends StatelessWidget {
       right: innerPad,
       top: top,
       height: height,
-      child: _ClassBlock(
-        row: c,
-        onTap: onTap == null ? null : () => onTap!(c),
-      ),
+      child: _ClassBlock(row: c, onTap: onTap == null ? null : () => onTap!(c)),
     );
   }
 }
@@ -1002,11 +1090,9 @@ class _ClassBlock extends StatelessWidget {
         // sour. 0.18 is around the threshold where the hue reads as
         // intentional without making 11.5pt text struggle.
         ? Color.alphaBlend(roomTint.withValues(alpha: 0.18), y.surface)
-        : (isSeries
-            ? y.surface
-            : (isReformer ? y.accentSoft : y.primarySoft));
-    final edge = roomTint ??
-        (isSeries ? y.text : (isReformer ? y.accent : y.primary));
+        : (isSeries ? y.surface : (isReformer ? y.accentSoft : y.primarySoft));
+    final edge =
+        roomTint ?? (isSeries ? y.text : (isReformer ? y.accent : y.primary));
     final local = row.startsAt.toLocal();
     final hh = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
     final roomShort = _shortRoom(row.roomName);
@@ -1039,8 +1125,7 @@ class _ClassBlock extends StatelessWidget {
               color: isPast ? y.surface2 : bg,
               borderRadius: BorderRadius.circular(10),
               border: Border(
-                left: BorderSide(
-                    color: isPast ? y.border : edge, width: 3),
+                left: BorderSide(color: isPast ? y.border : edge, width: 3),
               ),
             ),
             child: Column(
@@ -1066,6 +1151,10 @@ class _ClassBlock extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (row.chatMessageCount > 0) ...[
+                      const SizedBox(width: 4),
+                      _ChatBadge(count: row.chatMessageCount),
+                    ],
                   ],
                 ),
                 if (showMeta) ...[
@@ -1130,9 +1219,7 @@ class _OccupancyBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final ratio = capacity > 0
-        ? (booked / capacity).clamp(0.0, 1.0)
-        : 0.0;
+    final ratio = capacity > 0 ? (booked / capacity).clamp(0.0, 1.0) : 0.0;
     Color fill;
     if (muted) {
       fill = y.muted;
@@ -1232,8 +1319,7 @@ class _SectionsWeek extends StatelessWidget {
     for (final r in rows) {
       final local = r.startsAt.toLocal();
       final classDay = DateTime(local.year, local.month, local.day);
-      final base =
-          DateTime(weekStart.year, weekStart.month, weekStart.day);
+      final base = DateTime(weekStart.year, weekStart.month, weekStart.day);
       final idx = classDay.difference(base).inDays;
       if (idx < 0 || idx > 6) continue;
       byDay.putIfAbsent(idx, () => []).add(r);
@@ -1247,18 +1333,24 @@ class _SectionsWeek extends StatelessWidget {
             if (i > 0) Container(width: 1, color: y.border),
             Expanded(
               child: _SectionsDayColumn(
-                date: DateTime(weekStart.year, weekStart.month,
-                    weekStart.day + i),
-                dow: dows[(DateTime(weekStart.year, weekStart.month,
-                                weekStart.day + i)
-                            .weekday +
-                        6) %
-                    7],
+                date: DateTime(
+                  weekStart.year,
+                  weekStart.month,
+                  weekStart.day + i,
+                ),
+                dow:
+                    dows[(DateTime(
+                              weekStart.year,
+                              weekStart.month,
+                              weekStart.day + i,
+                            ).weekday +
+                            6) %
+                        7],
                 classes: byDay[i] ?? const [],
                 isToday: _sameDay(
-                    DateTime(weekStart.year, weekStart.month,
-                        weekStart.day + i),
-                    today),
+                  DateTime(weekStart.year, weekStart.month, weekStart.day + i),
+                  today,
+                ),
                 onTap: onTap,
               ),
             ),
@@ -1357,9 +1449,7 @@ class _SectionsDayColumn extends StatelessWidget {
                 if (i > 0) const SizedBox(height: 6),
                 _ClassBlock(
                   row: groups[gi].$2[i],
-                  onTap: onTap == null
-                      ? null
-                      : () => onTap!(groups[gi].$2[i]),
+                  onTap: onTap == null ? null : () => onTap!(groups[gi].$2[i]),
                 ),
               ],
             ],
@@ -1391,19 +1481,33 @@ class _TimelineWeek extends StatelessWidget {
     for (final r in rows) {
       final local = r.startsAt.toLocal();
       final classDay = DateTime(local.year, local.month, local.day);
-      final base =
-          DateTime(weekStart.year, weekStart.month, weekStart.day);
+      final base = DateTime(weekStart.year, weekStart.month, weekStart.day);
       final idx = classDay.difference(base).inDays;
       if (idx < 0 || idx > 6) continue;
       byDay.putIfAbsent(idx, () => []).add(r);
     }
     const dowLong = [
-      'Monday', 'Tuesday', 'Wednesday', 'Thursday',
-      'Friday', 'Saturday', 'Sunday',
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
     ];
     const mons = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
 
     return SingleChildScrollView(
@@ -1411,81 +1515,89 @@ class _TimelineWeek extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           for (var i = 0; i < 7; i++) ...[
-            Builder(builder: (_) {
-              final date = DateTime(weekStart.year, weekStart.month,
-                  weekStart.day + i);
-              final classes = byDay[i] ?? const [];
-              final isToday = date.year == today.year &&
-                  date.month == today.month &&
-                  date.day == today.day;
-              final dayLabel =
-                  '${dowLong[(date.weekday + 6) % 7]} '
-                  '${date.day} ${mons[date.month - 1]}';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: isToday ? y.primarySoft : y.surface2,
-                        borderRadius: BorderRadius.circular(8),
+            Builder(
+              builder: (_) {
+                final date = DateTime(
+                  weekStart.year,
+                  weekStart.month,
+                  weekStart.day + i,
+                );
+                final classes = byDay[i] ?? const [];
+                final isToday =
+                    date.year == today.year &&
+                    date.month == today.month &&
+                    date.day == today.day;
+                final dayLabel =
+                    '${dowLong[(date.weekday + 6) % 7]} '
+                    '${date.day} ${mons[date.month - 1]}';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isToday ? y.primarySoft : y.surface2,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              dayLabel,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: isToday ? y.primaryStrong : y.text,
+                                letterSpacing: 0.2,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              classes.isEmpty
+                                  ? '—'
+                                  : '${classes.length} class'
+                                        '${classes.length == 1 ? '' : 'es'}',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                                color: y.muted,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      child: Row(
-                        children: [
-                          Text(
-                            dayLabel,
+                      const SizedBox(height: 10),
+                      if (classes.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 10, top: 2),
+                          child: Text(
+                            'Rest day',
                             style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w800,
-                              color: isToday ? y.primaryStrong : y.text,
-                              letterSpacing: 0.2,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: y.muted.withValues(alpha: 0.6),
                             ),
                           ),
-                          const Spacer(),
-                          Text(
-                            classes.isEmpty
-                                ? '—'
-                                : '${classes.length} class'
-                                    '${classes.length == 1 ? '' : 'es'}',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                              color: y.muted,
-                            ),
+                        )
+                      else
+                        for (var ci = 0; ci < classes.length; ci++) ...[
+                          if (ci > 0) const SizedBox(height: 6),
+                          _ClassBlock(
+                            row: classes[ci],
+                            onTap: onTap == null
+                                ? null
+                                : () => onTap!(classes[ci]),
                           ),
                         ],
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    if (classes.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 10, top: 2),
-                        child: Text(
-                          'Rest day',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: y.muted.withValues(alpha: 0.6),
-                          ),
-                        ),
-                      )
-                    else
-                      for (var ci = 0; ci < classes.length; ci++) ...[
-                        if (ci > 0) const SizedBox(height: 6),
-                        _ClassBlock(
-                          row: classes[ci],
-                          onTap: onTap == null
-                              ? null
-                              : () => onTap!(classes[ci]),
-                        ),
-                      ],
-                  ],
-                ),
-              );
-            }),
+                    ],
+                  ),
+                );
+              },
+            ),
           ],
         ],
       ),
@@ -1500,11 +1612,7 @@ class _MobileDayList extends StatelessWidget {
   final DateTime day;
   final List<ClassRow> rows;
   final void Function(ClassRow)? onTap;
-  const _MobileDayList({
-    required this.day,
-    required this.rows,
-    this.onTap,
-  });
+  const _MobileDayList({required this.day, required this.rows, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1526,8 +1634,7 @@ class _MobileDayList extends StatelessWidget {
         ),
       );
     }
-    final sorted = [...rows]
-      ..sort((a, b) => a.startsAt.compareTo(b.startsAt));
+    final sorted = [...rows]..sort((a, b) => a.startsAt.compareTo(b.startsAt));
     return ManagerCard(
       padding: const EdgeInsets.all(12),
       fill: true,

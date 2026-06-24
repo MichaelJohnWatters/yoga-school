@@ -13,6 +13,7 @@
 // entry points live in chat_compose.dart and only render for staff.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
@@ -30,21 +31,46 @@ final conversationsProvider = FutureProvider<List<Conversation>>((ref) async {
   return ref.watch(apiClientProvider).conversations();
 });
 
-/// Sum of unread messages across every conversation — drives the badge on the
-/// More tab + the chat row. Zero while loading/errored so it never flickers.
+/// Sum of unread messages across every conversation NOT in the archived
+/// tab — drives the badge on the More tab + the chat row. Zero while
+/// loading/errored so it never flickers. Archived class chats are silenced
+/// (the student opted out of the room by not having a future booking).
 final totalUnreadChatProvider = Provider<int>((ref) {
   final convs = ref.watch(conversationsProvider);
   final list = convs.asData?.value ?? const <Conversation>[];
-  return list.fold<int>(0, (sum, c) => sum + c.unreadCount);
+  return list
+      .where((c) => !c.archived)
+      .fold<int>(0, (sum, c) => sum + c.unreadCount);
 });
 
-class ChatListScreen extends ConsumerWidget {
+class ChatListScreen extends ConsumerStatefulWidget {
   final Me me;
   const ChatListScreen({super.key, required this.me});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatListScreen> createState() => _ChatListScreenState();
+}
+
+class _ChatListScreenState extends ConsumerState<ChatListScreen>
+    with SingleTickerProviderStateMixin {
+  // Students get an Inbox/Archived split (a class chat falls into Archived
+  // when they have no future booking and the last instance ended >12h ago).
+  // Staff keep the existing single-list view — for them every conversation
+  // stays visible (server forces archived=false on the staff side).
+  late final TabController? _tab = widget.me.isStaff
+      ? null
+      : TabController(length: 2, vsync: this);
+
+  @override
+  void dispose() {
+    _tab?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final y = context.yoga;
+    final me = widget.me;
     final convs = ref.watch(conversationsProvider);
     return PollingRefresh(
       surface: PollingSurface.chatList,
@@ -65,6 +91,19 @@ class ChatListScreen extends ConsumerWidget {
               color: y.text,
             ),
           ),
+          bottom: _tab == null
+              ? null
+              : TabBar(
+                  controller: _tab,
+                  labelColor: y.text,
+                  unselectedLabelColor: y.muted,
+                  indicatorColor: y.primary,
+                  indicatorWeight: 2,
+                  tabs: const [
+                    Tab(text: 'Inbox'),
+                    Tab(text: 'Archived'),
+                  ],
+                ),
         ),
         floatingActionButton: me.isStaff
             ? FloatingActionButton(
@@ -77,20 +116,27 @@ class ChatListScreen extends ConsumerWidget {
         body: SafeArea(
           top: false,
           child: convs.when(
-            data: (list) => list.isEmpty
-                ? _EmptyInbox(isStaff: me.isStaff)
-                : RefreshIndicator(
-                    onRefresh: () async =>
-                        ref.invalidate(conversationsProvider),
-                    child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      itemCount: list.length,
-                      separatorBuilder: (_, __) =>
-                          Divider(height: 1, color: y.border, indent: 76),
-                      itemBuilder: (_, i) =>
-                          _ConversationTile(conversation: list[i], me: me),
-                    ),
-                  ),
+            data: (list) {
+              if (_tab == null) {
+                // Staff: single list, no archive split.
+                return list.isEmpty
+                    ? _EmptyInbox(isStaff: true)
+                    : _ConversationList(list: list, me: me, ref: ref);
+              }
+              final inbox = list.where((c) => !c.archived).toList();
+              final archived = list.where((c) => c.archived).toList();
+              return TabBarView(
+                controller: _tab,
+                children: [
+                  inbox.isEmpty
+                      ? _EmptyInbox(isStaff: false)
+                      : _ConversationList(list: inbox, me: me, ref: ref),
+                  archived.isEmpty
+                      ? _EmptyArchived()
+                      : _ConversationList(list: archived, me: me, ref: ref),
+                ],
+              );
+            },
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) => Center(
               child: Text(
@@ -99,6 +145,66 @@ class ChatListScreen extends ConsumerWidget {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ConversationList extends StatelessWidget {
+  final List<Conversation> list;
+  final Me me;
+  final WidgetRef ref;
+  const _ConversationList({
+    required this.list,
+    required this.me,
+    required this.ref,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return RefreshIndicator(
+      onRefresh: () async => ref.invalidate(conversationsProvider),
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        itemCount: list.length,
+        separatorBuilder: (_, __) =>
+            Divider(height: 1, color: y.border, indent: 76),
+        itemBuilder: (_, i) => _ConversationTile(conversation: list[i], me: me),
+      ),
+    );
+  }
+}
+
+class _EmptyArchived extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.inventory_2_outlined, size: 44, color: y.muted),
+            const SizedBox(height: 14),
+            Text(
+              'Nothing archived',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: y.text,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Class chats move here once the class has ended and '
+              "you've no upcoming bookings on it.",
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13.5, color: y.muted, height: 1.4),
+            ),
+          ],
         ),
       ),
     );
@@ -314,11 +420,17 @@ class ChatThreadScreen extends ConsumerStatefulWidget {
   final String conversationId;
   final Conversation? initialConversation;
   final Me me;
+
+  /// Background color for the Scaffold + AppBar. Defaults to the page
+  /// background; embedded views (e.g. the manager roster's right column)
+  /// pass `y.surface` so the chat sits flush inside the surrounding card.
+  final Color? backgroundColor;
   const ChatThreadScreen({
     super.key,
     required this.conversationId,
     required this.me,
     this.initialConversation,
+    this.backgroundColor,
   });
 
   @override
@@ -615,58 +727,127 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  void _showMembers(Conversation conv) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _MembersSheet(conversation: conv),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     final conv = _conversation;
     final title = conv?.displayTitle(widget.me.id) ?? 'Conversation';
 
+    final bg = widget.backgroundColor ?? y.background;
     return PollingRefresh(
       surface: PollingSurface.chatThread,
       onPoll: _pollNew,
       child: Scaffold(
-        backgroundColor: y.background,
+        backgroundColor: bg,
         appBar: AppBar(
-          backgroundColor: y.background,
+          backgroundColor: bg,
           elevation: 0,
           scrolledUnderElevation: 0,
           foregroundColor: y.text,
-          titleSpacing: 0,
-          title: Row(
-            children: [
-              if (conv != null)
-                conv.isDm
-                    ? YAvatar(
-                        name: title,
-                        photoUrl: conv.otherMember(widget.me.id)?.photoUrl,
-                        size: 34,
-                      )
-                    : _GroupAvatar(size: 34),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                        color: y.text,
-                      ),
+          // Default titleSpacing (16) so the avatar gets a sensible left
+          // margin in both modes: pushed (back button → 16px → avatar) and
+          // embedded (no back button → 16px → avatar against card edge).
+          title: Builder(
+            builder: (ctx) {
+              // Members list is staff-only — for students, the chat is a
+              // place to talk, not a directory of who else is in it
+              // (privacy on class chats where the membership union
+              // includes other students they may not know).
+              final canSeeMembers =
+                  conv != null && !conv.isDm && widget.me.isStaff;
+              // For a class chat, the subtitle summarises *when* it's about
+              // (the recurring pattern or the next instance) instead of the
+              // member count — that's the useful context at the top.
+              final when = conv != null && conv.isClass
+                  ? _classWhen(conv)
+                  : null;
+              final headerRow = Row(
+                children: [
+                  if (conv != null)
+                    conv.isDm
+                        ? YAvatar(
+                            name: title,
+                            photoUrl: conv.otherMember(widget.me.id)?.photoUrl,
+                            size: 34,
+                          )
+                        : _GroupAvatar(size: 34),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: y.text,
+                          ),
+                        ),
+                        if (conv != null && !conv.isDm)
+                          when != null
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.event_outlined,
+                                      size: 12.5,
+                                      color: y.muted,
+                                    ),
+                                    const SizedBox(width: 3),
+                                    Flexible(
+                                      child: Text(
+                                        when,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          color: y.muted,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '${conv.memberCount} members',
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        color: y.muted,
+                                      ),
+                                    ),
+                                    if (canSeeMembers) ...[
+                                      const SizedBox(width: 2),
+                                      Icon(
+                                        Icons.chevron_right,
+                                        size: 14,
+                                        color: y.muted,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                      ],
                     ),
-                    if (conv != null && !conv.isDm)
-                      Text(
-                        '${conv.members.length} members',
-                        style: TextStyle(fontSize: 11.5, color: y.muted),
-                      ),
-                  ],
-                ),
-              ),
-            ],
+                  ),
+                ],
+              );
+              if (!canSeeMembers) return headerRow;
+              return InkWell(onTap: () => _showMembers(conv), child: headerRow);
+            },
           ),
         ),
         body: SafeArea(
@@ -843,7 +1024,7 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   final TextEditingController controller;
   final bool sending;
   final VoidCallback onSend;
@@ -852,6 +1033,34 @@ class _Composer extends StatelessWidget {
     required this.sending,
     required this.onSend,
   });
+
+  @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  // Owns the field's focus node so its onKeyEvent runs first (leaf of the
+  // focus chain) — that lets us intercept a hardware Enter *before* the
+  // multiline field's default newline insertion. Soft keyboards are
+  // unaffected: they emit a newline action, not a physical Enter key.
+  late final FocusNode _focusNode = FocusNode(onKeyEvent: _onKey);
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.enter &&
+        !HardwareKeyboard.instance.isShiftPressed) {
+      // Enter sends; Shift+Enter falls through to insert a newline.
+      if (!widget.sending) widget.onSend();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -872,7 +1081,8 @@ class _Composer extends StatelessWidget {
         children: [
           Expanded(
             child: TextField(
-              controller: controller,
+              controller: widget.controller,
+              focusNode: _focusNode,
               minLines: 1,
               maxLines: 5,
               textInputAction: TextInputAction.newline,
@@ -901,16 +1111,16 @@ class _Composer extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: sending ? null : onSend,
+            onTap: widget.sending ? null : widget.onSend,
             child: Container(
               width: 42,
               height: 42,
               decoration: BoxDecoration(
-                color: sending ? y.muted : y.primary,
+                color: widget.sending ? y.muted : y.primary,
                 shape: BoxShape.circle,
               ),
               alignment: Alignment.center,
-              child: sending
+              child: widget.sending
                   ? SizedBox(
                       width: 18,
                       height: 18,
@@ -938,6 +1148,41 @@ String _fmtClock(DateTime utc) {
   return '$h:$m$ap';
 }
 
+/// One-line "when" summary for a class chat's header. Prefers the recurring
+/// pattern the server computed (already studio wall-clock, e.g.
+/// "Tuesdays · 7:00am"); otherwise formats the concrete instance timestamp
+/// in local time. Null when there's nothing to show.
+String? _classWhen(Conversation conv) {
+  if (!conv.isClass) return null;
+  final sched = conv.classSchedule;
+  if (sched != null && sched.isNotEmpty) return sched;
+  final at = conv.classStartsAt;
+  if (at != null) return _fmtDateClock(at);
+  return null;
+}
+
+/// "Tue 23 Jun · 7:00am" in local time — used for one-off class chats where
+/// there's no recurring pattern, just a single dated instance.
+String _fmtDateClock(DateTime utc) {
+  final t = utc.toLocal();
+  const wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const mon = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  return '${wd[t.weekday - 1]} ${t.day} ${mon[t.month - 1]} · ${_fmtClock(utc)}';
+}
+
 String _fmtRelative(DateTime utc) {
   final t = utc.toLocal();
   final now = DateTime.now();
@@ -951,4 +1196,119 @@ String _fmtRelative(DateTime utc) {
     return wd[t.weekday - 1];
   }
   return '${t.day}/${t.month}';
+}
+
+/// Staff-only bottom sheet listing every member of a group / class chat —
+/// avatar + name + role chip. The list is what loadMembersFor returns
+/// from the server, so for a class chat it's the computed union
+/// (bookings ∪ waitlist ∪ instructor ∪ staff). Sorted by full name on the
+/// server side. Students don't reach this — see the canSeeMembers gate
+/// in ChatThreadScreen.
+class _MembersSheet extends StatelessWidget {
+  final Conversation conversation;
+  const _MembersSheet({required this.conversation});
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final members = conversation.members;
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, scrollController) => Container(
+        decoration: BoxDecoration(
+          color: y.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 10, bottom: 6),
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: y.borderStrong,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              // Title centred under the drag handle; close button stays
+              // pinned to the right via Stack so the centring isn't pulled
+              // off by the variable-width icon.
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Text(
+                      '${members.length} members',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: y.text,
+                      ),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        icon: Icon(Icons.close, color: y.muted, size: 20),
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView.separated(
+                  controller: scrollController,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: members.length,
+                  separatorBuilder: (_, __) =>
+                      Divider(height: 1, color: y.border, indent: 68),
+                  itemBuilder: (_, i) {
+                    final m = members[i];
+                    return ListTile(
+                      leading: YAvatar(
+                        name: m.fullName,
+                        photoUrl: m.photoUrl,
+                        size: 40,
+                      ),
+                      title: Text(
+                        m.fullName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: y.text,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _roleLabel(m.role),
+                        style: TextStyle(color: y.muted, fontSize: 12),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _roleLabel(String role) {
+    switch (role) {
+      case 'manager':
+      case 'owner':
+        return 'Manager';
+      case 'instructor':
+        return 'Instructor';
+      default:
+        return 'Student';
+    }
+  }
 }
