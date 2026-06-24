@@ -1,11 +1,11 @@
 // Booking success animation.
 //
 // Plays a Lottie once after a class is booked, then auto-dismisses. One of
-// [_kAssets] is picked at random each booking for variety. All entries are
-// plain self-contained Lottie JSON (any images embedded as data URIs) — a
-// dotLottie `.lottie` is unzipped + flattened to JSON ahead of time so the
-// app never has to handle the zip at runtime. Drop more `.json` files in
-// assets/lottie/ and add their paths here.
+// [_kAssets] is picked at random each booking for variety. Loaded via
+// AssetLottie so any image-based animation resolves its frames from sibling
+// assets (lottie-3.x doesn't decode base64-embedded images) — e.g. yoga.json
+// references PNGs in assets/lottie/yoga_assets/. Vector animations
+// (booking_success.json) have no images and load the same way.
 //
 // The asset is loaded with a try/catch, so a missing or malformed file falls
 // back to a simple checkmark rather than crashing the booking flow.
@@ -14,7 +14,6 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:lottie/lottie.dart';
 
 import '../theme/yoga_tokens.dart';
@@ -46,11 +45,8 @@ Future<void> showBookingSuccessAnimation(BuildContext context) async {
   );
 }
 
-/// Loads a self-contained Lottie JSON asset.
-Future<LottieComposition> _load(String path) async {
-  final data = await rootBundle.load(path);
-  return LottieComposition.fromBytes(data.buffer.asUint8List());
-}
+/// Loads a Lottie asset, resolving any referenced images from sibling assets.
+Future<LottieComposition> _load(String path) => AssetLottie(path).load();
 
 class _BookingSuccessDialog extends StatefulWidget {
   final LottieComposition? composition;
