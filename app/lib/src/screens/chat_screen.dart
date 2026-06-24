@@ -13,6 +13,7 @@
 // entry points live in chat_compose.dart and only render for staff.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_client.dart';
@@ -170,8 +171,7 @@ class _ConversationList extends StatelessWidget {
         itemCount: list.length,
         separatorBuilder: (_, __) =>
             Divider(height: 1, color: y.border, indent: 76),
-        itemBuilder: (_, i) =>
-            _ConversationTile(conversation: list[i], me: me),
+        itemBuilder: (_, i) => _ConversationTile(conversation: list[i], me: me),
       ),
     );
   }
@@ -420,6 +420,7 @@ class ChatThreadScreen extends ConsumerStatefulWidget {
   final String conversationId;
   final Conversation? initialConversation;
   final Me me;
+
   /// Background color for the Scaffold + AppBar. Defaults to the page
   /// background; embedded views (e.g. the manager roster's right column)
   /// pass `y.surface` so the chat sits flush inside the surrounding card.
@@ -845,10 +846,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
                 ],
               );
               if (!canSeeMembers) return headerRow;
-              return InkWell(
-                onTap: () => _showMembers(conv),
-                child: headerRow,
-              );
+              return InkWell(onTap: () => _showMembers(conv), child: headerRow);
             },
           ),
         ),
@@ -1026,7 +1024,7 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   final TextEditingController controller;
   final bool sending;
   final VoidCallback onSend;
@@ -1035,6 +1033,34 @@ class _Composer extends StatelessWidget {
     required this.sending,
     required this.onSend,
   });
+
+  @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  // Owns the field's focus node so its onKeyEvent runs first (leaf of the
+  // focus chain) — that lets us intercept a hardware Enter *before* the
+  // multiline field's default newline insertion. Soft keyboards are
+  // unaffected: they emit a newline action, not a physical Enter key.
+  late final FocusNode _focusNode = FocusNode(onKeyEvent: _onKey);
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.enter &&
+        !HardwareKeyboard.instance.isShiftPressed) {
+      // Enter sends; Shift+Enter falls through to insert a newline.
+      if (!widget.sending) widget.onSend();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1055,7 +1081,8 @@ class _Composer extends StatelessWidget {
         children: [
           Expanded(
             child: TextField(
-              controller: controller,
+              controller: widget.controller,
+              focusNode: _focusNode,
               minLines: 1,
               maxLines: 5,
               textInputAction: TextInputAction.newline,
@@ -1084,16 +1111,16 @@ class _Composer extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: sending ? null : onSend,
+            onTap: widget.sending ? null : widget.onSend,
             child: Container(
               width: 42,
               height: 42,
               decoration: BoxDecoration(
-                color: sending ? y.muted : y.primary,
+                color: widget.sending ? y.muted : y.primary,
                 shape: BoxShape.circle,
               ),
               alignment: Alignment.center,
-              child: sending
+              child: widget.sending
                   ? SizedBox(
                       width: 18,
                       height: 18,
@@ -1140,8 +1167,18 @@ String _fmtDateClock(DateTime utc) {
   final t = utc.toLocal();
   const wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const mon = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   return '${wd[t.weekday - 1]} ${t.day} ${mon[t.month - 1]} · ${_fmtClock(utc)}';
 }
