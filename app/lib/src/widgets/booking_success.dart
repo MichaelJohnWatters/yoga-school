@@ -14,7 +14,6 @@
 
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
@@ -145,12 +144,15 @@ class _BookingSuccessOverlayState extends State<_BookingSuccessOverlay>
           children: [
             const Positioned.fill(child: ColoredBox(color: Color(0x14000000))),
             Center(
-              // Frosted-glass card: translucent surface + a soft blur of
-              // what's behind, so it reads as see-through rather than a solid
-              // white box while keeping the animation and text legible.
-              child: DecoratedBox(
+              // Translucent card — see-through rather than a solid white box,
+              // but no BackdropFilter blur (not supported on Flutter web's
+              // HTML renderer, where it throws every frame).
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(28, 22, 28, 20),
                 decoration: BoxDecoration(
+                  color: widget.surfaceColor.withValues(alpha: 0.78),
                   borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: const Color(0x14000000)),
                   boxShadow: const [
                     BoxShadow(
                       color: Color(0x1F000000),
@@ -159,35 +161,21 @@ class _BookingSuccessOverlayState extends State<_BookingSuccessOverlay>
                     ),
                   ],
                 ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(24),
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                    child: Container(
-                      padding: const EdgeInsets.fromLTRB(28, 22, 28, 20),
-                      decoration: BoxDecoration(
-                        color: widget.surfaceColor.withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: const Color(0x33FFFFFF)),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(width: 150, height: 150, child: art),
-                          const SizedBox(height: 2),
-                          Text(
-                            "You're booked!",
-                            style: TextStyle(
-                              fontSize: 16.5,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -0.2,
-                              color: widget.textColor,
-                            ),
-                          ),
-                        ],
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(width: 150, height: 150, child: art),
+                    const SizedBox(height: 2),
+                    Text(
+                      "You're booked!",
+                      style: TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.2,
+                        color: widget.textColor,
                       ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),
