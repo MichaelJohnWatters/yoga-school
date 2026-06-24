@@ -18,6 +18,7 @@ import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
 import 'buy_screen.dart';
+import 'chat_screen.dart';
 
 /// Pick the entitlement we should pre-select when the booking sheet opens
 /// with multiple eligible passes. The user can still swap rows; this is
@@ -41,24 +42,25 @@ EligibleEntitlement pickDefaultEntitlement(List<EligibleEntitlement> list) {
   assert(list.isNotEmpty, 'pickDefaultEntitlement called with empty list');
   // Copy + sort to avoid mutating the caller's list (the server payload
   // may be shared via the Future returned to multiple consumers).
-  final sorted = [...list]..sort((a, b) {
-    final ea = _expiryOrInfinity(a.expiresAt);
-    final eb = _expiryOrInfinity(b.expiresAt);
-    final byExpiry = ea.compareTo(eb);
-    if (byExpiry != 0) return byExpiry;
-    if (a.passKind != b.passKind) {
-      // 'credit' < 'unlimited' alphabetically — but we want that order
-      // explicitly anyway, so just hardcode the rule instead of leaning
-      // on string comparison.
-      return a.passKind == 'credit' ? -1 : 1;
-    }
-    if (a.passKind == 'credit') {
-      final ca = a.creditsRemaining ?? 1 << 30;
-      final cb = b.creditsRemaining ?? 1 << 30;
-      return ca.compareTo(cb);
-    }
-    return 0;
-  });
+  final sorted = [...list]
+    ..sort((a, b) {
+      final ea = _expiryOrInfinity(a.expiresAt);
+      final eb = _expiryOrInfinity(b.expiresAt);
+      final byExpiry = ea.compareTo(eb);
+      if (byExpiry != 0) return byExpiry;
+      if (a.passKind != b.passKind) {
+        // 'credit' < 'unlimited' alphabetically — but we want that order
+        // explicitly anyway, so just hardcode the rule instead of leaning
+        // on string comparison.
+        return a.passKind == 'credit' ? -1 : 1;
+      }
+      if (a.passKind == 'credit') {
+        final ca = a.creditsRemaining ?? 1 << 30;
+        final cb = b.creditsRemaining ?? 1 << 30;
+        return ca.compareTo(cb);
+      }
+      return 0;
+    });
   return sorted.first;
 }
 
@@ -69,6 +71,7 @@ DateTime _expiryOrInfinity(DateTime? raw) => raw ?? DateTime(9999);
 
 class BookingSheet extends ConsumerStatefulWidget {
   final ClassRow classRow;
+
   /// Optional close callback. When supplied, the sheet calls this on a
   /// successful book / cancel / waitlist mutation instead of
   /// `Navigator.of(context).pop(true)`. The desktop layout passes its
@@ -131,28 +134,32 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
     super.initState();
     final api = ref.read(apiClientProvider);
     _eligible = api.eligibleEntitlements(widget.classRow.id);
-    _eligible.then((list) {
-      if (!mounted) return;
-      if (list.isEmpty) {
-        setState(() => _eligibleEmpty = true);
-        return;
-      }
-      // Pick a smarter default than "first in the list" — use-it-before-
-      // you-lose-it logic so a credit expiring tomorrow ranks ahead of an
-      // unlimited that's safe for weeks. See pickDefaultEntitlement.
-      final pick = pickDefaultEntitlement(list).id;
-      setState(() => _selectedEntitlementId ??= pick);
-      _fetchPreview(_selectedEntitlementId!);
-    }).catchError((_) {
-      if (!mounted) return;
-      setState(() => _eligibleErrored = true);
-    });
+    _eligible
+        .then((list) {
+          if (!mounted) return;
+          if (list.isEmpty) {
+            setState(() => _eligibleEmpty = true);
+            return;
+          }
+          // Pick a smarter default than "first in the list" — use-it-before-
+          // you-lose-it logic so a credit expiring tomorrow ranks ahead of an
+          // unlimited that's safe for weeks. See pickDefaultEntitlement.
+          final pick = pickDefaultEntitlement(list).id;
+          setState(() => _selectedEntitlementId ??= pick);
+          _fetchPreview(_selectedEntitlementId!);
+        })
+        .catchError((_) {
+          if (!mounted) return;
+          setState(() => _eligibleErrored = true);
+        });
   }
 
   Future<void> _fetchPreview(String entitlementId) async {
     final reqId = ++_previewSeq;
     try {
-      final p = await ref.read(apiClientProvider).bookingPreview(
+      final p = await ref
+          .read(apiClientProvider)
+          .bookingPreview(
             classId: widget.classRow.id,
             entitlementId: entitlementId,
           );
@@ -187,7 +194,8 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
     final localStart = c.startsAt.toLocal();
     const dowFull = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     final dow = dowFull[(localStart.weekday + 6) % 7];
-    final timeLabel = '${localStart.hour}:${localStart.minute.toString().padLeft(2, '0')}';
+    final timeLabel =
+        '${localStart.hour}:${localStart.minute.toString().padLeft(2, '0')}';
     final dateMeta = '$dow ${localStart.day} · $timeLabel · ${c.roomName}';
 
     return Padding(
@@ -238,7 +246,8 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                   ),
                   const Spacer(),
                   if (c.bookingState == BookingState.available &&
-                      c.spotsLeft > 0 && c.spotsLeft <= 3)
+                      c.spotsLeft > 0 &&
+                      c.spotsLeft <= 3)
                     YChip(
                       kind: YChipKind.accent,
                       label: '${c.spotsLeft} spots left',
@@ -265,6 +274,16 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                 ],
               ),
               const SizedBox(height: 18),
+              // Group chat for the class — visible to anyone eligible to
+              // join: a booked student, a waitlister, or staff. Server
+              // gates the actual open; this is just the discoverability
+              // affordance. Suppressed on desktop (onClose != null), where
+              // the docked panel hosts a Class | Chat TabBar that exposes
+              // the same chat — having a row here too would be redundant.
+              if (widget.onClose == null &&
+                  (c.bookingState == BookingState.booked ||
+                      c.waitlistPosition != null))
+                _ClassChatRow(classId: c.id),
               if (c.bookingState == BookingState.booked)
                 _BookedActions(
                   classRow: c,
@@ -272,10 +291,7 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                   onCancelled: () => _close(context),
                 )
               else if (c.bookingState == BookingState.full)
-                _FullClassActions(
-                  classRow: c,
-                  onChanged: () => _close(context),
-                )
+                _FullClassActions(classRow: c, onChanged: () => _close(context))
               else
                 _PayWithSection(
                   eligible: _eligible,
@@ -316,7 +332,9 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                   Container(
                     key: const Key('booking-block-message'),
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
                     decoration: BoxDecoration(
                       color: y.surface2,
                       borderRadius: BorderRadius.circular(y.radiusCard),
@@ -338,7 +356,9 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
                   // failure inline and let the user retry by reopening.
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
                     decoration: BoxDecoration(
                       color: y.surface2,
                       borderRadius: BorderRadius.circular(y.radiusCard),
@@ -390,7 +410,8 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
     final eligible = await _eligible;
     // Defensive fallback to the smart-picked entitlement in case the
     // user managed to tap Book before initState's pick landed in state.
-    final id = _selectedEntitlementId ??
+    final id =
+        _selectedEntitlementId ??
         (eligible.isEmpty ? null : pickDefaultEntitlement(eligible).id);
     if (id == null) {
       setState(() => _conflict = 'No eligible pass — buy one first.');
@@ -431,31 +452,36 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
   void _buyPassAndBook() {
     final classRow = widget.classRow;
     final localStart = classRow.startsAt.toLocal();
-    final classDay =
-        DateTime(localStart.year, localStart.month, localStart.day);
+    final classDay = DateTime(
+      localStart.year,
+      localStart.month,
+      localStart.day,
+    );
     // Capture nav before pop — after pop, this State's context is being
     // torn down and Navigator.of(context) is unsafe.
     final nav = Navigator.of(context);
     nav.pop(false);
-    nav.push(MaterialPageRoute(
-      builder: (ctx) => Scaffold(
-        // Bare AppBar gives web users a way back; iOS/Android system
-        // back still works without it.
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          leading: IconButton(
-            icon: const Icon(Icons.close),
-            onPressed: () => Navigator.of(ctx).maybePop(),
+    nav.push(
+      MaterialPageRoute(
+        builder: (ctx) => Scaffold(
+          // Bare AppBar gives web users a way back; iOS/Android system
+          // back still works without it.
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            leading: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () => Navigator.of(ctx).maybePop(),
+            ),
+          ),
+          body: BuyScreen(
+            coversClassTypeId: classRow.classTypeId,
+            bookAfterPurchaseClassId: classRow.id,
+            bookAfterPurchaseDay: classDay,
           ),
         ),
-        body: BuyScreen(
-          coversClassTypeId: classRow.classTypeId,
-          bookAfterPurchaseClassId: classRow.id,
-          bookAfterPurchaseDay: classDay,
-        ),
       ),
-    ));
+    );
   }
 }
 
@@ -637,9 +663,7 @@ class _FullClassActionsState extends ConsumerState<_FullClassActions> {
           child: Row(
             children: [
               Icon(
-                joined
-                    ? Icons.check_circle_outline_rounded
-                    : Icons.list_alt,
+                joined ? Icons.check_circle_outline_rounded : Icons.list_alt,
                 size: 18,
                 color: joined ? y.primary : y.accent,
               ),
@@ -692,8 +716,9 @@ class _FullClassActionsState extends ConsumerState<_FullClassActions> {
       _error = null;
     });
     try {
-      final pos =
-          await ref.read(apiClientProvider).joinWaitlist(widget.classRow.id);
+      final pos = await ref
+          .read(apiClientProvider)
+          .joinWaitlist(widget.classRow.id);
       if (!mounted) return;
       _toast("You're #$pos on the waitlist — we'll notify you.");
       // Pop the sheet — BookScreen refreshes the day, which re-fetches
@@ -839,7 +864,10 @@ class _EntitlementRow extends StatelessWidget {
               height: 18,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: selected ? y.primary : y.borderStrong, width: 1.5),
+                border: Border.all(
+                  color: selected ? y.primary : y.borderStrong,
+                  width: 1.5,
+                ),
               ),
               alignment: Alignment.center,
               child: selected
@@ -894,7 +922,20 @@ class _EntitlementRow extends StatelessWidget {
 
   static String _d(DateTime? d) {
     if (d == null) return '—';
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     final local = d.toLocal();
     return '${local.day} ${mons[local.month - 1]}';
   }
@@ -921,19 +962,47 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
   CancelPreview? _preview;
   bool _cancelling = false;
   String? _error;
+  // Credit passes that could fund a +1 on this class (the eligible list
+  // filtered to credit kind — a +1 can't be paid by an unlimited pass). The
+  // "Add a friend" button only appears when this is non-empty, and it seeds
+  // the pass picker in the add sheet. Null while loading; never fetched when
+  // the caller already brought a +1.
+  List<EligibleEntitlement>? _plusOnePasses;
 
   @override
   void initState() {
     super.initState();
     final id = widget.classRow.bookingId;
     if (id != null) {
-      ref.read(apiClientProvider).cancelPreview(id).then((p) {
-        if (!mounted) return;
-        setState(() => _preview = p);
-      }).catchError((_) {
-        // Preview failure is non-fatal — leave the button enabled and
-        // let an actual cancel attempt surface the real error.
-      });
+      ref
+          .read(apiClientProvider)
+          .cancelPreview(id)
+          .then((p) {
+            if (!mounted) return;
+            setState(() => _preview = p);
+          })
+          .catchError((_) {
+            // Preview failure is non-fatal — leave the button enabled and
+            // let an actual cancel attempt surface the real error.
+          });
+    }
+    // Only matters when they booked solo — fetch the passes that could pay
+    // for a +1 so we can show (or hide) the "Add a friend" affordance.
+    if (widget.classRow.myPlusOneName == null) {
+      ref
+          .read(apiClientProvider)
+          .eligibleEntitlements(widget.classRow.id)
+          .then((list) {
+            if (!mounted) return;
+            setState(
+              () => _plusOnePasses = list
+                  .where((e) => e.passKind == 'credit')
+                  .toList(),
+            );
+          })
+          .catchError((_) {
+            if (mounted) setState(() => _plusOnePasses = const []);
+          });
     }
   }
 
@@ -947,9 +1016,10 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const YChip(
-              kind: YChipKind.booked,
-              label: 'You were booked',
-              leadingCheck: true),
+            kind: YChipKind.booked,
+            label: 'You were booked',
+            leadingCheck: true,
+          ),
           const SizedBox(height: 14),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -972,19 +1042,87 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
       );
     }
     final friendName = widget.classRow.myPlusOneName;
+    // Offer "add a friend after the fact" when the caller booked solo, the
+    // studio allows +1 guests, AND they hold at least one credit pass that
+    // could fund it — so the button never shows for an unlimited-only / no-
+    // spare-credit student. The server still does the authoritative check.
+    final plusOneAllowed =
+        ref.watch(bootstrapProvider).value?.studio.allowStudentPlusOne ?? false;
+    final canAddPlusOne =
+        friendName == null &&
+        plusOneAllowed &&
+        (_plusOnePasses?.isNotEmpty ?? false);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const YChip(kind: YChipKind.booked, label: 'You\'re booked', leadingCheck: true),
+        const YChip(
+          kind: YChipKind.booked,
+          label: 'You\'re booked',
+          leadingCheck: true,
+        ),
         if (friendName != null) ...[
           const SizedBox(height: 10),
           _PlusOneBookedBanner(friendName: friendName),
         ],
         const SizedBox(height: 14),
         if (_error != null) ...[
-          Text(_error!,
-              style: const TextStyle(color: Color(0xFFA33B2E), fontSize: 13)),
+          Text(
+            _error!,
+            style: const TextStyle(color: Color(0xFFA33B2E), fontSize: 13),
+          ),
           const SizedBox(height: 10),
+        ],
+        if (canAddPlusOne) ...[
+          YButton(
+            key: const Key('booking-add-plus-one-button'),
+            label: 'Add a friend (+1)',
+            variant: YButtonVariant.outline,
+            onTap: _cancelling ? null : _addPlusOne,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Brings a guest on a credit from a pass you choose.',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: y.muted,
+            ),
+          ),
+          const SizedBox(height: 14),
+        ] else if (friendName == null &&
+            plusOneAllowed &&
+            (_plusOnePasses?.isEmpty ?? false)) ...[
+          // Booked solo, the studio allows guests, but no credit pass can
+          // fund a +1 (on an unlimited, out of credits, or no pass covering
+          // this class type). A guest seat costs one credit from a pass that
+          // covers this class — a single drop-in or a credit pack both work,
+          // so the studio gets full value for the friend.
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              color: y.surface2,
+              borderRadius: BorderRadius.circular(y.radiusCard),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.person_add_alt_1, size: 16, color: y.muted),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Want to bring a friend? Buy a pass that covers this '
+                    'class and you can add a +1 to this booking.',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
         ],
         YButton(
           key: const Key('booking-cancel-button'),
@@ -997,7 +1135,11 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
           friendName != null
               ? 'Cancelling releases both seats. Free until ${widget.cutoffHours} hours before.'
               : 'Free cancellation until ${widget.cutoffHours} hours before.',
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: y.muted),
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: y.muted,
+          ),
         ),
       ],
     );
@@ -1014,8 +1156,10 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
     try {
       preview = await api.cancelPreview(id);
     } catch (e) {
-      setState(() => _error =
-          "Couldn't check cancel policy: ${ApiError.fromAny(e).message}");
+      setState(
+        () => _error =
+            "Couldn't check cancel policy: ${ApiError.fromAny(e).message}",
+      );
       return;
     }
     if (!mounted) return;
@@ -1033,6 +1177,28 @@ class _BookedActionsState extends ConsumerState<_BookedActions> {
         _cancelling = false;
         _error = "Couldn't cancel: ${ApiError.fromAny(e).message}";
       });
+    }
+  }
+
+  Future<void> _addPlusOne() async {
+    final passes = _plusOnePasses ?? const <EligibleEntitlement>[];
+    if (passes.isEmpty) return;
+    // The add sheet handles name + pass choice + the API call itself, and
+    // pops `true` once the +1 lands.
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) =>
+          _AddPlusOneSheet(classId: widget.classRow.id, passes: passes),
+    );
+    if (ok == true && mounted) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(content: Text('Added your +1')));
+      // Close the booking sheet — the day refreshes and re-fetches
+      // myPlusOneName so a reopen shows the guest banner.
+      widget.onCancelled();
     }
   }
 
@@ -1182,6 +1348,246 @@ class _NoEligiblePassCTA extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Opens (or lazy-creates) the class chat — visible in the booking sheet
+/// to any caller eligible to join the room (booked, on the waitlist, or
+/// staff). Server gates the real check; this is the discoverability path.
+class _ClassChatRow extends ConsumerStatefulWidget {
+  final String classId;
+  const _ClassChatRow({required this.classId});
+
+  @override
+  ConsumerState<_ClassChatRow> createState() => _ClassChatRowState();
+}
+
+class _ClassChatRowState extends ConsumerState<_ClassChatRow> {
+  bool _opening = false;
+
+  Future<void> _open() async {
+    if (_opening) return;
+    setState(() => _opening = true);
+    try {
+      final api = ref.read(apiClientProvider);
+      final conv = await api.openClassChat(widget.classId);
+      // Me lives on the bootstrap; it's already resolved by the time the
+      // booking sheet renders so this is a synchronous read.
+      final me = ref.read(bootstrapProvider).asData?.value.me;
+      if (!mounted || me == null) return;
+      ref.invalidate(conversationsProvider);
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatThreadScreen(
+            conversationId: conv.id,
+            initialConversation: conv,
+            me: me,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Couldn't open chat: ${ApiError.fromAny(e).message}"),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _opening = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: y.surface2,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        child: InkWell(
+          onTap: _opening ? null : _open,
+          borderRadius: BorderRadius.circular(y.radiusCard),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.forum_outlined, size: 18, color: y.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Group chat',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: y.text,
+                    ),
+                  ),
+                ),
+                if (_opening)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  Icon(Icons.chevron_right, size: 18, color: y.muted),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom sheet for adding a +1 to a class you already booked solo. Collects
+/// the friend's name and which CREDIT pass to charge (the caller may hold
+/// several), then posts it. Pops `true` once the +1 is created so the booking
+/// sheet can close + refresh.
+class _AddPlusOneSheet extends ConsumerStatefulWidget {
+  final String classId;
+  final List<EligibleEntitlement> passes;
+  const _AddPlusOneSheet({required this.classId, required this.passes});
+
+  @override
+  ConsumerState<_AddPlusOneSheet> createState() => _AddPlusOneSheetState();
+}
+
+class _AddPlusOneSheetState extends ConsumerState<_AddPlusOneSheet> {
+  final _friendName = TextEditingController();
+  late String _selectedId = pickDefaultEntitlement(widget.passes).id;
+  bool _submitting = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _friendName.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final friend = _friendName.text.trim();
+    if (friend.isEmpty) {
+      setState(() => _error = "Tell us your friend's name first.");
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      await ref
+          .read(apiClientProvider)
+          .addPlusOne(
+            classId: widget.classId,
+            entitlementId: _selectedId,
+            plusOneName: friend,
+          );
+      if (mounted) Navigator.of(context).pop(true);
+    } on BookingConflict catch (e) {
+      setState(() {
+        _submitting = false;
+        _error = e.message;
+      });
+    } catch (e) {
+      setState(() {
+        _submitting = false;
+        _error = "Couldn't add +1: ${ApiError.fromAny(e).message}";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: y.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: y.borderStrong,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Add a friend',
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w800,
+                  color: y.text,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Brings a +1 on one of your credit passes.',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: y.muted,
+                ),
+              ),
+              const SizedBox(height: 16),
+              _FriendNameField(controller: _friendName),
+              const SizedBox(height: 16),
+              Text(
+                'PAY WITH',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: y.muted,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              for (final e in widget.passes) ...[
+                _EntitlementRow(
+                  item: e,
+                  selected: e.id == _selectedId,
+                  onTap: () => setState(() => _selectedId = e.id),
+                ),
+                const SizedBox(height: 8),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: Color(0xFFA33B2E),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              YButton(
+                key: const Key('add-plus-one-confirm-button'),
+                label: _submitting ? 'Adding…' : 'Add +1',
+                onTap: _submitting ? null : _submit,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

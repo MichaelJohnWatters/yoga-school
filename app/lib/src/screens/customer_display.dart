@@ -89,7 +89,9 @@ class _CustomerDisplayState extends ConsumerState<CustomerDisplay> {
         body: SafeArea(
           child: _Shell(
             studioName: boot.maybeWhen(
-                data: (b) => b.studio.name, orElse: () => 'Studio 52'),
+              data: (b) => b.studio.name,
+              orElse: () => 'Studio 52',
+            ),
             phase: _phase,
             orderName: _orderName,
             orderTerms: _orderTerms,
@@ -127,18 +129,20 @@ class _Shell extends StatelessWidget {
     return Stack(
       children: [
         // Optional studio splash image fills the background in idle state.
-        if (phase == _DeskPhase.idle && splashImageUrl != null && splashImageUrl!.isNotEmpty)
+        if (phase == _DeskPhase.idle &&
+            splashImageUrl != null &&
+            splashImageUrl!.isNotEmpty)
           Positioned.fill(
-            child: Image.network(
-              splashImageUrl!,
+            child: Image(
+              image: studioImageProvider(splashImageUrl!),
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
             ),
           ),
-        if (phase == _DeskPhase.idle && splashImageUrl != null && splashImageUrl!.isNotEmpty)
-          Positioned.fill(
-            child: Container(color: const Color(0x66000000)),
-          ),
+        if (phase == _DeskPhase.idle &&
+            splashImageUrl != null &&
+            splashImageUrl!.isNotEmpty)
+          Positioned.fill(child: Container(color: const Color(0x66000000))),
         // Top-left logo + studio name.
         Positioned(
           top: 24,
@@ -201,20 +205,20 @@ class _Shell extends StatelessWidget {
             duration: const Duration(milliseconds: 320),
             child: switch (phase) {
               _DeskPhase.idle => _IdleState(
-                  key: const ValueKey('idle'),
-                  onImage: splashImageUrl != null && splashImageUrl!.isNotEmpty,
-                ),
+                key: const ValueKey('idle'),
+                onImage: splashImageUrl != null && splashImageUrl!.isNotEmpty,
+              ),
               _DeskPhase.paying => _PayingState(
-                  key: const ValueKey('paying'),
-                  orderName: orderName,
-                  orderTerms: orderTerms,
-                  orderAmount: orderAmount,
-                ),
+                key: const ValueKey('paying'),
+                orderName: orderName,
+                orderTerms: orderTerms,
+                orderAmount: orderAmount,
+              ),
               _DeskPhase.approved => _ApprovedState(
-                  key: const ValueKey('approved'),
-                  orderAmount: orderAmount,
-                  customerName: customerName,
-                ),
+                key: const ValueKey('approved'),
+                orderAmount: orderAmount,
+                customerName: customerName,
+              ),
             },
           ),
         ),
@@ -251,9 +255,7 @@ class _IdleState extends StatelessWidget {
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w500,
-              color: onImage
-                  ? Colors.white.withValues(alpha: 0.85)
-                  : y.muted,
+              color: onImage ? Colors.white.withValues(alpha: 0.85) : y.muted,
             ),
           ),
         ],
@@ -369,11 +371,7 @@ class _PayingState extends StatelessWidget {
                       shape: BoxShape.circle,
                     ),
                     alignment: Alignment.center,
-                    child: Icon(
-                      Icons.contactless,
-                      color: y.primary,
-                      size: 70,
-                    ),
+                    child: Icon(Icons.contactless, color: y.primary, size: 70),
                   ),
                   const SizedBox(height: 28),
                   Text(

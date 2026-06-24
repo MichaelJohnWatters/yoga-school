@@ -62,7 +62,7 @@ func TestChat_GroupHappyPath(t *testing.T) {
 	}
 
 	// The student sees both as unread; the sender's own count is zero.
-	studentConvs, err := s.ListConversations(ctx, f.studioID, student)
+	studentConvs, err := s.ListConversations(ctx, f.studioID, student, false)
 	if err != nil {
 		t.Fatalf("list (student): %v", err)
 	}
@@ -72,7 +72,7 @@ func TestChat_GroupHappyPath(t *testing.T) {
 	if studentConvs[0].LastMessage == nil || studentConvs[0].LastMessage.Body != "class at 9" {
 		t.Fatalf("last message preview wrong: %+v", studentConvs[0].LastMessage)
 	}
-	staffConvs, _ := s.ListConversations(ctx, f.studioID, staff)
+	staffConvs, _ := s.ListConversations(ctx, f.studioID, staff, true)
 	if staffConvs[0].UnreadCount != 0 {
 		t.Fatalf("sender should have 0 unread, got %d", staffConvs[0].UnreadCount)
 	}
@@ -81,7 +81,7 @@ func TestChat_GroupHappyPath(t *testing.T) {
 	if err := s.MarkConversationRead(ctx, student, conv.ID, 2); err != nil {
 		t.Fatalf("mark read: %v", err)
 	}
-	studentConvs, _ = s.ListConversations(ctx, f.studioID, student)
+	studentConvs, _ = s.ListConversations(ctx, f.studioID, student, false)
 	if studentConvs[0].UnreadCount != 0 {
 		t.Fatalf("want 0 unread after read, got %d", studentConvs[0].UnreadCount)
 	}
@@ -117,7 +117,7 @@ func TestChat_MarkReadMonotonic(t *testing.T) {
 	if err := s.MarkConversationRead(ctx, f.studentID, conv.ID, 1); err != nil {
 		t.Fatal(err)
 	}
-	convs, _ := s.ListConversations(ctx, f.studioID, f.studentID)
+	convs, _ := s.ListConversations(ctx, f.studioID, f.studentID, false)
 	if convs[0].UnreadCount != 0 {
 		t.Fatalf("stale mark-read regressed unread to %d", convs[0].UnreadCount)
 	}
@@ -174,7 +174,7 @@ func TestChat_DMPrivacyFromOtherStudent(t *testing.T) {
 	}
 
 	// And the DM never appears in student B's conversation list...
-	bConvs, err := s.ListConversations(ctx, f.studioID, studentB)
+	bConvs, err := s.ListConversations(ctx, f.studioID, studentB, false)
 	if err != nil {
 		t.Fatalf("list (studentB): %v", err)
 	}
@@ -184,7 +184,7 @@ func TestChat_DMPrivacyFromOtherStudent(t *testing.T) {
 		}
 	}
 	// ...while student A (the actual recipient) does see it. Positive control.
-	aConvs, _ := s.ListConversations(ctx, f.studioID, f.studentID)
+	aConvs, _ := s.ListConversations(ctx, f.studioID, f.studentID, false)
 	var aSeesIt bool
 	for _, c := range aConvs {
 		if c.ID == dm.ID {

@@ -5,6 +5,7 @@
 // of the seeded test users (Maya, Priya). It only renders in debug builds.
 
 import 'package:firebase_auth/firebase_auth.dart';
+import '../api/api_client.dart';
 import '../api/api_error.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -177,147 +178,188 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    return Scaffold(
-      backgroundColor: y.background,
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 380),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const SizedBox(height: 30),
-                  Center(child: const YLogo(size: 52)),
-                  const SizedBox(height: 24),
-                  Text(
-                    _isSignUp ? 'Create your account' : 'Welcome to Studio 52',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 27,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.4,
-                      color: y.text,
+    // Studio splash (active theme) as a branded background when one is set.
+    // Public config — fetched without auth. Falls back to the plain themed
+    // background when there's no splash image (the original look).
+    final splash = ref
+        .watch(studioConfigProvider)
+        .asData
+        ?.value
+        .activeThemeSplashImage;
+    final hasImage = splash != null && splash.isNotEmpty;
+
+    final form = SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 30),
+          Center(child: const YLogo(size: 52)),
+          const SizedBox(height: 24),
+          Text(
+            _isSignUp ? 'Create your account' : 'Welcome to Studio 52',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 27,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.4,
+              color: y.text,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            'Sign in to book classes and manage your passes.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14.5,
+              fontWeight: FontWeight.w500,
+              color: y.muted,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 24),
+          // Dev picker only makes sense for sign-in — the seeded
+          // users already exist on the emulator.
+          if (kDebugMode && !_isSignUp) ...[
+            _DevPicker(onPick: _useDevAccount),
+            const SizedBox(height: 14),
+          ],
+          if (_isSignUp) ...[
+            _LabeledField(
+              label: 'FULL NAME',
+              controller: _fullName,
+              keyboardType: TextInputType.name,
+            ),
+            const SizedBox(height: 10),
+          ],
+          _LabeledField(
+            label: 'EMAIL',
+            controller: _email,
+            keyboardType: TextInputType.emailAddress,
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: 10),
+          _LabeledField(
+            label: 'PASSWORD',
+            controller: _password,
+            obscure: true,
+            onSubmitted: (_) => _submit(),
+          ),
+          if (!_isSignUp) ...[
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: GestureDetector(
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Password reset not wired in dev.'),
                     ),
+                  );
+                },
+                child: Text(
+                  'Forgot password?',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: y.primary,
                   ),
-                  const SizedBox(height: 5),
-                  Text(
-                    'Sign in to book classes and manage your passes.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w500,
-                      color: y.muted,
-                      height: 1.45,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 18),
+          if (_error != null) ...[
+            Text(
+              _error!,
+              style: const TextStyle(
+                color: Color(0xFFA33B2E),
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          YButton(
+            label: _busy
+                ? (_isSignUp ? 'Creating…' : 'Signing in…')
+                : (_isSignUp ? 'Create account' : 'Sign in'),
+            onTap: _busy ? null : _submit,
+          ),
+          const SizedBox(height: 22),
+          Center(
+            child: GestureDetector(
+              key: const Key('auth-toggle-mode'),
+              behavior: HitTestBehavior.opaque,
+              onTap: _busy ? null : _toggleMode,
+              child: RichText(
+                textAlign: TextAlign.center,
+                text: TextSpan(
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: y.muted,
+                  ),
+                  children: [
+                    TextSpan(
+                      text: _isSignUp
+                          ? 'Already have an account? '
+                          : 'New here? ',
                     ),
-                  ),
-                  const SizedBox(height: 24),
-                  // Dev picker only makes sense for sign-in — the seeded
-                  // users already exist on the emulator.
-                  if (kDebugMode && !_isSignUp) ...[
-                    _DevPicker(onPick: _useDevAccount),
-                    const SizedBox(height: 14),
-                  ],
-                  if (_isSignUp) ...[
-                    _LabeledField(
-                      label: 'FULL NAME',
-                      controller: _fullName,
-                      keyboardType: TextInputType.name,
-                    ),
-                    const SizedBox(height: 10),
-                  ],
-                  _LabeledField(
-                    label: 'EMAIL',
-                    controller: _email,
-                    keyboardType: TextInputType.emailAddress,
-                    onSubmitted: (_) => _submit(),
-                  ),
-                  const SizedBox(height: 10),
-                  _LabeledField(
-                    label: 'PASSWORD',
-                    controller: _password,
-                    obscure: true,
-                    onSubmitted: (_) => _submit(),
-                  ),
-                  if (!_isSignUp) ...[
-                    const SizedBox(height: 6),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: GestureDetector(
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Password reset not wired in dev.'),
-                            ),
-                          );
-                        },
-                        child: Text(
-                          'Forgot password?',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: y.primary,
-                          ),
-                        ),
+                    TextSpan(
+                      text: _isSignUp ? 'Sign in' : 'Create an account',
+                      style: TextStyle(
+                        color: y.primary,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
                   ],
-                  const SizedBox(height: 18),
-                  if (_error != null) ...[
-                    Text(
-                      _error!,
-                      style: const TextStyle(
-                        color: Color(0xFFA33B2E),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  YButton(
-                    label: _busy
-                        ? (_isSignUp ? 'Creating…' : 'Signing in…')
-                        : (_isSignUp ? 'Create account' : 'Sign in'),
-                    onTap: _busy ? null : _submit,
-                  ),
-                  const SizedBox(height: 22),
-                  Center(
-                    child: GestureDetector(
-                      key: const Key('auth-toggle-mode'),
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _busy ? null : _toggleMode,
-                      child: RichText(
-                        textAlign: TextAlign.center,
-                        text: TextSpan(
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w600,
-                            color: y.muted,
-                          ),
-                          children: [
-                            TextSpan(
-                              text: _isSignUp
-                                  ? 'Already have an account? '
-                                  : 'New here? ',
-                            ),
-                            TextSpan(
-                              text: _isSignUp ? 'Sign in' : 'Create an account',
-                              style: TextStyle(
-                                color: y.primary,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
-        ),
+        ],
+      ),
+    );
+
+    // Over an image, drop the form into a surface card so the existing text /
+    // field colours stay readable against the photo + dark overlay.
+    final card = hasImage
+        ? Container(
+            margin: const EdgeInsets.all(20),
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: y.surface,
+              borderRadius: BorderRadius.circular(y.radiusCard),
+              boxShadow: y.shadow,
+            ),
+            child: form,
+          )
+        : form;
+
+    return Scaffold(
+      backgroundColor: y.background,
+      body: Stack(
+        children: [
+          if (hasImage)
+            Positioned.fill(
+              child: Image(
+                image: studioImageProvider(splash),
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+          if (hasImage)
+            Positioned.fill(child: Container(color: const Color(0x66000000))),
+          SafeArea(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 380),
+                child: card,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -2,6 +2,7 @@
 // Mirrors yoga-student-web.jsx shell.
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
@@ -10,6 +11,7 @@ import 'desktop_book.dart';
 import 'desktop_buy.dart';
 import 'desktop_home.dart';
 import '../more_screen.dart';
+import '../notifications_screen.dart';
 import '../profile_screen.dart';
 import 'responsive.dart';
 
@@ -192,35 +194,47 @@ class _NavPill extends StatelessWidget {
   }
 }
 
-class _BellButton extends StatelessWidget {
+class _BellButton extends ConsumerWidget {
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: y.borderStrong),
+    final unread = ref.watch(unreadNotificationCountProvider);
+    return InkWell(
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => const NotificationsScreen(),
           ),
-          child: Icon(Icons.notifications_outlined, size: 18, color: y.text),
-        ),
-        Positioned(
-          top: 7,
-          right: 8,
-          child: Container(
-            width: 7,
-            height: 7,
+        );
+      },
+      borderRadius: BorderRadius.circular(18),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
-              color: y.accent,
               shape: BoxShape.circle,
+              border: Border.all(color: y.borderStrong),
             ),
+            child: Icon(Icons.notifications_outlined, size: 18, color: y.text),
           ),
-        ),
-      ],
+          if (unread > 0)
+            Positioned(
+              top: 7,
+              right: 8,
+              child: Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: y.accent,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -274,7 +288,7 @@ class _Body extends StatelessWidget {
         ),
       DesktopSection.more => _CenteredMaxWidth(
           maxWidth: 560,
-          child: const MoreScreen(),
+          child: MoreScreen(me: me, studio: studio),
         ),
     };
   }

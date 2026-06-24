@@ -1,6 +1,8 @@
 // Plain Dart models for the API responses we consume right now.
 // Add fields/models as endpoints come online.
 
+import 'dart:convert';
+
 class StudioConfig {
   final String id;
   final String name;
@@ -126,28 +128,28 @@ class Me {
   });
 
   factory Me.fromJson(Map<String, dynamic> j) => Me(
-        id: j['id'] as String,
-        studioId: j['studio_id'] as String,
-        role: j['role'] as String,
-        email: j['email'] as String,
-        fullName: j['full_name'] as String,
-        photoUrl: j['photo_url'] as String?,
-        themeModePref: parseThemeModePref(j['theme_mode_pref'] as String?),
-        createdAt: DateTime.parse(j['created_at'] as String),
-        tier: _parseTier(j['tier'] as String?),
-      );
+    id: j['id'] as String,
+    studioId: j['studio_id'] as String,
+    role: j['role'] as String,
+    email: j['email'] as String,
+    fullName: j['full_name'] as String,
+    photoUrl: j['photo_url'] as String?,
+    themeModePref: parseThemeModePref(j['theme_mode_pref'] as String?),
+    createdAt: DateTime.parse(j['created_at'] as String),
+    tier: _parseTier(j['tier'] as String?),
+  );
 
   Me copyWith({ThemeModePref? themeModePref}) => Me(
-        id: id,
-        studioId: studioId,
-        role: role,
-        email: email,
-        fullName: fullName,
-        photoUrl: photoUrl,
-        themeModePref: themeModePref ?? this.themeModePref,
-        createdAt: createdAt,
-        tier: tier,
-      );
+    id: id,
+    studioId: studioId,
+    role: role,
+    email: email,
+    fullName: fullName,
+    photoUrl: photoUrl,
+    themeModePref: themeModePref ?? this.themeModePref,
+    createdAt: createdAt,
+    tier: tier,
+  );
 
   String get firstName => fullName.split(' ').first;
 
@@ -167,6 +169,7 @@ class ClassRow {
   final String instructorName;
   final String? instructorPhotoUrl;
   final String roomName;
+
   /// Optional `#rrggbb` accent inherited from the room. Drives the
   /// left-edge stripe on class cards / calendar blocks so a manager can
   /// scan a busy day by room at a glance.
@@ -201,6 +204,11 @@ class ClassRow {
   /// and the "Booked with [name]" line in the booking sheet.
   final String? myPlusOneName;
 
+  /// Number of messages in this class's group chat. Only populated by the
+  /// manager/instructor schedule; drives the small chat badge that draws
+  /// attention to active class chats. 0 (or absent) elsewhere.
+  final int chatMessageCount;
+
   ClassRow({
     required this.id,
     required this.title,
@@ -224,36 +232,38 @@ class ClassRow {
     required this.enrollmentId,
     required this.recurrenceRuleId,
     this.myPlusOneName,
+    this.chatMessageCount = 0,
   });
 
   factory ClassRow.fromJson(Map<String, dynamic> j) => ClassRow(
-        id: j['id'] as String,
-        title: (j['title'] as String?) ?? '',
-        classTypeId: j['class_type_id'] as String,
-        classTypeName: j['class_type_name'] as String,
-        discipline: j['discipline'] as String,
-        instructorId: j['instructor_id'] as String,
-        instructorName: j['instructor_name'] as String,
-        instructorPhotoUrl: j['instructor_photo_url'] as String?,
-        roomName: j['room_name'] as String,
-        roomColor: j['room_color'] as String?,
-        startsAt: DateTime.parse(j['starts_at'] as String),
-        endsAt: DateTime.parse(j['ends_at'] as String),
-        durationMinutes: j['duration_minutes'] as int,
-        capacity: j['capacity'] as int,
-        bookedCount: j['booked_count'] as int,
-        waitlistCount: (j['waitlist_count'] as int?) ?? 0,
-        bookingState: switch (j['booking_state'] as String) {
-          'booked' => BookingState.booked,
-          'full' => BookingState.full,
-          _ => BookingState.available,
-        },
-        bookingId: j['booking_id'] as String?,
-        waitlistPosition: j['waitlist_position'] as int?,
-        enrollmentId: j['enrollment_id'] as String?,
-        recurrenceRuleId: j['recurrence_rule_id'] as String?,
-        myPlusOneName: j['my_plus_one_name'] as String?,
-      );
+    id: j['id'] as String,
+    title: (j['title'] as String?) ?? '',
+    classTypeId: j['class_type_id'] as String,
+    classTypeName: j['class_type_name'] as String,
+    discipline: j['discipline'] as String,
+    instructorId: j['instructor_id'] as String,
+    instructorName: j['instructor_name'] as String,
+    instructorPhotoUrl: j['instructor_photo_url'] as String?,
+    roomName: j['room_name'] as String,
+    roomColor: j['room_color'] as String?,
+    startsAt: DateTime.parse(j['starts_at'] as String),
+    endsAt: DateTime.parse(j['ends_at'] as String),
+    durationMinutes: j['duration_minutes'] as int,
+    capacity: j['capacity'] as int,
+    bookedCount: j['booked_count'] as int,
+    waitlistCount: (j['waitlist_count'] as int?) ?? 0,
+    bookingState: switch (j['booking_state'] as String) {
+      'booked' => BookingState.booked,
+      'full' => BookingState.full,
+      _ => BookingState.available,
+    },
+    bookingId: j['booking_id'] as String?,
+    waitlistPosition: j['waitlist_position'] as int?,
+    enrollmentId: j['enrollment_id'] as String?,
+    recurrenceRuleId: j['recurrence_rule_id'] as String?,
+    myPlusOneName: j['my_plus_one_name'] as String?,
+    chatMessageCount: (j['chat_message_count'] as int?) ?? 0,
+  );
 
   int get spotsLeft => capacity - bookedCount;
   bool get isRecurring => recurrenceRuleId != null;
@@ -518,15 +528,16 @@ class AdminInstructor {
 class AdminRoom {
   final String id;
   final String name;
+
   /// Optional `#rrggbb` accent the UI tints class cards with. Null when
   /// the manager hasn't set one for this room.
   final String? color;
   AdminRoom({required this.id, required this.name, this.color});
   factory AdminRoom.fromJson(Map<String, dynamic> j) => AdminRoom(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        color: j['color'] as String?,
-      );
+    id: j['id'] as String,
+    name: j['name'] as String,
+    color: j['color'] as String?,
+  );
 }
 
 class CancelClassResult {
@@ -560,17 +571,65 @@ class CancelClassResult {
   }
 }
 
+/// One recurring slot within a template — a full class shape pinned to a
+/// weekday/time. Generating fans out one class per slot per week.
+class ClassTemplateSlot {
+  final int seq;
+  final String classTypeId;
+  final String instructorId;
+  final String roomId;
+  final int weekday; // 0=Mon, ..., 6=Sun
+  final int startHour;
+  final int startMinute;
+  final int durationMins;
+  final int capacity;
+  final String? title; // optional per-slot override
+  ClassTemplateSlot({
+    required this.seq,
+    required this.classTypeId,
+    required this.instructorId,
+    required this.roomId,
+    required this.weekday,
+    required this.startHour,
+    required this.startMinute,
+    required this.durationMins,
+    required this.capacity,
+    this.title,
+  });
+  factory ClassTemplateSlot.fromJson(Map<String, dynamic> j) =>
+      ClassTemplateSlot(
+        seq: (j['seq'] as int?) ?? 0,
+        classTypeId: j['class_type_id'] as String,
+        instructorId: j['instructor_id'] as String,
+        roomId: j['room_id'] as String,
+        weekday: j['weekday'] as int,
+        startHour: j['start_hour'] as int,
+        startMinute: j['start_minute'] as int,
+        durationMins: j['duration_mins'] as int,
+        capacity: j['capacity'] as int,
+        title: (j['title'] as String?)?.isEmpty ?? true
+            ? null
+            : j['title'] as String,
+      );
+}
+
 class ClassTemplate {
   final String id;
   final String title;
+  final int weeks;
+  final String startsOn; // YYYY-MM-DD anchor
   final String status; // active | reverted
+  final List<ClassTemplateSlot> slots;
   final List<String> generatedClassIds;
   final List<String> sessions;
   final DateTime createdAt;
   ClassTemplate({
     required this.id,
     required this.title,
+    required this.weeks,
+    required this.startsOn,
     required this.status,
+    required this.slots,
     required this.generatedClassIds,
     required this.sessions,
     required this.createdAt,
@@ -578,7 +637,13 @@ class ClassTemplate {
   factory ClassTemplate.fromJson(Map<String, dynamic> j) => ClassTemplate(
     id: j['id'] as String,
     title: j['title'] as String,
+    weeks: (j['weeks'] as int?) ?? 0,
+    startsOn: (j['starts_on'] as String?) ?? '',
     status: j['status'] as String,
+    slots: ((j['slots'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .map(ClassTemplateSlot.fromJson)
+        .toList(),
     generatedClassIds: ((j['generated_class_ids'] as List?) ?? const [])
         .cast<String>(),
     sessions: ((j['sessions'] as List?) ?? const []).cast<String>(),
@@ -629,6 +694,22 @@ class AuditEntry {
     targetId: (j['target_id'] as String?) ?? '',
     detail: Map<String, dynamic>.from((j['detail'] as Map?) ?? {}),
     createdAt: DateTime.parse(j['created_at'] as String),
+  );
+}
+
+/// One keyset page of the activity log. [nextCursor] is non-null when more
+/// rows exist — pass it back as `cursor` to load the next (older) page.
+class AuditPage {
+  final List<AuditEntry> entries;
+  final String? nextCursor;
+  const AuditPage({required this.entries, this.nextCursor});
+
+  factory AuditPage.fromJson(Map<String, dynamic> j) => AuditPage(
+    entries: ((j['entries'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .map(AuditEntry.fromJson)
+        .toList(),
+    nextCursor: j['next_cursor'] as String?,
   );
 }
 
@@ -1323,6 +1404,34 @@ class ClassType {
   );
 }
 
+/// One image in the studio's media library (manager uploads).
+class MediaItem {
+  final String id;
+  final String url;
+  final String mime;
+  final int sizeBytes;
+  final String filename;
+  final String createdAt;
+
+  MediaItem({
+    required this.id,
+    required this.url,
+    required this.mime,
+    required this.sizeBytes,
+    required this.filename,
+    required this.createdAt,
+  });
+
+  factory MediaItem.fromJson(Map<String, dynamic> j) => MediaItem(
+    id: j['id'] as String,
+    url: j['url'] as String,
+    mime: (j['mime'] as String?) ?? '',
+    sizeBytes: (j['size_bytes'] as int?) ?? 0,
+    filename: (j['filename'] as String?) ?? '',
+    createdAt: (j['created_at'] as String?) ?? '',
+  );
+}
+
 class ThemeRow {
   final String id;
   final String name;
@@ -1335,6 +1444,10 @@ class ThemeRow {
   final bool isActiveLight;
   final bool isActiveDark;
 
+  /// Optional splash background for this theme — a network URL or an
+  /// `asset:` reference to a bundled image. Null when no splash is set.
+  final String? splashImageUrl;
+
   ThemeRow({
     required this.id,
     required this.name,
@@ -1344,12 +1457,14 @@ class ThemeRow {
     required this.isActive,
     required this.isActiveLight,
     required this.isActiveDark,
+    this.splashImageUrl,
   });
 
   factory ThemeRow.fromJson(Map<String, dynamic> j) {
     final l =
         (j['is_active_light'] as bool?) ?? (j['is_active'] as bool? ?? false);
     final d = (j['is_active_dark'] as bool?) ?? false;
+    final splash = j['splash_image_url'] as String?;
     return ThemeRow(
       id: j['id'] as String,
       name: j['name'] as String,
@@ -1361,6 +1476,7 @@ class ThemeRow {
       isActive: l,
       isActiveLight: l,
       isActiveDark: d,
+      splashImageUrl: (splash != null && splash.isNotEmpty) ? splash : null,
     );
   }
 
@@ -1373,6 +1489,7 @@ class ThemeRow {
     isActive: isActive,
     isActiveLight: isActiveLight,
     isActiveDark: isActiveDark,
+    splashImageUrl: splashImageUrl,
   );
 }
 
@@ -1635,6 +1752,11 @@ class NotificationItem {
   final String type;
   final String title;
   final String body;
+
+  /// Per-type structured payload — already-decoded JSON. For
+  /// `chat_message` notifications it carries `conversation_id`, `kind`,
+  /// and `sender_name`, used to route the tap to ChatThreadScreen.
+  final Map<String, dynamic> payload;
   final DateTime createdAt;
   final DateTime? readAt;
 
@@ -1643,20 +1765,41 @@ class NotificationItem {
     required this.type,
     required this.title,
     required this.body,
+    required this.payload,
     required this.createdAt,
     required this.readAt,
   });
 
-  factory NotificationItem.fromJson(Map<String, dynamic> j) => NotificationItem(
-    id: j['id'] as String,
-    type: j['type'] as String,
-    title: j['title'] as String,
-    body: (j['body'] as String?) ?? '',
-    createdAt: DateTime.parse(j['created_at'] as String),
-    readAt: (j['read_at'] as String?)?.let(DateTime.tryParse),
-  );
+  factory NotificationItem.fromJson(Map<String, dynamic> j) {
+    // Server sends payload as a JSON string (since the column is TEXT for
+    // SQLite portability). Decode lazily — an empty/missing/invalid
+    // payload becomes {} rather than throwing on the list render path.
+    Map<String, dynamic> decoded = const {};
+    final raw = j['payload'];
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final v = jsonDecode(raw);
+        if (v is Map<String, dynamic>) decoded = v;
+      } catch (_) {}
+    } else if (raw is Map<String, dynamic>) {
+      decoded = raw;
+    }
+    return NotificationItem(
+      id: j['id'] as String,
+      type: j['type'] as String,
+      title: j['title'] as String,
+      body: (j['body'] as String?) ?? '',
+      payload: decoded,
+      createdAt: DateTime.parse(j['created_at'] as String),
+      readAt: (j['read_at'] as String?)?.let(DateTime.tryParse),
+    );
+  }
 
   bool get unread => readAt == null;
+
+  /// Conversation id for chat_message notifications; null otherwise.
+  String? get chatConversationId =>
+      type == 'chat_message' ? payload['conversation_id'] as String? : null;
 }
 
 class Achievement {
@@ -2178,11 +2321,30 @@ class ChatMessage {
 
 class Conversation {
   final String id;
-  final String kind; // group | dm
-  final String title; // empty for dm — derive from the other member
+  final String kind; // group | dm | class
+  final String title; // empty for dm + class — derive from the anchor / members
+  final String? recurrenceRuleId; // set when kind=class anchored to a series
+  final String? classId; // set when kind=class anchored to a one-off
+  final bool archived; // class-chat-only, derived per caller server-side
   final String createdBy;
   final DateTime createdAt;
+
+  /// Members visible to the caller. For class chats the server **redacts**
+  /// this to just the viewer's own row when the viewer is a student — they
+  /// don't get to enumerate who else is in the room. Use [memberCount] for
+  /// the size of the full set.
   final List<ConversationMember> members;
+
+  /// Size of the full membership set, even when [members] has been redacted.
+  final int memberCount;
+
+  /// Class-chat "when" summary. [classSchedule] is the recurring wall-clock
+  /// pattern for a series ("Tuesdays · 7:00am"), null for a one-off or a
+  /// group/dm. [classStartsAt] is a concrete instance (UTC) — the next
+  /// upcoming instance for a series, or the one-off class's start — that the
+  /// UI formats in local time. Both feed the header at the top of the thread.
+  final String? classSchedule;
+  final DateTime? classStartsAt;
   final ChatMessage? lastMessage;
   final int unreadCount;
 
@@ -2190,30 +2352,48 @@ class Conversation {
     required this.id,
     required this.kind,
     required this.title,
+    this.recurrenceRuleId,
+    this.classId,
+    this.archived = false,
     required this.createdBy,
     required this.createdAt,
     required this.members,
+    required this.memberCount,
+    this.classSchedule,
+    this.classStartsAt,
     required this.lastMessage,
     required this.unreadCount,
   });
 
-  factory Conversation.fromJson(Map<String, dynamic> j) => Conversation(
-    id: j['id'] as String,
-    kind: j['kind'] as String,
-    title: (j['title'] as String?) ?? '',
-    createdBy: j['created_by'] as String,
-    createdAt: DateTime.parse(j['created_at'] as String),
-    members: ((j['members'] as List?) ?? const [])
+  factory Conversation.fromJson(Map<String, dynamic> j) {
+    final memberList = ((j['members'] as List?) ?? const [])
         .cast<Map<String, dynamic>>()
         .map(ConversationMember.fromJson)
-        .toList(),
-    lastMessage: (j['last_message'] as Map<String, dynamic>?)?.let(
-      ChatMessage.fromJson,
-    ),
-    unreadCount: (j['unread_count'] as int?) ?? 0,
-  );
+        .toList();
+    return Conversation(
+      id: j['id'] as String,
+      kind: j['kind'] as String,
+      title: (j['title'] as String?) ?? '',
+      recurrenceRuleId: j['recurrence_rule_id'] as String?,
+      classId: j['class_id'] as String?,
+      archived: (j['archived'] as bool?) ?? false,
+      createdBy: j['created_by'] as String,
+      createdAt: DateTime.parse(j['created_at'] as String),
+      members: memberList,
+      // Fall back to the visible list's length so older payloads (or DMs
+      // / groups where redaction never applies) still render a count.
+      memberCount: (j['member_count'] as int?) ?? memberList.length,
+      classSchedule: (j['class_schedule'] as String?),
+      classStartsAt: (j['class_starts_at'] as String?)?.let(DateTime.tryParse),
+      lastMessage: (j['last_message'] as Map<String, dynamic>?)?.let(
+        ChatMessage.fromJson,
+      ),
+      unreadCount: (j['unread_count'] as int?) ?? 0,
+    );
+  }
 
   bool get isDm => kind == 'dm';
+  bool get isClass => kind == 'class';
 
   /// Display label: a group's title, or for a dm the other participant's
   /// name. [meId] is the current user so we can pick "the other one".
@@ -2245,6 +2425,7 @@ class StudentNote {
   final String authorName;
   final String body;
   final DateTime createdAt;
+
   /// Set on edit; null when the note hasn't been changed since creation.
   /// Drives an "edited" marker in the UI, similar to chat messages.
   final DateTime? updatedAt;
@@ -2260,16 +2441,16 @@ class StudentNote {
   });
 
   factory StudentNote.fromJson(Map<String, dynamic> j) => StudentNote(
-        id: j['id'] as String,
-        userId: j['user_id'] as String,
-        authorId: j['author_id'] as String,
-        authorName: j['author_name'] as String,
-        body: j['body'] as String,
-        createdAt: DateTime.parse(j['created_at'] as String),
-        updatedAt: (j['updated_at'] as String?) != null
-            ? DateTime.tryParse(j['updated_at'] as String)
-            : null,
-      );
+    id: j['id'] as String,
+    userId: j['user_id'] as String,
+    authorId: j['author_id'] as String,
+    authorName: j['author_name'] as String,
+    body: j['body'] as String,
+    createdAt: DateTime.parse(j['created_at'] as String),
+    updatedAt: (j['updated_at'] as String?) != null
+        ? DateTime.tryParse(j['updated_at'] as String)
+        : null,
+  );
 
   bool get wasEdited => updatedAt != null;
 }

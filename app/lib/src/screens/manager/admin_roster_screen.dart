@@ -11,6 +11,7 @@ import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
+import '../chat_screen.dart';
 import 'class_dialogs.dart';
 import 'manager_shell.dart';
 import 'scan_checkin_sheet.dart';
@@ -28,7 +29,12 @@ class AdminRosterScreen extends ConsumerStatefulWidget {
 }
 
 class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
-  late Future<Roster> _roster;
+  // Stale-while-revalidate: we hold the last loaded roster and keep it on
+  // screen while a refetch is in flight, so marking attendance (or any
+  // other mutation that calls _reload) refreshes the data in place instead
+  // of blanking the whole page back to a spinner on every tap.
+  Roster? _data;
+  Object? _error;
   _Filter _filter = _Filter.all;
   String _query = '';
   final _busy = <String>{}; // booking_ids currently being mutated
@@ -36,17 +42,23 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
   @override
   void initState() {
     super.initState();
-    _roster = _fetch();
+    _reload();
   }
 
-  Future<Roster> _fetch() {
-    return ref.read(apiClientProvider).adminRoster(widget.classId);
-  }
-
-  void _reload() {
-    setState(() {
-      _roster = _fetch();
-    });
+  Future<void> _reload() async {
+    try {
+      final r = await ref.read(apiClientProvider).adminRoster(widget.classId);
+      if (!mounted) return;
+      setState(() {
+        _data = r;
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      // Keep any previously loaded data on screen; only surface the error
+      // when we have nothing to show.
+      setState(() => _error = e);
+    }
   }
 
   @override
@@ -57,25 +69,27 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
         final isNarrow = constraints.maxWidth < _kNarrow;
         final padH = isNarrow ? 14.0 : 30.0;
         final padV = isNarrow ? 18.0 : 26.0;
+        // First load with nothing yet — spinner. Once we have data we keep
+        // showing it across reloads (no full-page spinner on each mark).
+        if (_data == null && _error != null) {
+          return Padding(
+            padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+            child: Center(
+              child: Text(
+                "Can't load roster: $_error",
+                style: TextStyle(color: y.muted),
+              ),
+            ),
+          );
+        }
+        if (_data == null) {
+          return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+        }
         return Padding(
           padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
-          child: FutureBuilder<Roster>(
-            future: _roster,
-            builder: (context, snap) {
-              if (snap.connectionState != ConnectionState.done) {
-                return const Center(
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                );
-              }
-              if (snap.hasError) {
-                return Center(
-                  child: Text(
-                    "Can't load roster: ${snap.error}",
-                    style: TextStyle(color: y.muted),
-                  ),
-                );
-              }
-              final r = snap.data!;
+          child: Builder(
+            builder: (context) {
+              final r = _data!;
               final booked = _BookedCard(
                 roster: r,
                 filter: _filter,
@@ -89,8 +103,11 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                 onAddStudent: _addStudent,
                 onRemove: _remove,
               );
-              final waitlist =
-                  _WaitlistCard(roster: r, onPromote: _promote);
+              final waitlist = _WaitlistCard(
+                roster: r,
+                onPromote: _promote,
+                isNarrow: isNarrow,
+              );
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -124,12 +141,24 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                           if (any == true && mounted) _reload();
                         },
                       ),
+                      // Mobile-only entry to the chat — desktop embeds
+                      // the thread inline (see right column below) so
+                      // the button would be redundant there.
+                      if (isNarrow)
+                        YButton(
+                          label: 'Group chat',
+                          small: true,
+                          variant: YButtonVariant.outline,
+                          onTap: () => _openClassChat(r.klass.id),
+                        ),
                     ],
                   ),
                   Expanded(
                     child: isNarrow
                         // Stack the cards on mobile and scroll the page so
                         // long rosters + the waitlist both stay reachable.
+                        // Mobile keeps the group-chat header button — the
+                        // viewport's too tight to embed the thread inline.
                         ? ListView(
                             padding: EdgeInsets.zero,
                             children: [
@@ -138,12 +167,31 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                               waitlist,
                             ],
                           )
+                        // Desktop: booked on the left, then a vertical
+                        // split on the right with waitlist on top and the
+                        // group chat embedded below it — no extra
+                        // navigation for the manager.
                         : Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               Expanded(flex: 7, child: booked),
                               const SizedBox(width: 16),
-                              Expanded(flex: 4, child: waitlist),
+                              Expanded(
+                                flex: 5,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(child: waitlist),
+                                    const SizedBox(height: 12),
+                                    Expanded(
+                                      child: _RosterChatPanel(
+                                        classId: r.klass.id,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ],
                           ),
                   ),
@@ -159,11 +207,10 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
   Future<void> _mark(RosterBookingRow row, String status) async {
     setState(() => _busy.add(row.bookingId));
     try {
-      await ref.read(apiClientProvider).markAttendance(
-            bookingId: row.bookingId,
-            status: status,
-          );
-      _reload();
+      await ref
+          .read(apiClientProvider)
+          .markAttendance(bookingId: row.bookingId, status: status);
+      await _reload();
     } catch (e) {
       _toast('Could not mark: ${ApiError.fromAny(e).message}');
     } finally {
@@ -177,10 +224,12 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
     final unmarked = rows.where((r) => r.status == 'booked').toList();
     setState(() => _busy.addAll(unmarked.map((r) => r.bookingId)));
     try {
-      await Future.wait(unmarked.map(
-        (r) => api.markAttendance(bookingId: r.bookingId, status: 'present'),
-      ));
-      _reload();
+      await Future.wait(
+        unmarked.map(
+          (r) => api.markAttendance(bookingId: r.bookingId, status: 'present'),
+        ),
+      );
+      await _reload();
     } catch (e) {
       _toast('Some rows failed: ${ApiError.fromAny(e).message}');
     } finally {
@@ -190,7 +239,9 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
 
   Future<void> _promote() async {
     try {
-      final r = await ref.read(apiClientProvider).promoteWaitlist(widget.classId);
+      final r = await ref
+          .read(apiClientProvider)
+          .promoteWaitlist(widget.classId);
       _toast('${r.promotedName} promoted off the waitlist');
       _reload();
     } catch (e) {
@@ -226,6 +277,27 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
     if (removed == true && mounted) {
       _toast('Booking removed');
       _reload();
+    }
+  }
+
+  Future<void> _openClassChat(String classId) async {
+    try {
+      final conv = await ref.read(apiClientProvider).openClassChat(classId);
+      final me = ref.read(bootstrapProvider).asData?.value.me;
+      if (!mounted || me == null) return;
+      ref.invalidate(conversationsProvider);
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatThreadScreen(
+            conversationId: conv.id,
+            initialConversation: conv,
+            me: me,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _toast("Couldn't open chat: ${ApiError.fromAny(e).message}");
     }
   }
 
@@ -279,10 +351,26 @@ class _BookedCard extends StatelessWidget {
       spacing: 6,
       runSpacing: 6,
       children: [
-        _FilterPill(label: 'All $allCount', active: filter == _Filter.all, onTap: () => onFilter(_Filter.all)),
-        _FilterPill(label: 'Unmarked ${c.unmarked}', active: filter == _Filter.unmarked, onTap: () => onFilter(_Filter.unmarked)),
-        _FilterPill(label: 'Present ${c.present}', active: filter == _Filter.present, onTap: () => onFilter(_Filter.present)),
-        _FilterPill(label: 'No-show ${c.noShow}', active: filter == _Filter.noShow, onTap: () => onFilter(_Filter.noShow)),
+        _FilterPill(
+          label: 'All $allCount',
+          active: filter == _Filter.all,
+          onTap: () => onFilter(_Filter.all),
+        ),
+        _FilterPill(
+          label: 'Unmarked ${c.unmarked}',
+          active: filter == _Filter.unmarked,
+          onTap: () => onFilter(_Filter.unmarked),
+        ),
+        _FilterPill(
+          label: 'Present ${c.present}',
+          active: filter == _Filter.present,
+          onTap: () => onFilter(_Filter.present),
+        ),
+        _FilterPill(
+          label: 'No-show ${c.noShow}',
+          active: filter == _Filter.noShow,
+          onTap: () => onFilter(_Filter.noShow),
+        ),
         if (c.lateCancelled > 0)
           _FilterPill(
             label: 'Late cancel ${c.lateCancelled}',
@@ -310,7 +398,68 @@ class _BookedCard extends StatelessWidget {
         ),
       ],
     );
+    // The booked rows themselves. Built once, then rendered either inline
+    // (mobile — the whole roster scrolls in the page's outer ListView) or
+    // inside a scroll view that fills the card (desktop — bounded height,
+    // so a long roster scrolls instead of overflowing).
+    final Widget rowsList = filtered.isEmpty
+        ? Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            child: Text(
+              'No matching students.',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: context.yoga.muted,
+              ),
+            ),
+          )
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Render each primary booker, then any +1 guests they brought
+              // nested underneath. The +1 row has its own booking + status so
+              // managers can mark the guest separately from the member.
+              for (var i = 0; i < filtered.length; i++) ...[
+                () {
+                  final primary = filtered[i];
+                  final children = _plusOnesOf(primary);
+                  final blockIsLast = i == filtered.length - 1;
+                  return Column(
+                    children: [
+                      _StudentRow(
+                        row: primary,
+                        // If there are children, the primary itself never owns
+                        // the bottom border — the last child does.
+                        isLast: blockIsLast && children.isEmpty,
+                        busy: busy.contains(primary.bookingId),
+                        isNarrow: isNarrow,
+                        onMark: (status) => onMark(primary, status),
+                        onRemove: () => onRemove(primary, roster.klass.title),
+                      ),
+                      for (var j = 0; j < children.length; j++)
+                        _PlusOneSubRow(
+                          parent: primary,
+                          row: children[j],
+                          isLast: blockIsLast && j == children.length - 1,
+                          busy: busy.contains(children[j].bookingId),
+                          isNarrow: isNarrow,
+                          onMark: (status) => onMark(children[j], status),
+                          onRemove: () =>
+                              onRemove(children[j], roster.klass.title),
+                        ),
+                    ],
+                  );
+                }(),
+              ],
+            ],
+          );
     return ManagerCard(
+      // Fill + inner scroll only on desktop, where the card sits in a bounded
+      // Expanded. On mobile the card is inside the page's ListView (unbounded
+      // height), so an Expanded/scroll-in-scroll would be invalid — the outer
+      // ListView handles scrolling there.
+      fill: !isNarrow,
       title: 'Booked · ${c.booked} of ${roster.klass.capacity}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -333,54 +482,10 @@ class _BookedCard extends StatelessWidget {
               ],
             ),
           const SizedBox(height: 14),
-          if (filtered.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 20),
-              child: Text(
-                'No matching students.',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: context.yoga.muted,
-                ),
-              ),
-            )
+          if (isNarrow)
+            rowsList
           else
-            // Render each primary booker, then any +1 guests they brought
-            // nested underneath. The +1 row has its own booking + status so
-            // managers can mark the guest separately from the member.
-            for (var i = 0; i < filtered.length; i++) ...[
-              () {
-                final primary = filtered[i];
-                final children = _plusOnesOf(primary);
-                final blockIsLast = i == filtered.length - 1;
-                return Column(
-                  children: [
-                    _StudentRow(
-                      row: primary,
-                      // If there are children, the primary itself never owns
-                      // the bottom border — the last child does.
-                      isLast: blockIsLast && children.isEmpty,
-                      busy: busy.contains(primary.bookingId),
-                      isNarrow: isNarrow,
-                      onMark: (status) => onMark(primary, status),
-                      onRemove: () => onRemove(primary, roster.klass.title),
-                    ),
-                    for (var j = 0; j < children.length; j++)
-                      _PlusOneSubRow(
-                        parent: primary,
-                        row: children[j],
-                        isLast: blockIsLast && j == children.length - 1,
-                        busy: busy.contains(children[j].bookingId),
-                        isNarrow: isNarrow,
-                        onMark: (status) => onMark(children[j], status),
-                        onRemove: () =>
-                            onRemove(children[j], roster.klass.title),
-                      ),
-                  ],
-                );
-              }(),
-            ],
+            Expanded(child: SingleChildScrollView(child: rowsList)),
         ],
       ),
     );
@@ -391,8 +496,7 @@ class _BookedCard extends StatelessWidget {
   /// order, since the roster query orders by created_at).
   List<RosterBookingRow> _plusOnesOf(RosterBookingRow primary) {
     return roster.booked
-        .where((r) =>
-            r.isPlusOne && r.parentBookingId == primary.bookingId)
+        .where((r) => r.isPlusOne && r.parentBookingId == primary.bookingId)
         .toList();
   }
 
@@ -519,8 +623,8 @@ class _StudentRow extends StatelessWidget {
     final passConsumedNote = isLateCancel
         ? 'Cancelled late · pass still consumed'
         : isNoShow
-            ? 'No-show · pass still consumed'
-            : null;
+        ? 'No-show · pass still consumed'
+        : null;
     final nameBlock = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -533,8 +637,7 @@ class _StudentRow extends StatelessWidget {
                   fontSize: 13.5,
                   fontWeight: FontWeight.w700,
                   color: isLateCancel ? y.muted : y.text,
-                  decoration:
-                      isLateCancel ? TextDecoration.lineThrough : null,
+                  decoration: isLateCancel ? TextDecoration.lineThrough : null,
                   decorationColor: y.muted,
                 ),
                 overflow: TextOverflow.ellipsis,
@@ -596,11 +699,7 @@ class _StudentRow extends StatelessWidget {
         : Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _AttendanceToggle(
-                status: row.status,
-                busy: busy,
-                onMark: onMark,
-              ),
+              _AttendanceToggle(status: row.status, busy: busy, onMark: onMark),
               const SizedBox(width: 6),
               _RowRemoveButton(busy: busy, onTap: onRemove),
             ],
@@ -608,9 +707,7 @@ class _StudentRow extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 11),
       decoration: BoxDecoration(
-        border: isLast
-            ? null
-            : Border(bottom: BorderSide(color: y.border)),
+        border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
       ),
       child: isNarrow
           // On mobile, attendance toggle moves to its own row below the
@@ -674,8 +771,7 @@ class _PlusOneSubRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final friend =
-        row.plusOneName.isEmpty ? 'Unnamed guest' : row.plusOneName;
+    final friend = row.plusOneName.isEmpty ? 'Unnamed guest' : row.plusOneName;
     final nameBlock = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -710,11 +806,7 @@ class _PlusOneSubRow extends StatelessWidget {
     final toggle = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _AttendanceToggle(
-          status: row.status,
-          busy: busy,
-          onMark: onMark,
-        ),
+        _AttendanceToggle(status: row.status, busy: busy, onMark: onMark),
         const SizedBox(width: 6),
         _RowRemoveButton(busy: busy, onTap: onRemove),
       ],
@@ -724,9 +816,7 @@ class _PlusOneSubRow extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(34, 9, 0, 9),
       decoration: BoxDecoration(
-        border: isLast
-            ? null
-            : Border(bottom: BorderSide(color: y.border)),
+        border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
       ),
       child: isNarrow
           ? Column(
@@ -734,8 +824,11 @@ class _PlusOneSubRow extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Icon(Icons.subdirectory_arrow_right,
-                        size: 14, color: y.muted),
+                    Icon(
+                      Icons.subdirectory_arrow_right,
+                      size: 14,
+                      color: y.muted,
+                    ),
                     const SizedBox(width: 6),
                     Expanded(child: nameBlock),
                   ],
@@ -746,8 +839,7 @@ class _PlusOneSubRow extends StatelessWidget {
             )
           : Row(
               children: [
-                Icon(Icons.subdirectory_arrow_right,
-                    size: 14, color: y.muted),
+                Icon(Icons.subdirectory_arrow_right, size: 14, color: y.muted),
                 const SizedBox(width: 6),
                 Expanded(child: nameBlock),
                 toggle,
@@ -833,11 +925,7 @@ class _RowRemoveButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(y.radiusChip),
             border: Border.all(color: y.border),
           ),
-          child: Icon(
-            Icons.person_remove_outlined,
-            size: 16,
-            color: y.muted,
-          ),
+          child: Icon(Icons.person_remove_outlined, size: 16, color: y.muted),
         ),
       ),
     );
@@ -885,37 +973,53 @@ class _SegBtn extends StatelessWidget {
 class _WaitlistCard extends StatelessWidget {
   final Roster roster;
   final VoidCallback onPromote;
-  const _WaitlistCard({required this.roster, required this.onPromote});
+  final bool isNarrow;
+  const _WaitlistCard({
+    required this.roster,
+    required this.onPromote,
+    required this.isNarrow,
+  });
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    // Rows built once, then scrolled inside the card on desktop (bounded
+    // Expanded) or rendered inline on mobile (the page ListView scrolls).
+    final Widget rows = roster.waitlist.isEmpty
+        ? Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Text(
+              'Nobody is waiting.',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
+              ),
+            ),
+          )
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < roster.waitlist.length; i++)
+                _WaitlistRow(
+                  row: roster.waitlist[i],
+                  isLast: i == roster.waitlist.length - 1,
+                  isHead: i == 0,
+                  onPromote: onPromote,
+                ),
+            ],
+          );
     return ManagerCard(
+      fill: !isNarrow,
       title: 'Waitlist · ${roster.waitlist.length}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (roster.waitlist.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Text(
-                'Nobody is waiting.',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: y.muted,
-                ),
-              ),
-            )
+          // The note below stays pinned at the card bottom; the rows scroll.
+          if (isNarrow)
+            rows
           else
-            for (var i = 0; i < roster.waitlist.length; i++) ...[
-              _WaitlistRow(
-                row: roster.waitlist[i],
-                isLast: i == roster.waitlist.length - 1,
-                isHead: i == 0,
-                onPromote: onPromote,
-              ),
-            ],
+            Expanded(child: SingleChildScrollView(child: rows)),
           if (roster.waitlist.isNotEmpty) ...[
             const SizedBox(height: 12),
             Container(
@@ -998,6 +1102,83 @@ class _WaitlistRow extends StatelessWidget {
             onTap: isHead ? onPromote : null,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Embeds the class group chat into the desktop roster's right column.
+/// Resolves the conversation lazily via `openClassChat` then hands off to
+/// the standard ChatThreadScreen so the polling / send / edit / member-
+/// sheet behaviour is identical to the full-screen variant. The wrapper
+/// adds a Material card so the embedded Scaffold matches the surrounding
+/// ManagerCards visually.
+class _RosterChatPanel extends ConsumerStatefulWidget {
+  final String classId;
+  const _RosterChatPanel({required this.classId});
+
+  @override
+  ConsumerState<_RosterChatPanel> createState() => _RosterChatPanelState();
+}
+
+class _RosterChatPanelState extends ConsumerState<_RosterChatPanel> {
+  late Future<Conversation> _conv;
+
+  @override
+  void initState() {
+    super.initState();
+    _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RosterChatPanel old) {
+    super.didUpdateWidget(old);
+    // Manager navigated to a different class instance — reload.
+    if (old.classId != widget.classId) {
+      _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final me = ref.watch(bootstrapProvider).asData?.value.me;
+    return Container(
+      decoration: BoxDecoration(
+        color: y.surface,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        border: Border.all(color: y.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: FutureBuilder<Conversation>(
+        future: _conv,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(
+              child: CircularProgressIndicator(strokeWidth: 2),
+            );
+          }
+          if (snap.hasError || me == null) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  snap.hasError
+                      ? "Can't open chat: ${ApiError.fromAny(snap.error!).message}"
+                      : 'Loading…',
+                  style: TextStyle(color: y.muted, fontSize: 13),
+                ),
+              ),
+            );
+          }
+          final conv = snap.data!;
+          return ChatThreadScreen(
+            conversationId: conv.id,
+            initialConversation: conv,
+            me: me,
+            backgroundColor: y.surface,
+          );
+        },
       ),
     );
   }

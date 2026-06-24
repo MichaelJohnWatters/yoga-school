@@ -517,6 +517,18 @@ var auditMatrix = []auditCase{
 			return http.MethodDelete, "/admin/notes/" + noteID, nil
 		},
 	},
+	{
+		// Lazy-create the class group chat. The rig's actor is a manager
+		// and managers are staff in their studio, so eligibility is met
+		// automatically. Re-opening returns the same conversation without
+		// a new audit row — this case only fires the create branch.
+		name:           "class_chat_create",
+		expectedAction: "class_chat_create",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			classID := seedClass(t, r, time.Now().UTC().Add(24*time.Hour))
+			return http.MethodPost, "/classes/" + classID + "/chat", nil
+		},
+	},
 }
 
 // seedStudentNote drops a single note onto a freshly-seeded student
