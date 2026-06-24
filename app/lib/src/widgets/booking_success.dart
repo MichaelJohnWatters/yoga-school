@@ -1,14 +1,16 @@
 // Booking success animation.
 //
-// Plays a Lottie once after a class is booked, then auto-dismisses. One of
-// [_kAssets] is picked at random each booking for variety. Loaded via
-// AssetLottie so any image-based animation resolves its frames from sibling
-// assets (lottie-3.x doesn't decode base64-embedded images) — e.g. yoga.json
-// references PNGs in assets/lottie/yoga_assets/. Vector animations
-// (booking_success.json) have no images and load the same way.
+// Fire-and-forget celebratory Lottie. On a successful booking the sheet
+// closes immediately and this floats the animation on the *root overlay* —
+// above whatever's now on screen, pointer-transparent (the user can keep
+// tapping), removing itself when the animation finishes. Nothing is awaited,
+// so the booking flow never blocks on it.
 //
-// The asset is loaded with a try/catch, so a missing or malformed file falls
-// back to a simple checkmark rather than crashing the booking flow.
+// One of [_kAssets] is picked at random for variety. Loaded via AssetLottie
+// so an image-based animation resolves its frames from sibling assets
+// (lottie 3.x doesn't decode base64-embedded images) — e.g. yoga.json
+// references PNGs in assets/lottie/yoga_assets/. A missing/unparseable file
+// falls back to a brief checkmark rather than crashing.
 
 import 'dart:async';
 import 'dart:math';
@@ -25,62 +27,70 @@ const _kAssets = <String>[
 
 final _rng = Random();
 
-/// Shows the booking-success overlay and resolves when it has dismissed
-/// (after the animation finishes, or a short beat for the checkmark
-/// fallback). Callers typically `await` this, then close the booking sheet.
-Future<void> showBookingSuccessAnimation(BuildContext context) async {
-  LottieComposition? composition;
-  try {
-    composition = await _load(_kAssets[_rng.nextInt(_kAssets.length)]);
-  } catch (_) {
-    // No animation file added yet (or it failed to parse) → checkmark.
-    composition = null;
-  }
-  if (!context.mounted) return;
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    barrierColor: const Color(0x66000000),
-    builder: (_) => _BookingSuccessDialog(composition: composition),
+/// Plays the booking-success animation as a non-blocking overlay. Grab the
+/// overlay from [context] *before* popping the booking sheet — the entry
+/// lives on the root overlay, so it survives the sheet closing.
+void showBookingSuccessAnimation(BuildContext context) {
+  final overlay = Overlay.of(context, rootOverlay: true);
+  late OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (_) => _BookingSuccessOverlay(onDone: entry.remove),
   );
+  overlay.insert(entry);
 }
 
-/// Loads a Lottie asset, resolving any referenced images from sibling assets.
 Future<LottieComposition> _load(String path) => AssetLottie(path).load();
 
-class _BookingSuccessDialog extends StatefulWidget {
-  final LottieComposition? composition;
-  const _BookingSuccessDialog({this.composition});
+class _BookingSuccessOverlay extends StatefulWidget {
+  final VoidCallback onDone;
+  const _BookingSuccessOverlay({required this.onDone});
 
   @override
-  State<_BookingSuccessDialog> createState() => _BookingSuccessDialogState();
+  State<_BookingSuccessOverlay> createState() => _BookingSuccessOverlayState();
 }
 
-class _BookingSuccessDialogState extends State<_BookingSuccessDialog>
+class _BookingSuccessOverlayState extends State<_BookingSuccessOverlay>
     with SingleTickerProviderStateMixin {
   AnimationController? _controller;
+  LottieComposition? _composition;
+  bool _ready = false;
+  bool _done = false;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    final comp = widget.composition;
-    if (comp != null) {
-      _controller = AnimationController(vsync: this, duration: comp.duration)
-        ..addStatusListener((status) {
-          if (status == AnimationStatus.completed) _dismiss();
-        })
-        ..forward();
-      // Safety net in case the controller never reports completion.
-      _timer = Timer(comp.duration + const Duration(seconds: 1), _dismiss);
-    } else {
-      // Checkmark fallback — show briefly, then close.
-      _timer = Timer(const Duration(milliseconds: 900), _dismiss);
-    }
+    _start();
   }
 
-  void _dismiss() {
-    if (mounted) Navigator.of(context).maybePop();
+  Future<void> _start() async {
+    LottieComposition? comp;
+    try {
+      comp = await _load(_kAssets[_rng.nextInt(_kAssets.length)]);
+    } catch (_) {
+      comp = null;
+    }
+    if (!mounted) return;
+    if (comp != null) {
+      _composition = comp;
+      _controller = AnimationController(vsync: this, duration: comp.duration)
+        ..addStatusListener((status) {
+          if (status == AnimationStatus.completed) _finish();
+        })
+        ..forward();
+      // Safety net in case completion is never reported.
+      _timer = Timer(comp.duration + const Duration(seconds: 1), _finish);
+    } else {
+      // Checkmark fallback — show briefly, then remove.
+      _timer = Timer(const Duration(milliseconds: 900), _finish);
+    }
+    setState(() => _ready = true);
+  }
+
+  void _finish() {
+    if (_done) return;
+    _done = true;
+    widget.onDone();
   }
 
   @override
@@ -93,19 +103,21 @@ class _BookingSuccessDialogState extends State<_BookingSuccessDialog>
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final comp = widget.composition;
-    return Center(
-      child: SizedBox(
-        width: 220,
-        height: 220,
-        child: comp != null
-            ? Lottie(
-                composition: comp,
-                controller: _controller,
-                fit: BoxFit.contain,
-              )
-            : Icon(Icons.check_circle, size: 96, color: y.primary),
-      ),
+    Widget child;
+    if (!_ready) {
+      child = const SizedBox.shrink();
+    } else if (_composition != null) {
+      child = Lottie(
+        composition: _composition,
+        controller: _controller,
+        fit: BoxFit.contain,
+      );
+    } else {
+      child = Icon(Icons.check_circle, size: 96, color: y.primary);
+    }
+    // Pointer-transparent so the celebration never blocks interaction.
+    return IgnorePointer(
+      child: Center(child: SizedBox(width: 220, height: 220, child: child)),
     );
   }
 }
