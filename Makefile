@@ -19,7 +19,7 @@ NODE_BIN := $(HOME)/.nvm/versions/node/v20.20.1/bin
 
 go:
 	rm -f server/dev.db
-	cd server && go run ./cmd/server -migrate -seed
+	cd server && go run ./cmd/server -migrate -bootstrap-api
 	./scripts/seed-firebase-users.sh
 	cd server && FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 \
 		FIREBASE_PROJECT_ID=yoga-school-dev \
@@ -36,7 +36,7 @@ seed-firebase:
 
 reset:
 	rm -f server/dev.db
-	cd server && go run ./cmd/server -migrate -seed
+	cd server && go run ./cmd/server -migrate -bootstrap-api
 
 analyze:
 	cd app && flutter analyze

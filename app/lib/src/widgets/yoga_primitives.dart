@@ -432,6 +432,13 @@ class YButton extends StatelessWidget {
           ? null
           : BoxDecoration(borderRadius: radius, border: border),
       constraints: const BoxConstraints(minHeight: 32),
+      // Center the label. With a bounded width (full-width buttons in a
+      // stretched Column / Expanded) the Container expands to fill and the
+      // text sits centered; under unbounded width (an inline button in a
+      // Row) it shrink-wraps to the label as before. Without this the
+      // Container hugged the text at the Material's left edge, so a
+      // stretched button looked left-aligned despite textAlign.center.
+      alignment: Alignment.center,
       child: Text(
         label,
         textAlign: TextAlign.center,

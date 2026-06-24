@@ -150,14 +150,20 @@ exit 0
         labels=['yoga-school'],
     )
 
-    # Full reset: ensure local TLS cert exists, disable server (releases
-    # its DB locks), wipe DB, run migrate + DB seed, seed Firebase users,
-    # then re-enable server + app. The TLS step is idempotent — the cert
-    # only regenerates when it's missing — so a fresh checkout becomes
-    # one click in the Tilt UI to land in a runnable state.
-    local_resource(
-        'yoga-bootstrap',
-        cmd=' && '.join([
+    # Full reset, one click in the Tilt UI: ensure local TLS cert exists,
+    # disable server (releases its DB locks), wipe DB, run migrate + seed,
+    # seed Firebase users, then re-enable server + app. The TLS step is
+    # idempotent — the cert only regenerates when missing — so a fresh
+    # checkout becomes one button to land in a runnable state.
+    #
+    # The chain is parameterised by the seed step. Two flavours share it,
+    # differing only in how the DB is populated:
+    #   yoga-bootstrap      → `-seed`          (fast all-SQL fixture seed)
+    #   yoga-bootstrap-api  → `-bootstrap-api` (audited, method-driven seed —
+    #                         real audit_log rows, richer/realistic data, and a
+    #                         skipped-steps summary printed at the end)
+    def _bootstrap_cmd(seed_flags):
+        return ' && '.join([
             # cd once at the top of the chain — every following step
             # then uses relative paths (`rm`, `scripts/...`, `server/`).
             # The previous shape re-`cd`'d before `rm`, which became a
@@ -176,7 +182,7 @@ exit 0
             # is also "one-button proxy refresh".
             'tilt disable yoga-server yoga-app yoga-caddy',
             'rm -f server/dev.db server/dev.db-wal server/dev.db-shm',
-            '(cd server && go run ./cmd/server -migrate -seed)',
+            '(cd server && go run ./cmd/server -migrate ' + seed_flags + ')',
             './scripts/seed-firebase-users.sh',
             'tilt enable yoga-server',
             'tilt enable yoga-app',
@@ -187,7 +193,20 @@ exit 0
             # resource. Retry the trigger for a few seconds so the bootstrap
             # doesn't fail on the race.
             'for i in 1 2 3 4 5 6 7 8 9 10; do tilt trigger yoga-app 2>/dev/null && break; sleep 0.5; done',
-        ]),
+        ])
+
+    local_resource(
+        'yoga-bootstrap',
+        cmd=_bootstrap_cmd('-seed'),
+        resource_deps=['yoga-firebase'],
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+    )
+
+    local_resource(
+        'yoga-bootstrap-api',
+        cmd=_bootstrap_cmd('-bootstrap-api'),
         resource_deps=['yoga-firebase'],
         labels=['yoga-school'],
         trigger_mode=TRIGGER_MODE_MANUAL,

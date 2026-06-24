@@ -11,6 +11,7 @@ import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
+import '../chat_screen.dart';
 import 'class_dialogs.dart';
 import 'manager_shell.dart';
 import 'scan_checkin_sheet.dart';
@@ -124,12 +125,24 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                           if (any == true && mounted) _reload();
                         },
                       ),
+                      // Mobile-only entry to the chat — desktop embeds
+                      // the thread inline (see right column below) so
+                      // the button would be redundant there.
+                      if (isNarrow)
+                        YButton(
+                          label: 'Group chat',
+                          small: true,
+                          variant: YButtonVariant.outline,
+                          onTap: () => _openClassChat(r.klass.id),
+                        ),
                     ],
                   ),
                   Expanded(
                     child: isNarrow
                         // Stack the cards on mobile and scroll the page so
                         // long rosters + the waitlist both stay reachable.
+                        // Mobile keeps the group-chat header button — the
+                        // viewport's too tight to embed the thread inline.
                         ? ListView(
                             padding: EdgeInsets.zero,
                             children: [
@@ -138,12 +151,31 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
                               waitlist,
                             ],
                           )
+                        // Desktop: booked on the left, then a vertical
+                        // split on the right with waitlist on top and the
+                        // group chat embedded below it — no extra
+                        // navigation for the manager.
                         : Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               Expanded(flex: 7, child: booked),
                               const SizedBox(width: 16),
-                              Expanded(flex: 4, child: waitlist),
+                              Expanded(
+                                flex: 5,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(child: waitlist),
+                                    const SizedBox(height: 12),
+                                    Expanded(
+                                      child: _RosterChatPanel(
+                                        classId: r.klass.id,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ],
                           ),
                   ),
@@ -226,6 +258,27 @@ class _AdminRosterScreenState extends ConsumerState<AdminRosterScreen> {
     if (removed == true && mounted) {
       _toast('Booking removed');
       _reload();
+    }
+  }
+
+  Future<void> _openClassChat(String classId) async {
+    try {
+      final conv = await ref.read(apiClientProvider).openClassChat(classId);
+      final me = ref.read(bootstrapProvider).asData?.value.me;
+      if (!mounted || me == null) return;
+      ref.invalidate(conversationsProvider);
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatThreadScreen(
+            conversationId: conv.id,
+            initialConversation: conv,
+            me: me,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _toast("Couldn't open chat: ${ApiError.fromAny(e).message}");
     }
   }
 
@@ -998,6 +1051,83 @@ class _WaitlistRow extends StatelessWidget {
             onTap: isHead ? onPromote : null,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Embeds the class group chat into the desktop roster's right column.
+/// Resolves the conversation lazily via `openClassChat` then hands off to
+/// the standard ChatThreadScreen so the polling / send / edit / member-
+/// sheet behaviour is identical to the full-screen variant. The wrapper
+/// adds a Material card so the embedded Scaffold matches the surrounding
+/// ManagerCards visually.
+class _RosterChatPanel extends ConsumerStatefulWidget {
+  final String classId;
+  const _RosterChatPanel({required this.classId});
+
+  @override
+  ConsumerState<_RosterChatPanel> createState() => _RosterChatPanelState();
+}
+
+class _RosterChatPanelState extends ConsumerState<_RosterChatPanel> {
+  late Future<Conversation> _conv;
+
+  @override
+  void initState() {
+    super.initState();
+    _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RosterChatPanel old) {
+    super.didUpdateWidget(old);
+    // Manager navigated to a different class instance — reload.
+    if (old.classId != widget.classId) {
+      _conv = ref.read(apiClientProvider).openClassChat(widget.classId);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final me = ref.watch(bootstrapProvider).asData?.value.me;
+    return Container(
+      decoration: BoxDecoration(
+        color: y.surface,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        border: Border.all(color: y.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: FutureBuilder<Conversation>(
+        future: _conv,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(
+              child: CircularProgressIndicator(strokeWidth: 2),
+            );
+          }
+          if (snap.hasError || me == null) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  snap.hasError
+                      ? "Can't open chat: ${ApiError.fromAny(snap.error!).message}"
+                      : 'Loading…',
+                  style: TextStyle(color: y.muted, fontSize: 13),
+                ),
+              ),
+            );
+          }
+          final conv = snap.data!;
+          return ChatThreadScreen(
+            conversationId: conv.id,
+            initialConversation: conv,
+            me: me,
+            backgroundColor: y.surface,
+          );
+        },
       ),
     );
   }

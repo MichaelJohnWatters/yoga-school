@@ -15,8 +15,7 @@ import 'manager_shell.dart';
 // Session-scoped — dashboard is the manager's landing tab. Spinner-on-
 // every-visit reads as "the app is reloading" even when nothing
 // changed. Caching + silent refresh matches user expectation.
-final adminDashboardProvider =
-    FutureProvider<AdminDashboard>((ref) async {
+final adminDashboardProvider = FutureProvider<AdminDashboard>((ref) async {
   return ref.watch(apiClientProvider).adminDashboard();
 });
 
@@ -36,28 +35,32 @@ class AdminDashboardScreen extends ConsumerWidget {
       surface: PollingSurface.dashboard,
       onPoll: () => ref.invalidate(adminDashboardProvider),
       child: LayoutBuilder(
-      builder: (context, constraints) {
-        final isNarrow = constraints.maxWidth < _kNarrow;
-        final padH = isNarrow ? 14.0 : 30.0;
-        final padV = isNarrow ? 18.0 : 26.0;
-        return Padding(
-          padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
-          child: data.when(
-            data: (d) => _DashboardBody(
-              data: d,
-              me: me,
-              onOpenRoster: onOpenRoster,
-              isNarrow: isNarrow,
+        builder: (context, constraints) {
+          final isNarrow = constraints.maxWidth < _kNarrow;
+          final padH = isNarrow ? 14.0 : 30.0;
+          final padV = isNarrow ? 18.0 : 26.0;
+          return Padding(
+            padding: EdgeInsets.fromLTRB(padH, padV, padH, padV),
+            child: data.when(
+              data: (d) => _DashboardBody(
+                data: d,
+                me: me,
+                onOpenRoster: onOpenRoster,
+                isNarrow: isNarrow,
+              ),
+              loading: () => const Center(
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              error: (e, _) => _ErrorView(
+                error: e,
+                onRetry: () {
+                  ref.invalidate(adminDashboardProvider);
+                },
+              ),
             ),
-            loading: () =>
-                const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-            error: (e, _) => _ErrorView(error: e, onRetry: () {
-              ref.invalidate(adminDashboardProvider);
-            }),
-          ),
-        );
-      },
-    ),
+          );
+        },
+      ),
     );
   }
 }
@@ -83,7 +86,8 @@ class _DashboardBody extends ConsumerWidget {
       children: [
         ManagerPageHeader(
           title: 'Good morning, $firstName',
-          sub: '${_weekdayLong(DateTime.now())} · '
+          sub:
+              '${_weekdayLong(DateTime.now())} · '
               '$classCount class${classCount == 1 ? '' : 'es'} today',
           actions: [
             YButton(
@@ -112,9 +116,29 @@ class _DashboardBody extends ConsumerWidget {
   }
 
   static String _weekdayLong(DateTime d) {
-    const dow = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const mon = ['January', 'February', 'March', 'April', 'May', 'June',
-                  'July', 'August', 'September', 'October', 'November', 'December'];
+    const dow = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    const mon = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
     return '${dow[d.weekday - 1]} ${d.day} ${mon[d.month - 1]}';
   }
 }
@@ -180,7 +204,7 @@ class _StatsRow extends StatelessWidget {
         value: rev.fmt(rev.totalMinor),
         sub: rev.discountMinor > 0
             ? '${rev.fmt(rev.cardMinor)} card · ${rev.fmt(rev.cashMinor)} cash\n'
-                '${rev.fmt(rev.discountMinor)} in discounts (gross ${rev.fmt(rev.grossMinor)})'
+                  '${rev.fmt(rev.discountMinor)} in discounts (gross ${rev.fmt(rev.grossMinor)})'
             : '${rev.fmt(rev.cardMinor)} card · ${rev.fmt(rev.cashMinor)} cash',
       ),
       ManagerStat(
@@ -287,14 +311,11 @@ class _MobileClassRow extends StatelessWidget {
     final timeLabel =
         '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
     return InkWell(
-      onTap:
-          onOpenRoster == null ? null : () => onOpenRoster!(row.id),
+      onTap: onOpenRoster == null ? null : () => onOpenRoster!(row.id),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
-          border: isLast
-              ? null
-              : Border(bottom: BorderSide(color: y.border)),
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -403,101 +424,107 @@ class _TableRow extends StatelessWidget {
   final ClassRow row;
   final bool isLast;
   final void Function(String classId)? onOpenRoster;
-  const _TableRow({
-    required this.row,
-    required this.isLast,
-    this.onOpenRoster,
-  });
+  const _TableRow({required this.row, required this.isLast, this.onOpenRoster});
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final pct = row.capacity == 0 ? 0 : (row.bookedCount * 100 / row.capacity).round();
+    final pct = row.capacity == 0
+        ? 0
+        : (row.bookedCount * 100 / row.capacity).round();
     final local = row.startsAt.toLocal();
-    final timeLabel = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-      decoration: BoxDecoration(
-        border: isLast
-            ? null
-            : Border(bottom: BorderSide(color: y.border)),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 64,
-            child: Text(
-              timeLabel,
-              style: TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w800,
-                color: y.text,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 14,
-            child: Text(
-              row.title,
-              style: TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w700,
-                color: y.text,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 10,
-            child: Row(
-              children: [
-                YAvatar(name: row.instructorName, photoUrl: row.instructorPhotoUrl, size: 22),
-                const SizedBox(width: 7),
-                Flexible(
-                  child: Text(
-                    row.instructorName,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: y.muted,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 16,
-            child: ManagerMeter(
-              percent: pct,
-              label: '${row.bookedCount} / ${row.capacity}',
-            ),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 130,
-            child: _StatusChip(row: row),
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 70,
-            child: GestureDetector(
-              onTap: onOpenRoster == null ? null : () => onOpenRoster!(row.id),
+    final timeLabel =
+        '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
+    // The whole row opens the roster — matching the mobile layout, where the
+    // entire card is tappable. The trailing "Roster" cell is left as a visual
+    // affordance; the InkWell below is what actually handles the tap.
+    return InkWell(
+      onTap: onOpenRoster == null ? null : () => onOpenRoster!(row.id),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 64,
               child: Text(
-                'Roster',
+                timeLabel,
                 style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: y.primary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                  color: y.text,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 14,
+              child: Text(
+                row.title,
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: y.text,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 10,
+              child: Row(
+                children: [
+                  YAvatar(
+                    name: row.instructorName,
+                    photoUrl: row.instructorPhotoUrl,
+                    size: 22,
+                  ),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      row.instructorName,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: y.muted,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 16,
+              child: ManagerMeter(
+                percent: pct,
+                label: '${row.bookedCount} / ${row.capacity}',
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(width: 130, child: _StatusChip(row: row)),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 70,
+              child: Row(
+                children: [
+                  Text(
+                    'Roster',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: y.primary,
+                    ),
+                  ),
+                  Icon(Icons.chevron_right, size: 16, color: y.primary),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

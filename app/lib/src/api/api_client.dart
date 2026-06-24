@@ -181,6 +181,35 @@ class ApiClient {
     }
   }
 
+  /// Add a +1 to a class the caller is already booked on, charged to a
+  /// caller-chosen credit pass ([entitlementId]). Surfaces 409s as
+  /// [BookingConflict] so callers can show the server's reason (no credits,
+  /// unlimited pass, class full, …) — same shape as [createBooking].
+  Future<String> addPlusOne({
+    required String classId,
+    required String entitlementId,
+    required String plusOneName,
+  }) async {
+    try {
+      final r = await _dio.post<Map<String, dynamic>>(
+        '/classes/$classId/plus-one',
+        data: {'entitlement_id': entitlementId, 'plus_one_name': plusOneName},
+      );
+      return r.data!['id'] as String;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        final base = ApiError.fromDio(e);
+        throw BookingConflict(
+          code: base.code,
+          message: base.message,
+          status: base.status,
+          debug: base.debug,
+        );
+      }
+      rethrow;
+    }
+  }
+
   Future<void> cancelBooking(String bookingId) async {
     await _dio.delete<void>('/bookings/$bookingId');
   }
@@ -352,6 +381,16 @@ class ApiClient {
     await _dio.post<Map<String, dynamic>>('/me/notifications/read-all');
   }
 
+  /// Delete a single notification (swipe-to-dismiss).
+  Future<void> deleteNotification(String id) async {
+    await _dio.delete<void>('/me/notifications/$id');
+  }
+
+  /// Delete every already-read notification; unread rows are kept.
+  Future<void> clearReadNotifications() async {
+    await _dio.post<Map<String, dynamic>>('/me/notifications/clear-read');
+  }
+
   // ---- chat ----
 
   /// Every conversation the caller belongs to, newest-activity first, each
@@ -406,6 +445,16 @@ class ApiClient {
       '/conversations',
       data: {'kind': 'dm', 'user_id': userId},
     );
+    return Conversation.fromJson(r.data!);
+  }
+
+  /// Open (or lazy-create) the group chat for a class. Eligible callers are
+  /// anyone booked or waitlisted on the class (or its recurrence series), the
+  /// class's instructor, and any staff in the studio. For a class with a
+  /// recurrence rule the same chat is returned for every instance — the
+  /// regulars share one room rather than one room per Tuesday.
+  Future<Conversation> openClassChat(String classId) async {
+    final r = await _dio.post<Map<String, dynamic>>('/classes/$classId/chat');
     return Conversation.fromJson(r.data!);
   }
 
@@ -724,10 +773,7 @@ class ApiClient {
   Future<String> adminCreateRoom(String name, {String? color}) async {
     final r = await _dio.post<Map<String, dynamic>>(
       '/admin/rooms',
-      data: {
-        'name': name,
-        if (color != null) 'color': color,
-      },
+      data: {'name': name, if (color != null) 'color': color},
     );
     return r.data!['id'] as String;
   }
@@ -737,11 +783,7 @@ class ApiClient {
   /// pass `color: ''` — distinct from omitting the field, which would
   /// preserve the current value. Use [adminUpdateRoom] now over the
   /// older `adminRenameRoom` shorthand.
-  Future<void> adminUpdateRoom(
-    String id, {
-    String? name,
-    String? color,
-  }) async {
+  Future<void> adminUpdateRoom(String id, {String? name, String? color}) async {
     final body = <String, dynamic>{};
     if (name != null) body['name'] = name;
     if (color != null) body['color'] = color;
@@ -843,17 +885,25 @@ class ApiClient {
     return UndoTemplateResult.fromJson(r.data!);
   }
 
-  Future<List<AuditEntry>> adminAudit({String? action}) async {
-    final r = await _dio.get<List<dynamic>>(
+  /// One keyset page of the activity log. [cursor] is the previous page's
+  /// `nextCursor` (null for the first page); [search] is a server-side
+  /// free-text match over actor name / action / detail.
+  Future<AuditPage> adminAudit({
+    String? action,
+    String? search,
+    String? cursor,
+    int limit = 50,
+  }) async {
+    final r = await _dio.get<Map<String, dynamic>>(
       '/admin/audit',
-      queryParameters: action == null || action == 'all'
-          ? null
-          : {'action': action},
+      queryParameters: {
+        if (action != null && action != 'all') 'action': action,
+        if (search != null && search.trim().isNotEmpty) 'q': search.trim(),
+        if (cursor != null) 'cursor': cursor,
+        'limit': limit,
+      },
     );
-    return r.data!
-        .cast<Map<String, dynamic>>()
-        .map(AuditEntry.fromJson)
-        .toList();
+    return AuditPage.fromJson(r.data!);
   }
 
   Future<AdminReports> adminReports() async {
@@ -1002,9 +1052,7 @@ class ApiClient {
   /// server-side (returns `not_message_sender` for someone else's note).
 
   Future<List<StudentNote>> adminListStudentNotes(String studentId) async {
-    final r = await _dio.get<List<dynamic>>(
-      '/admin/students/$studentId/notes',
-    );
+    final r = await _dio.get<List<dynamic>>('/admin/students/$studentId/notes');
     return r.data!
         .cast<Map<String, dynamic>>()
         .map(StudentNote.fromJson)

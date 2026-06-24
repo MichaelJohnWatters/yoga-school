@@ -22,7 +22,10 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "dev.db", "sqlite database path")
 	migrate := flag.Bool("migrate", false, "apply schema.sql then exit")
-	seed := flag.Bool("seed", false, "apply seed.sql after migrate")
+	seed := flag.Bool("seed", false, "apply the all-SQL dev seed after migrate")
+	bootstrapAPI := flag.Bool("bootstrap-api", false,
+		"seed a minimal bootstrap then build the rest through the real audited "+
+			"store methods (populates audit_log); applied after migrate")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -43,6 +46,12 @@ func main() {
 				log.Fatalf("seed: %v", err)
 			}
 			log.Printf("applied seed")
+		}
+		if *bootstrapAPI {
+			if err := st.SeedDevAPI(ctx); err != nil {
+				log.Fatalf("bootstrap-api: %v", err)
+			}
+			log.Printf("applied bootstrap-api seed")
 		}
 		return
 	}
