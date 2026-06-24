@@ -75,6 +75,7 @@ flutter:
   assets:
     - assets/splash/
     - assets/lottie/
+    - assets/lottie/yoga_assets/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
