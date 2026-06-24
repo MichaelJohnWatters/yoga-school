@@ -1404,6 +1404,34 @@ class ClassType {
   );
 }
 
+/// One image in the studio's media library (manager uploads).
+class MediaItem {
+  final String id;
+  final String url;
+  final String mime;
+  final int sizeBytes;
+  final String filename;
+  final String createdAt;
+
+  MediaItem({
+    required this.id,
+    required this.url,
+    required this.mime,
+    required this.sizeBytes,
+    required this.filename,
+    required this.createdAt,
+  });
+
+  factory MediaItem.fromJson(Map<String, dynamic> j) => MediaItem(
+    id: j['id'] as String,
+    url: j['url'] as String,
+    mime: (j['mime'] as String?) ?? '',
+    sizeBytes: (j['size_bytes'] as int?) ?? 0,
+    filename: (j['filename'] as String?) ?? '',
+    createdAt: (j['created_at'] as String?) ?? '',
+  );
+}
+
 class ThemeRow {
   final String id;
   final String name;
@@ -1416,6 +1444,10 @@ class ThemeRow {
   final bool isActiveLight;
   final bool isActiveDark;
 
+  /// Optional splash background for this theme — a network URL or an
+  /// `asset:` reference to a bundled image. Null when no splash is set.
+  final String? splashImageUrl;
+
   ThemeRow({
     required this.id,
     required this.name,
@@ -1425,12 +1457,14 @@ class ThemeRow {
     required this.isActive,
     required this.isActiveLight,
     required this.isActiveDark,
+    this.splashImageUrl,
   });
 
   factory ThemeRow.fromJson(Map<String, dynamic> j) {
     final l =
         (j['is_active_light'] as bool?) ?? (j['is_active'] as bool? ?? false);
     final d = (j['is_active_dark'] as bool?) ?? false;
+    final splash = j['splash_image_url'] as String?;
     return ThemeRow(
       id: j['id'] as String,
       name: j['name'] as String,
@@ -1442,6 +1476,7 @@ class ThemeRow {
       isActive: l,
       isActiveLight: l,
       isActiveDark: d,
+      splashImageUrl: (splash != null && splash.isNotEmpty) ? splash : null,
     );
   }
 
@@ -1454,6 +1489,7 @@ class ThemeRow {
     isActive: isActive,
     isActiveLight: isActiveLight,
     isActiveDark: isActiveDark,
+    splashImageUrl: splashImageUrl,
   );
 }
 

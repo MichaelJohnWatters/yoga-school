@@ -1,7 +1,7 @@
 # Dev convenience targets.
 #
 # To boot the full stack you need two shells:
-#   make firebase   — Firebase Auth emulator (:9099, UI on :4000)
+#   make firebase   — Firebase Auth + Storage emulators (:9099/:9199, UI :4000)
 #   make go         — wipes the DB, seeds the DB + Firebase, runs the API on :8080
 #   make flutter    — Flutter web app on :5173 (a third shell)
 #
@@ -19,24 +19,35 @@ NODE_BIN := $(HOME)/.nvm/versions/node/v20.20.1/bin
 
 go:
 	rm -f server/dev.db
-	cd server && go run ./cmd/server -migrate -bootstrap-api
+	cd server && FIREBASE_PROJECT_ID=yoga-school-dev \
+		FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com \
+		STORAGE_EMULATOR_HOST=localhost:9199 \
+		MEDIA_PUBLIC_URL_BASE=https://localhost:5443 \
+		go run ./cmd/server -migrate -bootstrap-api
 	./scripts/seed-firebase-users.sh
 	cd server && FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 \
 		FIREBASE_PROJECT_ID=yoga-school-dev \
+		FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com \
+		STORAGE_EMULATOR_HOST=localhost:9199 \
+		MEDIA_PUBLIC_URL_BASE=https://localhost:5443 \
 		go run ./cmd/server -addr :8080
 
 flutter:
 	cd app && flutter run -d chrome --web-port 5173
 
 firebase:
-	PATH=$(NODE_BIN):$$PATH firebase emulators:start --only auth --project yoga-school-dev
+	PATH=$(NODE_BIN):$$PATH firebase emulators:start --only auth,storage --project yoga-school-dev
 
 seed-firebase:
 	./scripts/seed-firebase-users.sh
 
 reset:
 	rm -f server/dev.db
-	cd server && go run ./cmd/server -migrate -bootstrap-api
+	cd server && FIREBASE_PROJECT_ID=yoga-school-dev \
+		FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com \
+		STORAGE_EMULATOR_HOST=localhost:9199 \
+		MEDIA_PUBLIC_URL_BASE=https://localhost:5443 \
+		go run ./cmd/server -migrate -bootstrap-api
 
 analyze:
 	cd app && flutter analyze

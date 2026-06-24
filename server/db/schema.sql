@@ -521,6 +521,25 @@ CREATE TABLE IF NOT EXISTS promotions (
 );
 CREATE INDEX IF NOT EXISTS idx_promotions_studio ON promotions(studio_id, created_at);
 
+-- ===== Media library ====================================================
+-- Manager-uploaded images, reusable across the app (splash backgrounds,
+-- logos, promo art, …). The bytes live in Firebase Storage at
+-- `storage_path`; `url` is the public Firebase download URL, persisted so
+-- read paths render the image with a plain Image.network and never touch
+-- the SDK. Studio-scoped; only managers write (gated at the /admin route).
+CREATE TABLE IF NOT EXISTS media (
+  id           TEXT PRIMARY KEY,
+  studio_id    TEXT NOT NULL REFERENCES studios(id),
+  storage_path TEXT NOT NULL,
+  url          TEXT NOT NULL,
+  mime         TEXT NOT NULL,
+  size_bytes   INTEGER NOT NULL,
+  filename     TEXT,
+  created_by   TEXT REFERENCES users(id),
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_media_studio ON media(studio_id, created_at DESC);
+
 -- ===== Audit log (sensitive manager actions) ============================
 
 CREATE TABLE IF NOT EXISTS audit_log (

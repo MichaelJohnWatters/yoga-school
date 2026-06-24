@@ -19,9 +19,9 @@ import '../../widgets/polling.dart';
 import '../../widgets/yoga_primitives.dart';
 import 'class_dialogs.dart' show adminRoomsProvider;
 import 'manager_shell.dart';
+import 'media_picker.dart';
 
-final adminThemesProvider =
-    FutureProvider<List<ThemeRow>>((ref) async {
+final adminThemesProvider = FutureProvider<List<ThemeRow>>((ref) async {
   return ref.watch(apiClientProvider).adminListThemes();
 });
 
@@ -77,28 +77,17 @@ class _AdminSettingsScreenState extends ConsumerState<AdminSettingsScreen> {
               child: _PoliciesCard(studio: widget.studio),
             ),
             const SizedBox(height: 16),
-            const _DebugBoundary(
-              tag: '_StripeCard',
-              child: _StripeCard(),
-            ),
+            const _DebugBoundary(tag: '_StripeCard', child: _StripeCard()),
             const SizedBox(height: 16),
-            const _DebugBoundary(
-              tag: '_RoomsCard',
-              child: _RoomsCard(),
-            ),
+            const _DebugBoundary(tag: '_RoomsCard', child: _RoomsCard()),
             const SizedBox(height: 16),
-            const _DebugBoundary(
-              tag: 'AppearanceCard',
-              child: AppearanceCard(),
-            ),
-            const SizedBox(height: 16),
-            const _DebugBoundary(
-              tag: '_AdvancedCard',
-              child: _AdvancedCard(),
-            ),
+            const _DebugBoundary(tag: '_AdvancedCard', child: _AdvancedCard()),
           ],
         );
-        final right = themes.when(
+        // Right column groups everything cosmetic: the theme list + editor
+        // (where the splash background is picked), then Appearance and the
+        // Images library.
+        final themesCard = themes.when(
           data: (list) => _DebugBoundary(
             tag: '_ThemesColumn',
             child: _ThemesColumn(
@@ -116,6 +105,22 @@ class _AdminSettingsScreenState extends ConsumerState<AdminSettingsScreen> {
           error: (e, _) => ManagerCard(
             child: Text("Can't load themes: ${ApiError.fromAny(e).message}"),
           ),
+        );
+        final right = Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            themesCard,
+            const SizedBox(height: 16),
+            const _DebugBoundary(
+              tag: 'AppearanceCard',
+              child: AppearanceCard(),
+            ),
+            const SizedBox(height: 16),
+            const _DebugBoundary(
+              tag: 'MediaLibrarySection',
+              child: MediaLibrarySection(),
+            ),
+          ],
         );
 
         return Padding(
@@ -189,12 +194,14 @@ class _DebugBoundary extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('$tag crashed:',
-                    style: const TextStyle(
-                      color: Color(0xFFA33B2E),
-                      fontWeight: FontWeight.w800,
-                      fontSize: 12,
-                    )),
+                Text(
+                  '$tag crashed:',
+                  style: const TextStyle(
+                    color: Color(0xFFA33B2E),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12,
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Text(
                   ApiError.fromAny(e).message,
@@ -257,15 +264,14 @@ class _StudioCardState extends ConsumerState<_StudioCard> {
       _saved = null;
     });
     try {
-      await ref.read(apiClientProvider).adminUpdateStudioConfig(
-            welcomeMessage: _welcomeCtrl.text.trim(),
-          );
+      await ref
+          .read(apiClientProvider)
+          .adminUpdateStudioConfig(welcomeMessage: _welcomeCtrl.text.trim());
       ref.invalidate(bootstrapProvider);
       if (mounted) setState(() => _saved = 'Saved');
     } catch (e) {
       if (mounted) {
-        setState(() =>
-            _saved = 'Save failed: ${ApiError.fromAny(e).message}');
+        setState(() => _saved = 'Save failed: ${ApiError.fromAny(e).message}');
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -461,7 +467,9 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      await ref.read(apiClientProvider).adminUpdateStudioConfig(
+      await ref
+          .read(apiClientProvider)
+          .adminUpdateStudioConfig(
             freeCancelCutoffHours: _cutoffHours,
             allowStudentPlusOne: _plusOne,
             buyLayout: _buyLayout,
@@ -470,14 +478,16 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
       // Re-fetch studio config so the rest of the UI picks up the change.
       ref.invalidate(bootstrapProvider);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Policies saved.')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Policies saved.')));
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: ${ApiError.fromAny(e).message}')),
+          SnackBar(
+            content: Text('Save failed: ${ApiError.fromAny(e).message}'),
+          ),
         );
       }
     } finally {
@@ -519,9 +529,7 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
                     child: TextField(
                       controller: _cutoffCtrl,
                       keyboardType: TextInputType.number,
-                      inputFormatters: [
-                        FilteringTextInputFormatter.digitsOnly,
-                      ],
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       onChanged: (v) {
                         final n = int.tryParse(v);
                         if (n != null) setState(() => _cutoffHours = n);
@@ -679,10 +687,7 @@ class _TimezoneDropdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final y = context.yoga;
     final inList = _common.contains(value);
-    final entries = [
-      if (!inList && value.isNotEmpty) value,
-      ..._common,
-    ];
+    final entries = [if (!inList && value.isNotEmpty) value, ..._common];
     return SizedBox(
       width: 280,
       child: Container(
@@ -862,63 +867,63 @@ class _LayoutMini extends StatelessWidget {
         // I keep getting bitten here when I recount — explicit budget:
         //   20 + 3 + 8 + 3 + 8 + 3 + 8 = 53 ≤ 58.
         'grouped' => Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Hero / membership block.
-              Container(
-                height: 20,
-                decoration: BoxDecoration(
-                  color: block,
-                  borderRadius: BorderRadius.circular(3),
-                ),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Hero / membership block.
+            Container(
+              height: 20,
+              decoration: BoxDecoration(
+                color: block,
+                borderRadius: BorderRadius.circular(3),
               ),
-              const SizedBox(height: 3),
-              // Three pack rows underneath.
-              _PreviewBar(color: soft, height: 8),
-              const SizedBox(height: 3),
-              _PreviewBar(color: soft, height: 8),
-              const SizedBox(height: 3),
-              _PreviewBar(color: soft, height: 8),
-            ],
-          ),
+            ),
+            const SizedBox(height: 3),
+            // Three pack rows underneath.
+            _PreviewBar(color: soft, height: 8),
+            const SizedBox(height: 3),
+            _PreviewBar(color: soft, height: 8),
+            const SizedBox(height: 3),
+            _PreviewBar(color: soft, height: 8),
+          ],
+        ),
         'grid' => Column(
-            children: [
-              SizedBox(
-                height: 24,
-                child: Row(
-                  children: [
-                    Expanded(child: _PreviewBox(color: block)),
-                    const SizedBox(width: 4),
-                    Expanded(child: _PreviewBox(color: block)),
-                  ],
-                ),
+          children: [
+            SizedBox(
+              height: 24,
+              child: Row(
+                children: [
+                  Expanded(child: _PreviewBox(color: block)),
+                  const SizedBox(width: 4),
+                  Expanded(child: _PreviewBox(color: block)),
+                ],
               ),
-              const SizedBox(height: 4),
-              SizedBox(
-                height: 24,
-                child: Row(
-                  children: [
-                    Expanded(child: _PreviewBox(color: soft)),
-                    const SizedBox(width: 4),
-                    Expanded(child: _PreviewBox(color: soft)),
-                  ],
-                ),
+            ),
+            const SizedBox(height: 4),
+            SizedBox(
+              height: 24,
+              child: Row(
+                children: [
+                  Expanded(child: _PreviewBox(color: soft)),
+                  const SizedBox(width: 4),
+                  Expanded(child: _PreviewBox(color: soft)),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
+        ),
         'list' => Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _PreviewBar(color: soft, height: 11),
-              const SizedBox(height: 4),
-              _PreviewBar(color: soft, height: 11),
-              const SizedBox(height: 4),
-              _PreviewBar(color: soft, height: 11),
-              const SizedBox(height: 4),
-              _PreviewBar(color: soft, height: 11),
-            ],
-          ),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _PreviewBar(color: soft, height: 11),
+            const SizedBox(height: 4),
+            _PreviewBar(color: soft, height: 11),
+            const SizedBox(height: 4),
+            _PreviewBar(color: soft, height: 11),
+            const SizedBox(height: 4),
+            _PreviewBar(color: soft, height: 11),
+          ],
+        ),
         _ => const SizedBox.shrink(),
       },
     );
@@ -985,9 +990,11 @@ class _ThemesColumn extends ConsumerWidget {
           title: 'Themes',
           action: '+ New theme',
           onAction: () {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('New custom theme — not yet wired in.'),
-            ));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('New custom theme — not yet wired in.'),
+              ),
+            );
           },
           child: Column(
             children: [
@@ -1012,7 +1019,11 @@ class _ThemesColumn extends ConsumerWidget {
                     } catch (e) {
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Activate failed: ${ApiError.fromAny(e).message}')),
+                          SnackBar(
+                            content: Text(
+                              'Activate failed: ${ApiError.fromAny(e).message}',
+                            ),
+                          ),
                         );
                       }
                     }
@@ -1024,10 +1035,7 @@ class _ThemesColumn extends ConsumerWidget {
         ),
         if (editing != null) ...[
           const SizedBox(height: 12),
-          _ThemeEditorPanel(
-            theme: editing,
-            onClose: () => onPickEdit(null),
-          ),
+          _ThemeEditorPanel(theme: editing, onClose: () => onPickEdit(null)),
         ],
       ],
     );
@@ -1052,107 +1060,112 @@ class _ThemeListRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final y = context.yoga;
     final t = theme.tokens;
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      decoration: BoxDecoration(
-        border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
-      ),
-      child: Row(
-        children: [
-          _SwatchTrio(
-            primary: _parseHex(t['primary']),
-            accent: _parseHex(t['accent']),
-            surface: _parseHex(t['surface']),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  theme.name,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: y.text,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  theme.isPreset ? 'Preset · ${theme.mode}' : 'Custom · ${theme.mode}',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
-                    color: y.muted,
-                  ),
-                ),
-              ],
+    // Whole row opens the editor (colours + splash background). The
+    // "Set as light/dark" link keeps its own tap so activating doesn't
+    // also open the editor.
+    return InkWell(
+      onTap: onEdit,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
+        ),
+        child: Row(
+          children: [
+            _SwatchTrio(
+              primary: _parseHex(t['primary']),
+              accent: _parseHex(t['accent']),
+              surface: _parseHex(t['surface']),
             ),
-          ),
-          if (_passesAA(theme)) ...[
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: y.surface2,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.check, size: 11, color: y.muted),
-                  const SizedBox(width: 3),
                   Text(
-                    'Contrast AA',
+                    theme.name,
                     style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: y.text,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    theme.isPreset
+                        ? 'Preset · ${theme.mode}'
+                        : 'Custom · ${theme.mode}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
                       color: y.muted,
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 12),
-          ],
-          // Slot indicator + activate affordance. A theme can be the
-          // active light slot, the active dark slot, both (theoretically —
-          // gated on mode so in practice one), or neither. When it's
-          // active in its own slot, show an ACTIVE chip; otherwise expose
-          // a "Set as light" / "Set as dark" link styled by mode.
-          if (theme.isActiveLight)
-            const YChip(
-              kind: YChipKind.booked,
-              label: 'Active · light',
-              leadingCheck: true,
-            )
-          else if (theme.isActiveDark)
-            const YChip(
-              kind: YChipKind.booked,
-              label: 'Active · dark',
-              leadingCheck: true,
-            )
-          else
-            GestureDetector(
-              onTap: onActivate,
-              child: Text(
-                theme.mode == 'dark' ? 'Set as dark' : 'Set as light',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: y.primary,
+            if (_passesAA(theme)) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: y.surface2,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check, size: 11, color: y.muted),
+                    const SizedBox(width: 3),
+                    Text(
+                      'Contrast AA',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-          const SizedBox(width: 14),
-          GestureDetector(
-            onTap: onEdit,
-            child: Icon(
+              const SizedBox(width: 12),
+            ],
+            // Slot indicator + activate affordance. A theme can be the
+            // active light slot, the active dark slot, both (theoretically —
+            // gated on mode so in practice one), or neither. When it's
+            // active in its own slot, show an ACTIVE chip; otherwise expose
+            // a "Set as light" / "Set as dark" link styled by mode.
+            if (theme.isActiveLight)
+              const YChip(
+                kind: YChipKind.booked,
+                label: 'Active · light',
+                leadingCheck: true,
+              )
+            else if (theme.isActiveDark)
+              const YChip(
+                kind: YChipKind.booked,
+                label: 'Active · dark',
+                leadingCheck: true,
+              )
+            else
+              GestureDetector(
+                onTap: onActivate,
+                child: Text(
+                  theme.mode == 'dark' ? 'Set as dark' : 'Set as light',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: y.primary,
+                  ),
+                ),
+              ),
+            const SizedBox(width: 14),
+            Icon(
               isEditing ? Icons.edit : Icons.edit_outlined,
               size: 17,
               color: isEditing ? y.primary : y.muted,
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1172,14 +1185,14 @@ class _SwatchTrio extends StatelessWidget {
   Widget build(BuildContext context) {
     final y = context.yoga;
     Widget dot(Color c) => Container(
-          width: 18,
-          height: 18,
-          decoration: BoxDecoration(
-            color: c,
-            shape: BoxShape.circle,
-            border: Border.all(color: y.border),
-          ),
-        );
+      width: 18,
+      height: 18,
+      decoration: BoxDecoration(
+        color: c,
+        shape: BoxShape.circle,
+        border: Border.all(color: y.border),
+      ),
+    );
     return SizedBox(
       width: 48,
       height: 18,
@@ -1207,12 +1220,15 @@ class _ThemeEditorPanel extends ConsumerStatefulWidget {
 
 class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
   late Map<String, String> _tokens;
+  // '' = no splash; otherwise an asset: reference or a URL.
+  late String _splash;
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
     _tokens = Map.from(widget.theme.tokens);
+    _splash = widget.theme.splashImageUrl ?? '';
   }
 
   @override
@@ -1220,15 +1236,20 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.theme.id != widget.theme.id) {
       _tokens = Map.from(widget.theme.tokens);
+      _splash = widget.theme.splashImageUrl ?? '';
     }
   }
 
-  bool get _dirty {
+  bool get _tokensDirty {
     for (final k in _tokens.keys) {
       if (_tokens[k] != widget.theme.tokens[k]) return true;
     }
     return false;
   }
+
+  bool get _splashDirty => _splash != (widget.theme.splashImageUrl ?? '');
+
+  bool get _dirty => _tokensDirty || _splashDirty;
 
   Color get _primary => _parseHex(_tokens['primary']);
   Color get _surface => _parseHex(_tokens['surface']);
@@ -1238,7 +1259,10 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
   double get _onPrimaryOnPrimary {
     // Pick black/white using the same rule as `_onColor` in YogaTokens.
     final yogaSemantic = YogaSemanticTokens.fromHexMap(_tokens);
-    final derived = YogaTokens.derive(yogaSemantic, dark: widget.theme.mode == 'dark');
+    final derived = YogaTokens.derive(
+      yogaSemantic,
+      dark: widget.theme.mode == 'dark',
+    );
     return YogaTokens.contrastRatio(derived.onPrimary, _primary);
   }
 
@@ -1247,9 +1271,12 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      await ref.read(apiClientProvider).adminUpdateThemeTokens(
+      await ref
+          .read(apiClientProvider)
+          .adminUpdateTheme(
             themeId: widget.theme.id,
-            tokens: _tokens,
+            tokens: _tokensDirty ? _tokens : null,
+            splashImageUrl: _splashDirty ? _splash : null,
           );
       ref.invalidate(adminThemesProvider);
       // If this theme is in either active slot, the bootstrap's cached
@@ -1259,14 +1286,16 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
         ref.invalidate(bootstrapProvider);
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Theme saved.')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Theme saved.')));
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: ${ApiError.fromAny(e).message}')),
+          SnackBar(
+            content: Text('Save failed: ${ApiError.fromAny(e).message}'),
+          ),
         );
       }
     } finally {
@@ -1330,6 +1359,11 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
             textOnSurface: _textOnSurface,
             onPrimaryOnPrimary: _onPrimaryOnPrimary,
           ),
+          const SizedBox(height: 18),
+          _SplashPicker(
+            value: _splash,
+            onChanged: (next) => setState(() => _splash = next),
+          ),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -1344,6 +1378,203 @@ class _ThemeEditorPanelState extends ConsumerState<_ThemeEditorPanel> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Built-in splash backgrounds a studio can pick without hosting an image.
+/// The value is an `asset:` reference resolved by [studioImageProvider] on
+/// the splash screen; the asset path itself (sans scheme) renders the
+/// thumbnail here. Add more rows as we bundle more photos.
+const _splashPresets = <({String label, String value})>[
+  (label: 'Studio class', value: 'asset:assets/splash/studio_class.webp'),
+];
+
+/// Splash-background chooser for the theme editor: None, the bundled preset
+/// thumbnails, and a custom-URL escape hatch. Emits the chosen value ('' for
+/// none, an `asset:` reference, or a URL) via [onChanged].
+class _SplashPicker extends StatefulWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+  const _SplashPicker({required this.value, required this.onChanged});
+
+  @override
+  State<_SplashPicker> createState() => _SplashPickerState();
+}
+
+class _SplashPickerState extends State<_SplashPicker> {
+  late final TextEditingController _url;
+
+  bool get _isPreset => _splashPresets.any((p) => p.value == widget.value);
+  bool get _isCustomUrl =>
+      widget.value.isNotEmpty &&
+      !_isPreset &&
+      !widget.value.startsWith('asset:');
+
+  @override
+  void initState() {
+    super.initState();
+    _url = TextEditingController(text: _isCustomUrl ? widget.value : '');
+  }
+
+  @override
+  void didUpdateWidget(_SplashPicker old) {
+    super.didUpdateWidget(old);
+    // Keep the URL field in sync when a preset/None tile clears it.
+    if (!_isCustomUrl && _url.text.isNotEmpty) _url.clear();
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    super.dispose();
+  }
+
+  Future<void> _openLibrary() async {
+    final url = await showMediaPicker(context);
+    if (url != null && url.isNotEmpty) widget.onChanged(url);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    Widget tile({
+      required bool selected,
+      required VoidCallback onTap,
+      required Widget preview,
+      required String label,
+    }) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 104,
+              height: 64,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: y.surface,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: selected ? y.primary : y.border,
+                  width: selected ? 2 : 1,
+                ),
+              ),
+              child: preview,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: selected ? y.text : y.muted,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'SPLASH BACKGROUND',
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w700,
+            color: y.muted,
+            letterSpacing: 0.6,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            tile(
+              selected: widget.value.isEmpty,
+              onTap: () => widget.onChanged(''),
+              label: 'None',
+              preview: Center(
+                child: Icon(Icons.block, size: 20, color: y.muted),
+              ),
+            ),
+            for (final p in _splashPresets)
+              tile(
+                selected: widget.value == p.value,
+                onTap: () => widget.onChanged(p.value),
+                label: p.label,
+                preview: Image.asset(
+                  p.value.substring('asset:'.length),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Center(
+                    child: Icon(Icons.image, size: 18, color: y.muted),
+                  ),
+                ),
+              ),
+            // A custom upload/library URL shows as its own selected tile so
+            // the manager sees the chosen image, not just a long URL string.
+            if (_isCustomUrl)
+              tile(
+                selected: true,
+                onTap: _openLibrary,
+                label: 'Selected',
+                preview: Image.network(
+                  widget.value,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Center(
+                    child: Icon(Icons.broken_image, size: 18, color: y.muted),
+                  ),
+                ),
+              ),
+            // Opens the manager media library (upload new + reuse existing).
+            tile(
+              selected: false,
+              onTap: _openLibrary,
+              label: 'Library',
+              preview: Center(
+                child: Icon(
+                  Icons.photo_library_outlined,
+                  size: 20,
+                  color: y.primary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _url,
+          style: TextStyle(fontSize: 12.5, color: y.text),
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: 'Or paste an image URL…',
+            hintStyle: TextStyle(color: y.muted, fontSize: 12.5),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
+            filled: true,
+            fillColor: y.surface,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: y.border),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: y.border),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: y.primary),
+            ),
+          ),
+          onChanged: (v) => widget.onChanged(v.trim()),
+        ),
+      ],
     );
   }
 }
@@ -1619,7 +1850,9 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
   void initState() {
     super.initState();
     _mode = widget.initial.mode;
-    _accountIdCtrl = TextEditingController(text: widget.initial.accountId ?? '');
+    _accountIdCtrl = TextEditingController(
+      text: widget.initial.accountId ?? '',
+    );
     _pubCtrl = TextEditingController(text: widget.initial.publishableKey ?? '');
   }
 
@@ -1751,13 +1984,21 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
         ),
         if (_error != null) ...[
           const SizedBox(height: 10),
-          Text(_error!,
-              style: const TextStyle(color: Color(0xFFA33B2E), fontSize: 12.5)),
+          Text(
+            _error!,
+            style: const TextStyle(color: Color(0xFFA33B2E), fontSize: 12.5),
+          ),
         ],
         if (_info != null) ...[
           const SizedBox(height: 10),
-          Text(_info!,
-              style: TextStyle(color: y.primary, fontSize: 12.5, fontWeight: FontWeight.w700)),
+          Text(
+            _info!,
+            style: TextStyle(
+              color: y.primary,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ],
         const SizedBox(height: 14),
         Align(
@@ -1807,7 +2048,14 @@ class _ModeRadio extends StatelessWidget {
         ),
       );
     }
-    return Row(children: [pill('test', 'TEST'), const SizedBox(width: 6), pill('live', 'LIVE')]);
+
+    return Row(
+      children: [
+        pill('test', 'TEST'),
+        const SizedBox(width: 6),
+        pill('live', 'LIVE'),
+      ],
+    );
   }
 }
 
@@ -1916,7 +2164,10 @@ class _SecretRow extends StatelessWidget {
             GestureDetector(
               onTap: onCancel,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
                 child: Text(
                   'Cancel',
                   style: TextStyle(
@@ -2032,9 +2283,9 @@ class _RoomsBodyState extends ConsumerState<_RoomsBody> {
       ref.invalidate(adminRoomsProvider);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_errorMessage(e))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_errorMessage(e))));
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -2067,8 +2318,7 @@ class _RoomsBodyState extends ConsumerState<_RoomsBody> {
             isLast: i == widget.rooms.length - 1 && !_adding,
           ),
         if (_adding) ...[
-          if (widget.rooms.isNotEmpty)
-            Container(height: 1, color: y.border),
+          if (widget.rooms.isNotEmpty) Container(height: 1, color: y.border),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Row(
@@ -2082,7 +2332,9 @@ class _RoomsBodyState extends ConsumerState<_RoomsBody> {
                       isDense: true,
                       hintText: 'Room name',
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide(color: y.border),
@@ -2247,9 +2499,9 @@ class _RoomRowState extends ConsumerState<_RoomRow> {
     } catch (e) {
       _ctrl.text = widget.room.name;
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_errorMessage(e))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_errorMessage(e))));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -2266,16 +2518,15 @@ class _RoomRowState extends ConsumerState<_RoomRow> {
     try {
       // Empty string is the "clear" signal — distinct from omitting the
       // field, which would leave the colour alone server-side.
-      await ref.read(apiClientProvider).adminUpdateRoom(
-            widget.room.id,
-            color: picked.color ?? '',
-          );
+      await ref
+          .read(apiClientProvider)
+          .adminUpdateRoom(widget.room.id, color: picked.color ?? '');
       ref.invalidate(adminRoomsProvider);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_errorMessage(e))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_errorMessage(e))));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -2307,15 +2558,15 @@ class _RoomRowState extends ConsumerState<_RoomRow> {
       ref.invalidate(adminRoomsProvider);
     } on RoomInUseException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_errorMessage(e))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_errorMessage(e))));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -2389,7 +2640,9 @@ class _RoomRowState extends ConsumerState<_RoomRow> {
                     decoration: InputDecoration(
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 8),
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide(color: y.border),
@@ -2561,13 +2814,13 @@ class _RoomColorPickerDialogState extends State<_RoomColorPickerDialog> {
                 isDense: true,
                 hintText: '#a3b7c1  (press Enter)',
                 contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 8),
+                  horizontal: 10,
+                  vertical: 8,
+                ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
                   borderSide: BorderSide(
-                    color: _customError == null
-                        ? y.border
-                        : Colors.redAccent,
+                    color: _customError == null ? y.border : Colors.redAccent,
                   ),
                 ),
               ),
@@ -2706,8 +2959,7 @@ class _AdvancedCard extends ConsumerWidget {
           const SizedBox(height: 14),
           _GlobalDefaultBlock(
             current: prefs.global,
-            onPick: (s) =>
-                ref.read(pollingPrefsProvider.notifier).setGlobal(s),
+            onPick: (s) => ref.read(pollingPrefsProvider.notifier).setGlobal(s),
           ),
           const SizedBox(height: 18),
           Container(height: 1, color: y.border),
@@ -2780,15 +3032,15 @@ class _GlobalDefaultBlock extends StatelessWidget {
   }
 
   static String _hint(PollingSpeed s) => switch (s) {
-        PollingSpeed.off =>
-          "Off · pages only refresh when you open them or after an action.",
-        PollingSpeed.slow =>
-          "Slow · half the Normal rate. Good on metered connections.",
-        PollingSpeed.normal =>
-          "Normal · the default cadence (dashboard ~45s, schedule ~60s).",
-        PollingSpeed.fast =>
-          "Fast · double the Normal rate. Useful during busy class swaps.",
-      };
+    PollingSpeed.off =>
+      "Off · pages only refresh when you open them or after an action.",
+    PollingSpeed.slow =>
+      "Slow · half the Normal rate. Good on metered connections.",
+    PollingSpeed.normal =>
+      "Normal · the default cadence (dashboard ~45s, schedule ~60s).",
+    PollingSpeed.fast =>
+      "Fast · double the Normal rate. Useful during busy class swaps.",
+  };
 }
 
 /// One row per [PollingSurface]: label + override pills + the resolved
@@ -2911,9 +3163,11 @@ class _SurfaceOverrideRowState extends ConsumerState<_SurfaceOverrideRow> {
                 if (seconds <= 0) {
                   _ctrl.text = (ov.interval.inSeconds).toString();
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text(
-                      'Refresh interval must be at least 1 second.',
-                    )),
+                    const SnackBar(
+                      content: Text(
+                        'Refresh interval must be at least 1 second.',
+                      ),
+                    ),
                   );
                   return;
                 }
@@ -2927,9 +3181,7 @@ class _SurfaceOverrideRowState extends ConsumerState<_SurfaceOverrideRow> {
   }
 
   void _setOverride(PollingOverride? next) {
-    ref
-        .read(pollingPrefsProvider.notifier)
-        .setOverride(widget.surface, next);
+    ref.read(pollingPrefsProvider.notifier).setOverride(widget.surface, next);
   }
 }
 
@@ -3004,10 +3256,7 @@ class _SurfacePillRow extends StatelessWidget {
 class _CustomSecondsField extends StatelessWidget {
   final TextEditingController controller;
   final ValueChanged<int> onCommit;
-  const _CustomSecondsField({
-    required this.controller,
-    required this.onCommit,
-  });
+  const _CustomSecondsField({required this.controller, required this.onCommit});
 
   @override
   Widget build(BuildContext context) {
@@ -3019,7 +3268,9 @@ class _CustomSecondsField extends StatelessWidget {
           child: TextField(
             controller: controller,
             keyboardType: const TextInputType.numberWithOptions(
-                signed: false, decimal: false),
+              signed: false,
+              decimal: false,
+            ),
             inputFormatters: [
               // Digits only — no minus sign, no decimal point. Pairs with
               // the >0 check in the parent's onCommit to enforce the
@@ -3033,8 +3284,10 @@ class _CustomSecondsField extends StatelessWidget {
                 onCommit(int.tryParse(controller.text.trim()) ?? 0),
             decoration: InputDecoration(
               isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 8,
+              ),
               suffixText: 's',
               suffixStyle: TextStyle(
                 fontSize: 12,

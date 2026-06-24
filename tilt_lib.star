@@ -1,7 +1,7 @@
-# Yoga School dev stack — Firebase Auth emulator, Go API, Flutter app.
+# Yoga School dev stack — Firebase Auth + Storage emulators, Go API, Flutter app.
 #
-# Uses default Firebase ports (9099/4000). Server lives under server/, so
-# Go commands chain an extra `cd server` after the root cd.
+# Uses default Firebase ports (auth 9099, storage 9199, UI 4000). Server lives
+# under server/, so Go commands chain an extra `cd server` after the root cd.
 
 def yoga_resources(root='.'):
     cd = 'cd ' + root + ' && '
@@ -11,7 +11,7 @@ def yoga_resources(root='.'):
 
     local_resource(
         'yoga-firebase',
-        serve_cmd=cd + 'PATH=' + node_bin + ':$PATH firebase emulators:start --only auth --project yoga-school-dev',
+        serve_cmd=cd + 'PATH=' + node_bin + ':$PATH firebase emulators:start --only auth,storage --project yoga-school-dev',
         labels=['yoga-school'],
         links=[link('http://localhost:4000', 'Emulator UI')],
         readiness_probe=probe(
@@ -39,7 +39,7 @@ def yoga_resources(root='.'):
 
     local_resource(
         'yoga-server',
-        serve_cmd=server_cd + 'FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIREBASE_PROJECT_ID=yoga-school-dev go run ./cmd/server -addr :8080',
+        serve_cmd=server_cd + 'FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIREBASE_PROJECT_ID=yoga-school-dev FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com STORAGE_EMULATOR_HOST=localhost:9199 MEDIA_PUBLIC_URL_BASE=https://localhost:5443 go run ./cmd/server -addr :8080',
         resource_deps=['yoga-firebase'],
         labels=['yoga-school'],
         links=[link('http://localhost:8080', 'API')],
@@ -182,7 +182,9 @@ exit 0
             # is also "one-button proxy refresh".
             'tilt disable yoga-server yoga-app yoga-caddy',
             'rm -f server/dev.db server/dev.db-wal server/dev.db-shm',
-            '(cd server && go run ./cmd/server -migrate ' + seed_flags + ')',
+            # Storage env lets the bootstrap-api seed populate the media
+            # library through the real upload path (skips cleanly otherwise).
+            '(cd server && FIREBASE_PROJECT_ID=yoga-school-dev FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com STORAGE_EMULATOR_HOST=localhost:9199 MEDIA_PUBLIC_URL_BASE=https://localhost:5443 go run ./cmd/server -migrate ' + seed_flags + ')',
             './scripts/seed-firebase-users.sh',
             'tilt enable yoga-server',
             'tilt enable yoga-app',

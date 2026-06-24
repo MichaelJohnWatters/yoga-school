@@ -672,6 +672,54 @@ class ApiClient {
     await _dio.patch<void>('/admin/themes/$themeId', data: {'tokens': tokens});
   }
 
+  /// Partial theme update. Sends only the fields provided, so a tokens +
+  /// splash edit lands as one PATCH (one audit row). [splashImageUrl] of ''
+  /// clears the splash; a URL or `asset:` reference sets it.
+  Future<void> adminUpdateTheme({
+    required String themeId,
+    Map<String, String>? tokens,
+    String? splashImageUrl,
+  }) async {
+    final data = <String, dynamic>{};
+    if (tokens != null) data['tokens'] = tokens;
+    if (splashImageUrl != null) data['splash_image_url'] = splashImageUrl;
+    if (data.isEmpty) return;
+    await _dio.patch<void>('/admin/themes/$themeId', data: data);
+  }
+
+  // ---- media library (manager-only image uploads) ----
+
+  Future<List<MediaItem>> adminListMedia() async {
+    final r = await _dio.get<List<dynamic>>('/admin/media');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(MediaItem.fromJson)
+        .toList();
+  }
+
+  /// Upload an image to the studio's media library. Bytes go through the Go
+  /// server to Firebase Storage; the returned [MediaItem] carries the public
+  /// download URL to reference anywhere an image is shown.
+  Future<MediaItem> adminUploadMedia({
+    required List<int> bytes,
+    required String filename,
+    required String mime,
+  }) async {
+    final form = FormData.fromMap({
+      'file': MultipartFile.fromBytes(
+        bytes,
+        filename: filename,
+        contentType: DioMediaType.parse(mime),
+      ),
+    });
+    final r = await _dio.post<Map<String, dynamic>>('/admin/media', data: form);
+    return MediaItem.fromJson(r.data!);
+  }
+
+  Future<void> adminDeleteMedia(String id) async {
+    await _dio.delete<void>('/admin/media/$id');
+  }
+
   /// Activate [themeId] into the studio's [slot] (`light` or `dark`). The
   /// server enforces that the theme's own mode matches the slot — passing
   /// a light theme into the dark slot returns `theme_mode_mismatch`.
@@ -1432,6 +1480,13 @@ class Bootstrap {
   final Me me;
   Bootstrap(this.studio, this.me);
 }
+
+/// Public studio config (no auth required) — used before sign-in, e.g. for the
+/// sign-in screen's branded background. Separate from [bootstrapProvider],
+/// which gates on Firebase auth and also fetches the signed-in user.
+final studioConfigProvider = FutureProvider<StudioConfig>((ref) async {
+  return ref.read(apiClientProvider).studioConfig();
+});
 
 final bootstrapProvider = FutureProvider<Bootstrap>((ref) async {
   // Gate on Firebase auth state so we don't hit auth-protected endpoints
