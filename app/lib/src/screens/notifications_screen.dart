@@ -25,8 +25,9 @@ import 'chat_screen.dart';
 // renders cached items immediately and Riverpod's default
 // skipLoadingOnRefresh keeps data on screen during background
 // re-fetches triggered by markRead / invalidate.
-final notificationsProvider =
-    FutureProvider<List<NotificationItem>>((ref) async {
+final notificationsProvider = FutureProvider<List<NotificationItem>>((
+  ref,
+) async {
   return ref.watch(apiClientProvider).notificationsFeed();
 });
 
@@ -39,6 +40,170 @@ final unreadNotificationCountProvider = Provider<int>((ref) {
   final list = feed.asData?.value ?? const <NotificationItem>[];
   return list.where((n) => n.unread).length;
 });
+
+/// Compact notifications panel for the desktop bell popover. Shows the most
+/// recent notifications, "Mark all read", and a "See all" link into the full
+/// [NotificationsScreen]. Reuses [_NotificationCard] and the same tap
+/// behaviour (mark read; jump into a chat thread for chat notifications).
+class NotificationsPopoverPanel extends ConsumerStatefulWidget {
+  /// Called to dismiss the popover (e.g. before navigating away).
+  final VoidCallback onClose;
+  const NotificationsPopoverPanel({super.key, required this.onClose});
+
+  @override
+  ConsumerState<NotificationsPopoverPanel> createState() =>
+      _NotificationsPopoverPanelState();
+}
+
+class _NotificationsPopoverPanelState
+    extends ConsumerState<NotificationsPopoverPanel> {
+  Future<void> _onTap(NotificationItem n) async {
+    if (n.unread) {
+      try {
+        await ref.read(apiClientProvider).markNotificationRead(n.id);
+        ref.invalidate(notificationsProvider);
+      } catch (_) {
+        // Best-effort; the full screen surfaces errors.
+      }
+    }
+    if (!mounted) return;
+    final convId = n.chatConversationId;
+    final me = ref.read(bootstrapProvider).asData?.value.me;
+    widget.onClose();
+    if (convId != null && me != null) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatThreadScreen(conversationId: convId, me: me),
+        ),
+      );
+    }
+  }
+
+  Future<void> _markAll() async {
+    try {
+      await ref.read(apiClientProvider).markAllNotificationsRead();
+      ref.invalidate(notificationsProvider);
+    } catch (_) {}
+  }
+
+  void _seeAll() {
+    widget.onClose();
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const NotificationsScreen()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final feed = ref.watch(notificationsProvider);
+    final list = feed.asData?.value ?? const <NotificationItem>[];
+    final unread = list.where((n) => n.unread).length;
+    return Material(
+      color: y.surface,
+      elevation: 10,
+      borderRadius: BorderRadius.circular(16),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380, maxHeight: 460),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+              child: Row(
+                children: [
+                  Text(
+                    'Notifications',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: y.text,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (unread > 0)
+                    GestureDetector(
+                      onTap: _markAll,
+                      child: Text(
+                        'Mark all read',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: y.primary,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: y.border),
+            Flexible(
+              child: feed.when(
+                data: (items) => items.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 28),
+                        child: Center(
+                          child: Text(
+                            'No notifications.',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: y.muted,
+                            ),
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        itemCount: items.length > 8 ? 8 : items.length,
+                        separatorBuilder: (_, __) =>
+                            Divider(height: 1, color: y.border, indent: 60),
+                        itemBuilder: (_, i) => _NotificationCard(
+                          item: items[i],
+                          onTap: () => _onTap(items[i]),
+                        ),
+                      ),
+                loading: () => const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 28),
+                  child: Center(
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+                error: (e, _) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 28),
+                  child: Center(
+                    child: Text(
+                      "Can't load notifications.",
+                      style: TextStyle(color: y.muted),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Divider(height: 1, color: y.border),
+            InkWell(
+              onTap: _seeAll,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: Text(
+                    'See all notifications',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: y.primary,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class NotificationsScreen extends ConsumerWidget {
   const NotificationsScreen({super.key});
@@ -57,8 +222,10 @@ class NotificationsScreen extends ConsumerWidget {
             data: (items) => _Body(items: items),
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) => Center(
-              child: Text("Can't load feed: ${ApiError.fromAny(e).message}",
-                  style: TextStyle(color: y.muted)),
+              child: Text(
+                "Can't load feed: ${ApiError.fromAny(e).message}",
+                style: TextStyle(color: y.muted),
+              ),
             ),
           ),
         ),
@@ -393,10 +560,7 @@ class _NotificationCard extends StatelessWidget {
             Container(
               width: 34,
               height: 34,
-              decoration: BoxDecoration(
-                color: iconBg,
-                shape: BoxShape.circle,
-              ),
+              decoration: BoxDecoration(color: iconBg, shape: BoxShape.circle),
               alignment: Alignment.center,
               child: Icon(icon, size: 18, color: iconFg),
             ),
@@ -454,11 +618,7 @@ class _NotificationCard extends StatelessWidget {
                   ],
                   if (isWaitlist) ...[
                     const SizedBox(height: 10),
-                    YButton(
-                      label: 'Claim spot',
-                      small: true,
-                      onTap: onTap,
-                    ),
+                    YButton(label: 'Claim spot', small: true, onTap: onTap),
                   ],
                 ],
               ),
@@ -499,8 +659,11 @@ class _EmptyState extends StatelessWidget {
               shape: BoxShape.circle,
             ),
             alignment: Alignment.center,
-            child: Icon(Icons.notifications_none_rounded,
-                size: 26, color: y.muted),
+            child: Icon(
+              Icons.notifications_none_rounded,
+              size: 26,
+              color: y.muted,
+            ),
           ),
           const SizedBox(height: 14),
           Text(

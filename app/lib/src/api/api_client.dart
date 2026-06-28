@@ -36,6 +36,11 @@ class ApiClient {
   /// Keeps the auth interceptor + base URL in scope.
   Dio get raw => _dio;
 
+  /// Scheme+host of the API (e.g. https://localhost:5443). The web app is
+  /// served from the same origin, so native hosted-Checkout flows can point
+  /// their success/cancel URLs at it and reuse the web return handler.
+  String get origin => Uri.parse(_dio.options.baseUrl).origin;
+
   factory ApiClient.create() {
     final dio = Dio(
       BaseOptions(
@@ -276,6 +281,209 @@ class ApiClient {
       }
       rethrow;
     }
+  }
+
+  /// Non-secret Stripe config for the client PaymentSheet.
+  Future<PaymentConfig> paymentConfig() async {
+    final r = await _dio.get<Map<String, dynamic>>('/studio/payment-config');
+    return PaymentConfig.fromJson(r.data!);
+  }
+
+  /// Card-payment path: creates a Stripe PaymentIntent + pending purchase and
+  /// returns the client_secret for the PaymentSheet. Finish with
+  /// [confirmPurchase] once the sheet completes (the webhook backs it up).
+  Future<PendingPurchase> createCardPurchaseIntent({
+    required String productId,
+    String? discountCode,
+  }) async {
+    try {
+      final r = await _dio.post<Map<String, dynamic>>(
+        '/purchases',
+        data: {
+          'product_id': productId,
+          'payment_method': 'card',
+          if (discountCode != null && discountCode.isNotEmpty)
+            'discount_code': discountCode,
+        },
+      );
+      return PendingPurchase.fromJson(r.data!);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data as Map<String, dynamic>?;
+        throw BookingConflict(
+          code: data?['code'] as String? ?? 'conflict',
+          message: data?['error'] as String? ?? 'Purchase refused',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  /// Mints an ephemeral key for the signed-in user's Stripe Customer, used by
+  /// the mobile PaymentSheet to surface their saved cards. [apiVersion] is the
+  /// Stripe API version the flutter_stripe SDK is pinned to — the key must be
+  /// created with it or the SDK rejects it.
+  Future<String> stripeEphemeralKey({required String apiVersion}) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/payments/stripe-ephemeral-key',
+      data: {'stripe_version': apiVersion},
+    );
+    return r.data!['secret'] as String;
+  }
+
+  // ---- saved card management ----
+
+  Future<List<PaymentMethod>> listPaymentMethods() async {
+    final r = await _dio.get<List<dynamic>>('/payments/methods');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(PaymentMethod.fromJson)
+        .toList();
+  }
+
+  Future<void> deletePaymentMethod(String id) async {
+    await _dio.delete<void>('/payments/methods/$id');
+  }
+
+  /// Native "Add card": returns a SetupIntent client secret + the customer id
+  /// for the PaymentSheet (in setup mode).
+  Future<({String clientSecret, String customerId})> createSetupIntent() async {
+    final r = await _dio.post<Map<String, dynamic>>('/payments/setup-intent');
+    return (
+      clientSecret: r.data!['client_secret'] as String,
+      customerId: r.data!['customer_id'] as String,
+    );
+  }
+
+  /// Web "Add card": returns a hosted setup-Checkout URL to redirect to.
+  Future<String> createSetupCheckout({
+    required String successUrl,
+    required String cancelUrl,
+  }) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/payments/setup-checkout',
+      data: {'success_url': successUrl, 'cancel_url': cancelUrl},
+    );
+    return r.data!['url'] as String;
+  }
+
+  /// Web payment path: creates a hosted Stripe Checkout Session and returns
+  /// the URL to redirect the browser to. successUrl/cancelUrl are where Stripe
+  /// returns the user. Fulfilment lands via the checkout.session.completed
+  /// webhook, so the success page just refreshes the wallet.
+  Future<CheckoutResult> createCheckoutSession({
+    required String productId,
+    String? discountCode,
+    required String successUrl,
+    required String cancelUrl,
+  }) async {
+    try {
+      final r = await _dio.post<Map<String, dynamic>>(
+        '/checkout/session',
+        data: {
+          'product_id': productId,
+          if (discountCode != null && discountCode.isNotEmpty)
+            'discount_code': discountCode,
+          'success_url': successUrl,
+          'cancel_url': cancelUrl,
+        },
+      );
+      return CheckoutResult.fromJson(r.data!);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data as Map<String, dynamic>?;
+        throw BookingConflict(
+          code: data?['code'] as String? ?? 'conflict',
+          message: data?['error'] as String? ?? 'Purchase refused',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  /// Starts a membership: creates a hosted Stripe Checkout Session in
+  /// subscription mode and returns the URL to redirect the browser to. The
+  /// invoice.paid webhook grants the rolling pass; the success page just
+  /// refreshes the wallet + subscriptions.
+  Future<SubscriptionCheckoutResult> createCheckoutSubscription({
+    required String productId,
+    required String successUrl,
+    required String cancelUrl,
+  }) async {
+    try {
+      final r = await _dio.post<Map<String, dynamic>>(
+        '/checkout/subscription',
+        data: {
+          'product_id': productId,
+          'success_url': successUrl,
+          'cancel_url': cancelUrl,
+        },
+      );
+      return SubscriptionCheckoutResult.fromJson(r.data!);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data as Map<String, dynamic>?;
+        throw BookingConflict(
+          code: data?['code'] as String? ?? 'conflict',
+          message: data?['error'] as String? ?? 'Membership unavailable',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  /// The signed-in student's memberships (recurring subscriptions).
+  Future<List<Subscription>> mySubscriptions() async {
+    final r = await _dio.get<List<dynamic>>('/me/subscriptions');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(Subscription.fromJson)
+        .toList();
+  }
+
+  /// Schedules an end-of-period cancellation (access continues until the paid
+  /// period ends).
+  Future<void> cancelSubscription(String id) =>
+      _dio.post<void>('/me/subscriptions/$id/cancel');
+
+  /// Clears a pending end-of-period cancellation.
+  Future<void> resumeSubscription(String id) =>
+      _dio.post<void>('/me/subscriptions/$id/resume');
+
+  /// Returns a Stripe billing-portal URL where the student can update their
+  /// card / manage the membership. returnUrl is where Stripe sends them back.
+  Future<String> billingPortalUrl({required String returnUrl}) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/me/billing-portal',
+      data: {'return_url': returnUrl},
+    );
+    return r.data!['url'] as String;
+  }
+
+  /// Web optimistic confirm: after returning from hosted Checkout, confirm the
+  /// session so the pass is minted without waiting on the webhook. Returns the
+  /// minted entitlement id when complete, or null when the payment isn't
+  /// settled yet / no matching purchase (caller falls back to polling the
+  /// wallet — the webhook is the authoritative backstop).
+  Future<PurchaseEntitlement?> confirmCheckoutSession(String sessionId) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/checkout/session/confirm',
+      data: {'session_id': sessionId},
+    );
+    final data = r.data!;
+    if (data['status'] != 'completed') return null;
+    final ent = data['entitlement'] as Map<String, dynamic>?;
+    return ent == null ? null : PurchaseEntitlement.fromJson(ent);
+  }
+
+  /// Finalises a card purchase after the PaymentSheet succeeds. Optimistic —
+  /// verifies the PaymentIntent server-side and mints the entitlement. The
+  /// Stripe webhook is the authoritative backstop if this call never lands.
+  Future<PurchaseResult> confirmPurchase(String purchaseId) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/purchases/$purchaseId/confirm',
+    );
+    return PurchaseResult.fromJson(r.data!);
   }
 
   Future<List<WalletEntitlement>> myEntitlements() async {
@@ -1327,6 +1535,57 @@ class ApiClient {
     await _dio.delete<void>('/admin/promotions/$id');
   }
 
+  // ---- Stripe Terminal (in-person) ----
+
+  Future<List<TerminalReader>> adminListTerminalReaders() async {
+    final r = await _dio.get<List<dynamic>>('/admin/terminal/readers');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(TerminalReader.fromJson)
+        .toList();
+  }
+
+  Future<TerminalReader> adminRegisterTerminalReader({
+    required String registrationCode,
+    String label = '',
+  }) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/admin/terminal/readers',
+      data: {'registration_code': registrationCode, 'label': label},
+    );
+    return TerminalReader.fromJson(r.data!);
+  }
+
+  Future<void> adminRemoveTerminalReader(String readerId) async {
+    await _dio.delete<void>('/admin/terminal/readers/$readerId');
+  }
+
+  /// Starts an in-person sale on a reader. The pass is granted by the
+  /// payment_intent.succeeded webhook once the customer taps. Returns the
+  /// pending purchase id.
+  Future<String> adminTerminalCharge({
+    required String userId,
+    required String productId,
+    required String readerId,
+    String? discountCode,
+  }) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '/admin/terminal/charge',
+      data: {
+        'user_id': userId,
+        'product_id': productId,
+        'reader_id': readerId,
+        if (discountCode != null && discountCode.isNotEmpty)
+          'discount_code': discountCode,
+      },
+    );
+    return r.data!['purchase_id'] as String;
+  }
+
+  Future<void> adminTerminalCancel(String readerId) async {
+    await _dio.post<void>('/admin/terminal/cancel', data: {'reader_id': readerId});
+  }
+
   Future<List<AdminDiscount>> adminListDiscounts({
     bool includeArchived = false,
   }) async {
@@ -1388,6 +1647,32 @@ class ApiClient {
     );
   }
 
+  /// All memberships for the studio (manager view, with student names).
+  Future<List<Subscription>> adminListSubscriptions() async {
+    final r = await _dio.get<List<dynamic>>('/admin/subscriptions');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(Subscription.fromJson)
+        .toList();
+  }
+
+  /// Cancels a membership on the student's behalf. immediate=true cancels now
+  /// and revokes access + upcoming bookings (used for a disputed / non-paying
+  /// member); false (default) cancels at period end.
+  Future<void> adminCancelSubscription(String id, {bool immediate = false}) async {
+    await _dio.post<void>('/admin/subscriptions/$id/cancel',
+        data: {'immediate': immediate});
+  }
+
+  /// Open chargebacks + past-due memberships needing a manager decision.
+  Future<List<PaymentAttentionItem>> adminPaymentsAttention() async {
+    final r = await _dio.get<List<dynamic>>('/admin/payments/attention');
+    return r.data!
+        .cast<Map<String, dynamic>>()
+        .map(PaymentAttentionItem.fromJson)
+        .toList();
+  }
+
   static Map<String, dynamic> _promotionBody({
     required String title,
     required String body,
@@ -1404,6 +1689,7 @@ class ApiClient {
 
   Future<void> adminUpdateStudioConfig({
     int? freeCancelCutoffHours,
+    int? bookingWindowDays,
     bool? allowStudentPlusOne,
     String? buyLayout,
     String? welcomeMessage,
@@ -1412,6 +1698,9 @@ class ApiClient {
     final body = <String, dynamic>{};
     if (freeCancelCutoffHours != null) {
       body['free_cancel_cutoff_hours'] = freeCancelCutoffHours;
+    }
+    if (bookingWindowDays != null) {
+      body['booking_window_days'] = bookingWindowDays;
     }
     if (allowStudentPlusOne != null) {
       body['allow_student_plus_one'] = allowStudentPlusOne;
@@ -1486,6 +1775,13 @@ class Bootstrap {
 /// which gates on Firebase auth and also fetches the signed-in user.
 final studioConfigProvider = FutureProvider<StudioConfig>((ref) async {
   return ref.read(apiClientProvider).studioConfig();
+});
+
+/// The studio's non-secret Stripe config (publishable key + wallet toggles).
+/// Cached for the session; checkout reads it to decide between the real
+/// PaymentSheet and the dev_stub fallback.
+final paymentConfigProvider = FutureProvider<PaymentConfig>((ref) async {
+  return ref.read(apiClientProvider).paymentConfig();
 });
 
 final bootstrapProvider = FutureProvider<Bootstrap>((ref) async {

@@ -9,6 +9,7 @@ class StudioConfig {
   final String timezone;
   final String currency;
   final int freeCancelCutoffHours;
+  final int bookingWindowDays; // 0 = no limit
   final bool allowStudentPlusOne;
   final String welcomeMessage;
   final String buyLayout; // grid|list|grouped
@@ -32,6 +33,7 @@ class StudioConfig {
     required this.timezone,
     required this.currency,
     required this.freeCancelCutoffHours,
+    required this.bookingWindowDays,
     required this.allowStudentPlusOne,
     required this.welcomeMessage,
     required this.buyLayout,
@@ -55,6 +57,7 @@ class StudioConfig {
     timezone: j['timezone'] as String,
     currency: j['currency'] as String,
     freeCancelCutoffHours: j['free_cancel_cutoff_hours'] as int,
+    bookingWindowDays: (j['booking_window_days'] as int?) ?? 0,
     allowStudentPlusOne: j['allow_student_plus_one'] as bool,
     welcomeMessage: j['welcome_message'] as String,
     buyLayout: j['buy_layout'] as String,
@@ -386,6 +389,7 @@ class Product {
   final int priceMinor;
   final String currency;
   final String billingType; // one_time | recurring
+  final String? billingInterval; // month | year (recurring only)
   final String passKind; // credit | unlimited
   final int? credits;
   final int? validityDays;
@@ -400,6 +404,7 @@ class Product {
     required this.priceMinor,
     required this.currency,
     required this.billingType,
+    required this.billingInterval,
     required this.passKind,
     required this.credits,
     required this.validityDays,
@@ -415,6 +420,7 @@ class Product {
     priceMinor: j['price_minor'] as int,
     currency: j['currency'] as String,
     billingType: j['billing_type'] as String,
+    billingInterval: j['billing_interval'] as String?,
     passKind: j['pass_kind'] as String,
     credits: j['credits'] as int?,
     validityDays: j['validity_days'] as int?,
@@ -472,6 +478,209 @@ class Product {
 
   static String _cap(String s) =>
       s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
+}
+
+/// Returned by the card-payment path (POST /purchases with
+/// payment_method=card). The server has created a Stripe PaymentIntent and a
+/// pending purchase; [clientSecret] drives the PaymentSheet, and [purchaseId]
+/// is passed to confirmPurchase once the sheet completes.
+class PendingPurchase {
+  final String purchaseId;
+  final int amountMinor;
+  final String currency;
+  final String stripePaymentId;
+  final String clientSecret;
+  // The buyer's Stripe Customer (cus_…) the intent is attached to. Paired with
+  // an ephemeral key, it lets the PaymentSheet show saved cards. Empty on the
+  // dev_stub path.
+  final String stripeCustomerId;
+
+  PendingPurchase({
+    required this.purchaseId,
+    required this.amountMinor,
+    required this.currency,
+    required this.stripePaymentId,
+    required this.clientSecret,
+    required this.stripeCustomerId,
+  });
+
+  factory PendingPurchase.fromJson(Map<String, dynamic> j) => PendingPurchase(
+    purchaseId: j['purchase_id'] as String,
+    amountMinor: (j['amount_minor'] as num).toInt(),
+    currency: (j['currency'] as String?) ?? 'GBP',
+    stripePaymentId: (j['stripe_payment_id'] as String?) ?? '',
+    clientSecret: (j['client_secret'] as String?) ?? '',
+    stripeCustomerId: (j['stripe_customer_id'] as String?) ?? '',
+  );
+}
+
+/// Returned by the hosted-Checkout path (POST /checkout/session, web). The
+/// browser redirects to [url]; fulfilment lands via the webhook. [purchaseId]
+/// is kept for reference/polling.
+class CheckoutResult {
+  final String purchaseId;
+  final String url;
+  CheckoutResult({required this.purchaseId, required this.url});
+
+  factory CheckoutResult.fromJson(Map<String, dynamic> j) => CheckoutResult(
+    purchaseId: j['purchase_id'] as String,
+    url: j['url'] as String,
+  );
+}
+
+/// Returned by the subscription-checkout path (POST /checkout/subscription).
+/// The browser redirects to [url]; the invoice.paid webhook grants the pass.
+class SubscriptionCheckoutResult {
+  final String subscriptionId;
+  final String url;
+  SubscriptionCheckoutResult({required this.subscriptionId, required this.url});
+
+  factory SubscriptionCheckoutResult.fromJson(Map<String, dynamic> j) =>
+      SubscriptionCheckoutResult(
+        subscriptionId: j['subscription_id'] as String,
+        url: j['url'] as String,
+      );
+}
+
+/// A membership (recurring Stripe subscription) as seen by the student/manager.
+class Subscription {
+  final String id;
+  final String productId;
+  final String productName;
+  final String status; // pending|active|past_due|canceled|incomplete_expired
+  final bool cancelAtPeriodEnd;
+  final String? currentPeriodEnd; // RFC3339, when known
+  final String currency;
+  final int amountMinor;
+  final String? userName; // admin views only
+
+  Subscription({
+    required this.id,
+    required this.productId,
+    required this.productName,
+    required this.status,
+    required this.cancelAtPeriodEnd,
+    required this.currentPeriodEnd,
+    required this.currency,
+    required this.amountMinor,
+    required this.userName,
+  });
+
+  factory Subscription.fromJson(Map<String, dynamic> j) => Subscription(
+    id: j['id'] as String,
+    productId: j['product_id'] as String,
+    productName: j['product_name'] as String,
+    status: j['status'] as String,
+    cancelAtPeriodEnd: (j['cancel_at_period_end'] as bool?) ?? false,
+    currentPeriodEnd: (j['current_period_end'] as String?)?.isEmpty ?? true
+        ? null
+        : j['current_period_end'] as String,
+    currency: j['currency'] as String,
+    amountMinor: j['amount_minor'] as int,
+    userName: (j['user_name'] as String?)?.isEmpty ?? true
+        ? null
+        : j['user_name'] as String,
+  );
+
+  bool get isActive => status == 'active';
+  bool get isPastDue => status == 'past_due';
+  bool get isPending => status == 'pending';
+}
+
+/// One row on the manager's "Payments needing attention" screen — an open
+/// chargeback or a past-due membership. [kind] drives which action the row
+/// offers: a dispute on a one-time pass carries [entitlementId] (Void & revoke);
+/// a membership carries [subscriptionId] (Cancel membership).
+class PaymentAttentionItem {
+  final String kind; // 'dispute' | 'past_due_membership'
+  final String studentId;
+  final String studentName;
+  final String productName;
+  final int amountMinor;
+  final String currency;
+  final String status; // dispute status, or 'past_due'
+  final String detail; // dispute reason / "renewal payment failed"
+  final String occurredAt;
+  final String? dueAt;
+  final String? entitlementId;
+  final String? subscriptionId;
+  final int attendedCount;
+  final int upcomingCount;
+
+  PaymentAttentionItem({
+    required this.kind,
+    required this.studentId,
+    required this.studentName,
+    required this.productName,
+    required this.amountMinor,
+    required this.currency,
+    required this.status,
+    required this.detail,
+    required this.occurredAt,
+    required this.dueAt,
+    required this.entitlementId,
+    required this.subscriptionId,
+    required this.attendedCount,
+    required this.upcomingCount,
+  });
+
+  bool get isDispute => kind == 'dispute';
+
+  factory PaymentAttentionItem.fromJson(Map<String, dynamic> j) =>
+      PaymentAttentionItem(
+        kind: j['kind'] as String,
+        studentId: j['student_id'] as String,
+        studentName: j['student_name'] as String,
+        productName: (j['product_name'] as String?) ?? '',
+        amountMinor: (j['amount_minor'] as int?) ?? 0,
+        currency: (j['currency'] as String?) ?? 'GBP',
+        status: (j['status'] as String?) ?? '',
+        detail: (j['detail'] as String?) ?? '',
+        occurredAt: (j['occurred_at'] as String?) ?? '',
+        dueAt: (j['due_at'] as String?)?.isEmpty ?? true
+            ? null
+            : j['due_at'] as String,
+        entitlementId: (j['entitlement_id'] as String?)?.isEmpty ?? true
+            ? null
+            : j['entitlement_id'] as String,
+        subscriptionId: (j['subscription_id'] as String?)?.isEmpty ?? true
+            ? null
+            : j['subscription_id'] as String,
+        attendedCount: (j['attended_count'] as int?) ?? 0,
+        upcomingCount: (j['upcoming_count'] as int?) ?? 0,
+      );
+}
+
+/// Non-secret Stripe config the client needs to render the PaymentSheet.
+/// [publishableKey] empty means the studio hasn't configured Stripe — card
+/// payments are unavailable and the UI should hide the card option.
+class PaymentConfig {
+  final String publishableKey;
+  final String mode; // 'test' | 'live'
+  final bool applePayEnabled;
+  final bool googlePayEnabled;
+  final String merchantDisplayName;
+  final String merchantCountryCode;
+
+  PaymentConfig({
+    required this.publishableKey,
+    required this.mode,
+    required this.applePayEnabled,
+    required this.googlePayEnabled,
+    required this.merchantDisplayName,
+    required this.merchantCountryCode,
+  });
+
+  bool get isTestMode => mode != 'live';
+
+  factory PaymentConfig.fromJson(Map<String, dynamic> j) => PaymentConfig(
+    publishableKey: (j['publishable_key'] as String?) ?? '',
+    mode: (j['mode'] as String?) ?? 'test',
+    applePayEnabled: (j['apple_pay_enabled'] as bool?) ?? false,
+    googlePayEnabled: (j['google_pay_enabled'] as bool?) ?? false,
+    merchantDisplayName: (j['merchant_display_name'] as String?) ?? '',
+    merchantCountryCode: (j['merchant_country_code'] as String?) ?? 'GB',
+  );
 }
 
 class PurchaseResult {
@@ -1317,6 +1526,7 @@ class AdminProduct {
   final int priceMinor;
   final String currency;
   final String billingType;
+  final String? billingInterval;
   final String passKind;
   final int? credits;
   final int? validityDays;
@@ -1334,6 +1544,7 @@ class AdminProduct {
     required this.priceMinor,
     required this.currency,
     required this.billingType,
+    required this.billingInterval,
     required this.passKind,
     required this.credits,
     required this.validityDays,
@@ -1352,6 +1563,7 @@ class AdminProduct {
     priceMinor: j['price_minor'] as int,
     currency: j['currency'] as String,
     billingType: j['billing_type'] as String,
+    billingInterval: j['billing_interval'] as String?,
     passKind: j['pass_kind'] as String,
     credits: j['credits'] as int?,
     validityDays: j['validity_days'] as int?,
@@ -1835,6 +2047,11 @@ class StripeCredentialsView {
   final bool secretKeySet;
   final String? webhookSecretLast4;
   final bool webhookSecretSet;
+  // Wallet (Apple Pay / Google Pay) config — not secrets.
+  final bool applePayEnabled;
+  final bool googlePayEnabled;
+  final String? merchantDisplayName;
+  final String? merchantCountryCode;
   final String? updatedBy;
   final String updatedAt;
 
@@ -1850,6 +2067,10 @@ class StripeCredentialsView {
     required this.secretKeySet,
     required this.webhookSecretLast4,
     required this.webhookSecretSet,
+    required this.applePayEnabled,
+    required this.googlePayEnabled,
+    required this.merchantDisplayName,
+    required this.merchantCountryCode,
     required this.updatedBy,
     required this.updatedAt,
     required this.encryptionConfigured,
@@ -1864,6 +2085,10 @@ class StripeCredentialsView {
         secretKeySet: (j['secret_key_set'] as bool?) ?? false,
         webhookSecretLast4: j['webhook_secret_last4'] as String?,
         webhookSecretSet: (j['webhook_secret_set'] as bool?) ?? false,
+        applePayEnabled: (j['apple_pay_enabled'] as bool?) ?? false,
+        googlePayEnabled: (j['google_pay_enabled'] as bool?) ?? false,
+        merchantDisplayName: j['merchant_display_name'] as String?,
+        merchantCountryCode: j['merchant_country_code'] as String?,
         updatedBy: j['updated_by'] as String?,
         updatedAt: (j['updated_at'] as String?) ?? '',
         encryptionConfigured: (j['encryption_configured'] as bool?) ?? false,
@@ -1992,6 +2217,10 @@ class WalletPurchase {
   final String paymentMethod; // card | cash | dev_stub
   final String status;
   final DateTime createdAt;
+  // True when this purchase actually minted a pass (the server resolved a
+  // resulting_entitlement_id). Lets the history say whether a pass landed in
+  // the wallet, independent of the payment status.
+  final bool passAwarded;
 
   WalletPurchase({
     required this.id,
@@ -2001,6 +2230,7 @@ class WalletPurchase {
     required this.paymentMethod,
     required this.status,
     required this.createdAt,
+    required this.passAwarded,
   });
 
   factory WalletPurchase.fromJson(Map<String, dynamic> j) => WalletPurchase(
@@ -2011,6 +2241,7 @@ class WalletPurchase {
     paymentMethod: j['payment_method'] as String,
     status: j['status'] as String,
     createdAt: DateTime.parse(j['created_at'] as String),
+    passAwarded: (j['pass_awarded'] as bool?) ?? false,
   );
 
   String formattedPrice() {
@@ -2027,6 +2258,54 @@ class WalletPurchase {
         : '$whole.${cents.toString().padLeft(2, '0')}';
     return '$symbol$body';
   }
+}
+
+/// A saved card in the wallet. The real card lives in Stripe; this is just the
+/// display subset (brand + last4 + expiry) the server returns.
+class PaymentMethod {
+  final String id; // pm_…
+  final String brand;
+  final String last4;
+  final int expMonth;
+  final int expYear;
+
+  PaymentMethod({
+    required this.id,
+    required this.brand,
+    required this.last4,
+    required this.expMonth,
+    required this.expYear,
+  });
+
+  factory PaymentMethod.fromJson(Map<String, dynamic> j) => PaymentMethod(
+    id: j['id'] as String,
+    brand: (j['brand'] as String?) ?? 'card',
+    last4: (j['last4'] as String?) ?? '••••',
+    expMonth: (j['exp_month'] as num?)?.toInt() ?? 0,
+    expYear: (j['exp_year'] as num?)?.toInt() ?? 0,
+  );
+
+  /// "Visa", "Mastercard", etc. — title-cased brand for display.
+  String get brandLabel =>
+      brand.isEmpty ? 'Card' : brand[0].toUpperCase() + brand.substring(1);
+}
+
+/// A Stripe Terminal reader registered to the studio for in-person payments.
+class TerminalReader {
+  final String readerId; // tmr_…
+  final String locationId; // tml_…
+  final String label;
+  TerminalReader({
+    required this.readerId,
+    required this.locationId,
+    required this.label,
+  });
+  factory TerminalReader.fromJson(Map<String, dynamic> j) => TerminalReader(
+    readerId: j['reader_id'] as String,
+    locationId: (j['location_id'] as String?) ?? '',
+    label: (j['label'] as String?) ?? '',
+  );
+  String get displayName => label.isNotEmpty ? label : readerId;
 }
 
 class AttendanceSummary {

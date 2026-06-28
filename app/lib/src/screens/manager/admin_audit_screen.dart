@@ -1280,6 +1280,7 @@ class _AuditBody extends StatelessWidget {
       'email': 'email',
       'full_name': 'name',
       'free_cancel_cutoff_hours': 'cutoff',
+      'booking_window_days': 'book-ahead',
       'allow_student_plus_one': '+1 allowed',
       'buy_layout': 'layout',
       'welcome_message': 'welcome',

@@ -26,10 +26,16 @@ var (
 	authBypassRoutes = map[string]bool{
 		"POST /dev/reset-test-state": true,
 		"POST /dev/fill-class":       true,
+		"POST /dev/configure-stripe": true,
 		// Load-balancer probe — must be reachable without a token.
 		// See handleHealthz for the rationale (and the prod checklist
 		// item about firewalling the port off the public internet).
 		"GET /healthz": true,
+		// Stripe webhook — Stripe calls this server-to-server with no bearer
+		// token. It authenticates by verifying the Stripe-Signature header
+		// against the studio's webhook secret (see handleStripeWebhook), so a
+		// missing bearer is expected, not a hole.
+		"POST /stripe/webhook/{studioID}": true,
 	}
 	roleBypassRoutes = map[string]bool{}
 )

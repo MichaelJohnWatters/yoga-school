@@ -479,10 +479,27 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
               onPressed: () => Navigator.of(ctx).maybePop(),
             ),
           ),
-          body: BuyScreen(
-            coversClassTypeId: classRow.classTypeId,
-            bookAfterPurchaseClassId: classRow.id,
-            bookAfterPurchaseDay: classDay,
+          // BuyScreen carries the class-filter + auto-book logic, so we reuse
+          // it on both. On a wide (desktop) viewport, centre it in a capped
+          // column so it reads as a focused panel instead of a full-width
+          // mobile screen stretched across the window.
+          body: LayoutBuilder(
+            builder: (ctx, c) {
+              final buy = BuyScreen(
+                coversClassTypeId: classRow.classTypeId,
+                bookAfterPurchaseClassId: classRow.id,
+                bookAfterPurchaseDay: classDay,
+              );
+              if (c.maxWidth >= 700) {
+                return Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    child: buy,
+                  ),
+                );
+              }
+              return buy;
+            },
           ),
         ),
       ),
