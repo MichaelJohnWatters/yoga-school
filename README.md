@@ -95,15 +95,19 @@ they're addressed; add new entries as they accumulate.
 - [ ] `scripts/seed-firebase-users.sh` is a dev convenience that creates
   the demo accounts in the local Auth emulator. Never run against prod.
 
-### Stripe (deferred — currently dev_stub)
+### Stripe
 
-- [ ] `server/internal/store/products.go` has a long `STRIPE TODO` block
-  at the top — full checklist for swapping `dev_stub` payment for real
-  Stripe PaymentIntents. Includes the per-studio key resolution pattern
-  (don't stash a process-global `stripe.Key` — multi-tenant), the
-  `payment_intent.succeeded` webhook route shape, and the products UI
-  field for `stripe_price_id`. Grep for `STRIPE TODO` to find every
-  inline marker.
+Single payments (tickets + packs) are wired to real Stripe — hosted Checkout
+on web, PaymentSheet on mobile, webhook-authoritative fulfilment, a
+reconciliation janitor, and Stripe-backed refunds with prorated pass handling.
+**See [docs/payments.md](docs/payments.md)** for the full architecture, the
+webhook event list to register, config, and the e2e tests.
+
+- [ ] Set `STRIPE_KEY_ENC_MASTER` (hex → 32 bytes) and register the per-studio
+  webhook `…/stripe/webhook/{studioID}` with the events listed in
+  docs/payments.md. Without the master key the server runs in dev_stub mode.
+- [ ] Rolling direct-debit / subscriptions are **not** built — the "Unlimited
+  Monthly" product is a one-time 30-day pass, not a real Stripe Subscription.
 - [ ] FCM dispatch falls back to log-only when the auth emulator is
   active (`cmd/server/main.go:65-78`). In prod the messaging client
   needs real Firebase credentials.

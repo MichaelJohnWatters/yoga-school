@@ -9,6 +9,60 @@ import (
 	"time"
 )
 
+func TestCreateBooking_RefusesBeyondBookingWindow(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+	ent := f.insertEntitlement(t, s, "unlimited", 0)
+
+	// Default window is 14 days — a class 20 days out is refused.
+	far := f.insertClass(t, s, time.Now().UTC().Add(20*24*time.Hour), 10)
+	_, err := s.CreateBooking(ctx, f.studioID, f.studentID, far, ent, false, "")
+	assertBookingErr(t, err, "outside_booking_window")
+
+	// A class inside the window books fine.
+	near := f.insertClass(t, s, time.Now().UTC().Add(3*24*time.Hour), 10)
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, near, ent, false, ""); err != nil {
+		t.Fatalf("near booking should succeed: %v", err)
+	}
+
+	// window = 0 disables the limit — the far class books.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE studios SET booking_window_days = 0 WHERE id = ?`, f.studioID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateBooking(ctx, f.studioID, f.studentID, far, ent, false, ""); err != nil {
+		t.Fatalf("far booking should succeed with no window: %v", err)
+	}
+}
+
+func TestCreateBooking_RefusesPassExpiringBeforeClass(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+	ent := f.insertEntitlement(t, s, "unlimited", 0)
+
+	// Pass is active but expires in 2 days; the class is 5 days out (still
+	// inside the booking window). The pass won't be valid when the class runs.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE entitlements SET expires_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(48*time.Hour).Format(time.RFC3339), ent); err != nil {
+		t.Fatal(err)
+	}
+	class := f.insertClass(t, s, time.Now().UTC().Add(5*24*time.Hour), 10)
+	_, err := s.CreateBooking(ctx, f.studioID, f.studentID, class, ent, false, "")
+	assertBookingErr(t, err, "entitlement_ineligible")
+
+	// The picker must hide it too.
+	elig, err := s.EligibleEntitlements(ctx, f.studioID, f.studentID, class)
+	if err != nil {
+		t.Fatalf("eligible: %v", err)
+	}
+	if len(elig) != 0 {
+		t.Fatalf("expected no eligible passes (expires before class), got %d", len(elig))
+	}
+}
+
 func TestCreateBooking_RefusesWhenClassFull(t *testing.T) {
 	s := newTestStore(t)
 	f := newFixture(t, s)
@@ -453,7 +507,7 @@ func TestCancelBooking_PromotesWaitlistAsync(t *testing.T) {
 	}
 
 	// The promote runs in a goroutine; poll briefly for the offer row.
-	waitForAutoBook(t, s, class,other)
+	waitForAutoBook(t, s, class, other)
 }
 
 // Cascade cancel frees two seats — two waitlisters should each get an offer.
@@ -484,8 +538,8 @@ func TestCancelBooking_PromotesTwoWaitersAfterPlusOneCascade(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	waitForAutoBook(t, s, class,w1)
-	waitForAutoBook(t, s, class,w2)
+	waitForAutoBook(t, s, class, w1)
+	waitForAutoBook(t, s, class, w2)
 }
 
 // Empty-waitlist case must not blow up the cancel — the cancel succeeded

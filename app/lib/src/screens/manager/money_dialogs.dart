@@ -675,7 +675,8 @@ class _VoidDialogState extends ConsumerState<_VoidDialog> {
     final y = context.yoga;
     return _DialogChrome(
       title: 'Void & refund',
-      sub: 'Voids the pass and (optionally) refunds the student.',
+      sub: 'Voids the pass and (optionally) refunds the student. '
+          'Card payments are returned to the original card via Stripe.',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

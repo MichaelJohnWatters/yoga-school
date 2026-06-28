@@ -40,3 +40,12 @@ firebase-debug.log
 # mkcert localhost 127.0.0.1 ::1`. Pinning these in git would bind
 # every dev to one machine's root CA, which defeats the trust model.
 dev-certs/
+
+# Secrets — Stripe keys, master enc key, etc. Never commit.
+.env
+.env.*
+!.env.example
+
+# Vendored agent/plugin skill docs (materialised by tooling, not app code).
+.agents/
+skills-lock.json

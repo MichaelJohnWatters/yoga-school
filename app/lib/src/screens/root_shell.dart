@@ -37,8 +37,34 @@ class RootShell extends ConsumerStatefulWidget {
   ConsumerState<RootShell> createState() => _RootShellState();
 }
 
-class _RootShellState extends ConsumerState<RootShell> {
+class _RootShellState extends ConsumerState<RootShell>
+    with WidgetsBindingObserver {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from an external hosted-Checkout flow (membership) or add-card
+    // browser: refresh the money-side providers so a freshly-activated
+    // membership / saved card appears without a manual pull-to-refresh. The
+    // webhook is what actually fulfils server-side; this just re-reads it.
+    if (state == AppLifecycleState.resumed) {
+      ref.invalidate(subscriptionsProvider);
+      ref.invalidate(entitlementsProvider);
+      ref.invalidate(paymentMethodsProvider);
+    }
+  }
 
   void _setTab(int i) {
     if (i == _index) return;
@@ -59,6 +85,12 @@ class _RootShellState extends ConsumerState<RootShell> {
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
+    // Honour external tab navigation (e.g. the web checkout return handler
+    // sends the student back to Book after a buy-and-book). _setTab mirrors
+    // into the provider, so the guard stops this echoing back into a loop.
+    ref.listen<int>(currentTabProvider, (_, next) {
+      if (next != _index && mounted) setState(() => _index = next);
+    });
     // Wires the YStudioTopBar avatar tap to "switch to the Profile tab".
     // ProfileScreen gets null so tapping the avatar there is a no-op
     // rather than a self-rebuild.
@@ -73,7 +105,12 @@ class _RootShellState extends ConsumerState<RootShell> {
         tabIndex: _kTabHome,
         onVisible: () => ref.invalidate(upcomingBookingsProvider),
         child: HomeScreen(
-            me: widget.me, studio: widget.studio, onTapProfile: toProfile),
+          me: widget.me,
+          studio: widget.studio,
+          onTapProfile: toProfile,
+          onBrowseClasses: () => _setTab(_kTabBook),
+          onSeePasses: () => _setTab(_kTabBuy),
+        ),
       ),
       OnTabVisible(
         tabIndex: _kTabBook,
@@ -82,7 +119,10 @@ class _RootShellState extends ConsumerState<RootShell> {
         // event is harmless and keeps the wiring symmetric.
         onVisible: () {},
         child: BookScreen(
-            me: widget.me, studio: widget.studio, onTapProfile: toProfile),
+          me: widget.me,
+          studio: widget.studio,
+          onTapProfile: toProfile,
+        ),
       ),
       OnTabVisible(
         tabIndex: _kTabBuy,
@@ -111,7 +151,10 @@ class _RootShellState extends ConsumerState<RootShell> {
         tabIndex: _kTabMore,
         onVisible: () {},
         child: MoreScreen(
-            me: widget.me, studio: widget.studio, onTapProfile: toProfile),
+          me: widget.me,
+          studio: widget.studio,
+          onTapProfile: toProfile,
+        ),
       ),
     ];
     return Scaffold(
@@ -156,7 +199,9 @@ class _RootShellState extends ConsumerState<RootShell> {
                           _tabs[i].label,
                           style: TextStyle(
                             fontSize: 10.5,
-                            fontWeight: i == _index ? FontWeight.w700 : FontWeight.w600,
+                            fontWeight: i == _index
+                                ? FontWeight.w700
+                                : FontWeight.w600,
                             color: i == _index ? y.primary : y.muted,
                           ),
                         ),
@@ -171,4 +216,3 @@ class _RootShellState extends ConsumerState<RootShell> {
     );
   }
 }
-

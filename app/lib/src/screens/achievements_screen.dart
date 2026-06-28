@@ -62,25 +62,62 @@ class _Body extends StatelessWidget {
   Widget build(BuildContext context) {
     final y = context.yoga;
     final earnedCount = items.where((a) => a.isEarned).length;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: Text(
-            '$earnedCount of ${items.length} earned',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: y.muted,
-            ),
-          ),
+    final summary = Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(
+        '$earnedCount of ${items.length} earned',
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: y.muted,
         ),
-        for (final a in items) ...[
-          _AchievementCard(item: a),
-          const SizedBox(height: 8),
-        ],
-      ],
+      ),
+    );
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        // Desktop: centre the wall and lay the badges out two-up so a card
+        // isn't stretched across the whole window. Mobile keeps one column.
+        if (c.maxWidth >= 700) {
+          return Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 920),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
+                children: [
+                  summary,
+                  LayoutBuilder(
+                    builder: (context, cc) {
+                      final cardW = (cc.maxWidth - 12) / 2;
+                      return Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          for (final a in items)
+                            SizedBox(
+                              width: cardW,
+                              child: _AchievementCard(item: a),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          children: [
+            summary,
+            for (final a in items) ...[
+              _AchievementCard(item: a),
+              const SizedBox(height: 8),
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -148,7 +185,10 @@ class _AchievementCard extends StatelessWidget {
                         )
                       else
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
                           decoration: BoxDecoration(
                             color: y.surface2,
                             borderRadius: BorderRadius.circular(y.radiusChip),
@@ -194,7 +234,9 @@ class _AchievementCard extends StatelessWidget {
       case 'regular':
         return earned ? Icons.directions_run : Icons.directions_run_outlined;
       case 'devotee':
-        return earned ? Icons.local_fire_department : Icons.local_fire_department_outlined;
+        return earned
+            ? Icons.local_fire_department
+            : Icons.local_fire_department_outlined;
       case 'early_bird':
         return earned ? Icons.wb_sunny : Icons.wb_sunny_outlined;
       case 'night_owl':
@@ -211,7 +253,20 @@ class _AchievementCard extends StatelessWidget {
   }
 
   static String _earnedOn(DateTime d) {
-    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const mons = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     final l = d.toLocal();
     return '${l.day} ${mons[l.month - 1]}';
   }

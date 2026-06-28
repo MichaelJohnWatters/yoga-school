@@ -617,7 +617,7 @@ class _DayChip extends StatelessWidget {
   }
 }
 
-class _ClassRow extends StatelessWidget {
+class _ClassRow extends ConsumerWidget {
   final ClassRow row;
   final bool active;
   final VoidCallback onTap;
@@ -628,19 +628,34 @@ class _ClassRow extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
     final local = row.startsAt.toLocal();
     final hh = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
+    // Beyond the studio's book-ahead window? Render the row inert (no tap →
+    // can't open a panel the server would refuse) with a cool accent wash and
+    // an "Opens {date}" hint. Mirrors the mobile BookScreen treatment.
+    final windowDays =
+        ref.watch(bootstrapProvider).asData?.value.studio.bookingWindowDays ?? 0;
+    final notYetOpen = windowDays > 0 &&
+        local.isAfter(DateTime.now().add(Duration(days: windowDays)));
+    final bookableFrom =
+        windowDays > 0 ? row.startsAt.subtract(Duration(days: windowDays)) : null;
     return GestureDetector(
-      onTap: onTap,
+      onTap: notYetOpen ? null : onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: y.surface,
+          color: notYetOpen
+              ? Color.alphaBlend(y.accent.withValues(alpha: 0.07), y.surface)
+              : y.surface,
           borderRadius: BorderRadius.circular(y.radiusCard),
           border: Border.all(
-            color: active ? y.primary : y.border,
+            color: active
+                ? y.primary
+                : notYetOpen
+                    ? y.accent.withValues(alpha: 0.35)
+                    : y.border,
             width: active ? 1.5 : 1,
           ),
           boxShadow: active ? y.shadow : null,
@@ -712,6 +727,24 @@ class _ClassRow extends StatelessWidget {
             const SizedBox(width: 8),
             if (active)
               const YChip(kind: YChipKind.accent, label: 'Selected')
+            else if (notYetOpen)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  const YChip(kind: YChipKind.accent, label: 'Not open yet'),
+                  if (bookableFrom != null) ...[
+                    const SizedBox(height: 5),
+                    Text(
+                      'Opens ${_shortDate(bookableFrom)}',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
+                    ),
+                  ],
+                ],
+              )
             else
               _StateColumn(row: row),
           ],
@@ -719,6 +752,15 @@ class _ClassRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// "12 Aug" — compact day+month for the "Opens …" hint on not-yet-bookable
+/// class rows.
+String _shortDate(DateTime d) {
+  const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  final l = d.toLocal();
+  return '${l.day} ${mons[l.month - 1]}';
 }
 
 class _StateColumn extends StatelessWidget {

@@ -288,6 +288,7 @@ func (s *Store) ActivateThemeAs(ctx context.Context, studioID, actorID, themeID,
 // PATCH /admin/studio/config. Pointers so absent fields are no-ops.
 type StudioConfigPatch struct {
 	FreeCancelCutoffHours *int    `json:"free_cancel_cutoff_hours,omitempty"`
+	BookingWindowDays     *int    `json:"booking_window_days,omitempty"`
 	AllowStudentPlusOne   *bool   `json:"allow_student_plus_one,omitempty"`
 	BuyLayout             *string `json:"buy_layout,omitempty"`
 	WelcomeMessage        *string `json:"welcome_message,omitempty"`
@@ -300,11 +301,11 @@ func (s *Store) UpdateStudioConfig(ctx context.Context, studioID, actorID string
 	// fields the patch actually touches — a no-op patch shouldn't
 	// fire a SELECT.
 	var (
-		prevCutoff      int
-		prevAllowPlus1  int
-		prevBuyLayout   string
-		prevWelcomeMsg  string
-		prevTimezone    string
+		prevCutoff     int
+		prevAllowPlus1 int
+		prevBuyLayout  string
+		prevWelcomeMsg string
+		prevTimezone   string
 	)
 	if p.FreeCancelCutoffHours != nil || p.AllowStudentPlusOne != nil ||
 		p.BuyLayout != nil || p.WelcomeMessage != nil || p.Timezone != nil {
@@ -320,6 +321,13 @@ func (s *Store) UpdateStudioConfig(ctx context.Context, studioID, actorID string
 	if p.FreeCancelCutoffHours != nil {
 		set = append(set, "free_cancel_cutoff_hours = ?")
 		args = append(args, *p.FreeCancelCutoffHours)
+	}
+	if p.BookingWindowDays != nil {
+		if *p.BookingWindowDays < 0 {
+			return errors.New("booking_window_days must be >= 0 (0 = no limit)")
+		}
+		set = append(set, "booking_window_days = ?")
+		args = append(args, *p.BookingWindowDays)
 	}
 	if p.AllowStudentPlusOne != nil {
 		v := 0
@@ -388,6 +396,9 @@ func (s *Store) UpdateStudioConfig(ctx context.Context, studioID, actorID string
 		if prevCutoff != *p.FreeCancelCutoffHours {
 			detail["previous_free_cancel_cutoff_hours"] = prevCutoff
 		}
+	}
+	if p.BookingWindowDays != nil {
+		detail["booking_window_days"] = *p.BookingWindowDays
 	}
 	if p.AllowStudentPlusOne != nil {
 		detail["allow_student_plus_one"] = *p.AllowStudentPlusOne

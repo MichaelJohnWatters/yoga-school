@@ -135,12 +135,18 @@ type MyPurchase struct {
 	PaymentMethod string `json:"payment_method"`
 	Status        string `json:"status"`
 	CreatedAt     string `json:"created_at"`
+	// PassAwarded is true when this purchase actually minted an entitlement
+	// (resulting_entitlement_id is set). Distinguishes a completed/refunded
+	// row that put a pass in the wallet from a pending/voided one that never
+	// did — so the history can say so plainly rather than implying a pass.
+	PassAwarded bool `json:"pass_awarded"`
 }
 
 func (s *Store) MyPurchases(ctx context.Context, userID string) ([]MyPurchase, error) {
 	const q = `
 		SELECT pu.id, p.name, pu.amount_minor, pu.currency,
-		       pu.payment_method, pu.status, pu.created_at
+		       pu.payment_method, pu.status, pu.created_at,
+		       pu.resulting_entitlement_id
 		  FROM purchases pu
 		  JOIN products  p ON p.id = pu.product_id
 		 WHERE pu.user_id = ?
@@ -152,11 +158,15 @@ func (s *Store) MyPurchases(ctx context.Context, userID string) ([]MyPurchase, e
 	defer rows.Close()
 	out := make([]MyPurchase, 0)
 	for rows.Next() {
-		var p MyPurchase
+		var (
+			p           MyPurchase
+			entitlement sql.NullString
+		)
 		if err := rows.Scan(&p.ID, &p.ProductName, &p.AmountMinor, &p.Currency,
-			&p.PaymentMethod, &p.Status, &p.CreatedAt); err != nil {
+			&p.PaymentMethod, &p.Status, &p.CreatedAt, &entitlement); err != nil {
 			return nil, err
 		}
+		p.PassAwarded = entitlement.Valid
 		out = append(out, p)
 	}
 	return out, rows.Err()

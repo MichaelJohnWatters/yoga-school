@@ -16,11 +16,19 @@ class PurchaseSuccessScreen extends StatelessWidget {
   /// so the messaging and CTAs change to reflect that.
   final bool autoBooked;
 
+  /// Optional deep-links. When provided, the screen shows "Go to bookings" /
+  /// "Go to wallet" buttons that dismiss and jump to those Profile segments.
+  /// When null the screen just offers "Done".
+  final VoidCallback? onGoToBookings;
+  final VoidCallback? onGoToWallet;
+
   const PurchaseSuccessScreen({
     super.key,
     required this.product,
     required this.entitlement,
     this.autoBooked = false,
+    this.onGoToBookings,
+    this.onGoToWallet,
   });
 
   @override
@@ -74,26 +82,37 @@ class PurchaseSuccessScreen extends StatelessWidget {
               const SizedBox(height: 24),
               _PassCard(product: product, entitlement: entitlement),
               const SizedBox(height: 22),
+              // Primary action: see the booking you just made, or your wallet.
               YButton(
-                label: autoBooked ? 'Done' : 'Book your first class',
-                onTap: () => Navigator.of(context).pop(),
+                label: autoBooked ? 'Go to bookings' : 'Go to wallet',
+                onTap: () {
+                  Navigator.of(context).pop();
+                  (autoBooked ? onGoToBookings : onGoToWallet)?.call();
+                },
               ),
-              if (!autoBooked) ...[
-                const SizedBox(height: 14),
-                Center(
-                  child: GestureDetector(
-                    onTap: () => Navigator.of(context).pop(),
-                    child: Text(
-                      'Done',
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w700,
-                        color: y.muted,
-                      ),
+              const SizedBox(height: 10),
+              YButton(
+                label: autoBooked ? 'Go to wallet' : 'Go to bookings',
+                variant: YButtonVariant.outline,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  (autoBooked ? onGoToWallet : onGoToBookings)?.call();
+                },
+              ),
+              const SizedBox(height: 14),
+              Center(
+                child: GestureDetector(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: Text(
+                    'Done',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                      color: y.muted,
                     ),
                   ),
                 ),
-              ],
+              ),
               const Spacer(),
               Center(
                 child: Text(

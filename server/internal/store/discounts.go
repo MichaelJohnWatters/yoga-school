@@ -432,9 +432,11 @@ func scanDiscountWithStats(s interface {
 	return d, nil
 }
 
-// RefundPurchase marks a completed purchase as refunded. Partial refunds
-// reduce status to 'refunded' only when refundAmountMinor == amount_minor.
-// Idempotent guard: rejects if already refunded with this exact amount.
+// RefundPurchase refunds money for a completed purchase. For card-backed
+// purchases it issues a real Stripe refund against the PaymentIntent; for
+// cash/comp/dev_stub it just records the money movement (settled out of band).
+// Partial refunds reduce status to 'refunded' only when the cumulative refund
+// reaches amount_minor.
 //
 // Side-effect intentionally limited: this does NOT void the resulting
 // entitlement. Refunding $X to the customer is a money operation; the
@@ -450,31 +452,26 @@ func (s *Store) RefundPurchase(
 	if refundAmountMinor <= 0 {
 		return fmt.Errorf("refund_amount_minor: must be > 0")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
-	// Pull the customer + product labels alongside the money fields so
-	// the audit row can render "<actor> refunded £X to <student> for
-	// <product>" without follow-up joins.
+	// Validate against the current row before touching Stripe — we must not
+	// issue a real refund for an already-refunded or over-refunded purchase.
 	var (
-		amountMinor       int
-		alreadyRefunded   int
-		status            string
-		userID, userName  string
-		productName       string
+		amountMinor      int
+		alreadyRefunded  int
+		status           string
+		userID, userName string
+		productName      string
+		stripePaymentID  string
 	)
-	err = tx.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT pu.amount_minor, pu.refund_amount_minor, pu.status,
-		       pu.user_id, u.full_name, pr.name
+		       pu.user_id, u.full_name, pr.name, COALESCE(pu.stripe_payment_id,'')
 		  FROM purchases pu
 		  JOIN users    u  ON u.id  = pu.user_id
 		  JOIN products pr ON pr.id = pu.product_id
 		 WHERE pu.id = ? AND pu.studio_id = ?`,
 		purchaseID, studioID,
-	).Scan(&amountMinor, &alreadyRefunded, &status, &userID, &userName, &productName)
+	).Scan(&amountMinor, &alreadyRefunded, &status, &userID, &userName, &productName, &stripePaymentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -495,6 +492,20 @@ func (s *Store) RefundPurchase(
 	if newRefundTotal == amountMinor {
 		newStatus = "refunded"
 	}
+
+	// Real Stripe refund (no-op for non-card). Done before the DB write and
+	// outside any transaction — idempotency key keyed on the cumulative total
+	// so a retry can't pay out twice.
+	if err := s.issueStripeRefund(ctx, studioID, stripePaymentID, refundAmountMinor,
+		fmt.Sprintf("%s:refund:%d", purchaseID, newRefundTotal)); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE purchases
 		   SET refund_amount_minor = ?,

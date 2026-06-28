@@ -5,22 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/studio52/yoga-school/server/internal/payments"
 )
 
 type Product struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description"`
-	PriceMinor    int      `json:"price_minor"`
-	Currency      string   `json:"currency"`
-	BillingType   string   `json:"billing_type"`
-	PassKind      string   `json:"pass_kind"`
-	Credits       *int     `json:"credits,omitempty"`
-	ValidityDays  *int     `json:"validity_days,omitempty"`
-	IsHero        bool     `json:"is_hero"`
-	ClassTypeIDs  []string `json:"class_type_ids"`
-	DisciplineSet []string `json:"disciplines"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	PriceMinor      int      `json:"price_minor"`
+	Currency        string   `json:"currency"`
+	BillingType     string   `json:"billing_type"`
+	BillingInterval *string  `json:"billing_interval,omitempty"`
+	PassKind        string   `json:"pass_kind"`
+	Credits         *int     `json:"credits,omitempty"`
+	ValidityDays    *int     `json:"validity_days,omitempty"`
+	IsHero          bool     `json:"is_hero"`
+	ClassTypeIDs    []string `json:"class_type_ids"`
+	DisciplineSet   []string `json:"disciplines"`
 }
 
 // ListProducts returns the studio's purchasable products. When
@@ -30,7 +34,7 @@ type Product struct {
 func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID string) ([]Product, error) {
 	q := `
 		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
-		       s.currency, p.billing_type, p.pass_kind,
+		       s.currency, p.billing_type, p.billing_interval, p.pass_kind,
 		       p.credits, p.validity_days, p.is_hero
 		  FROM products p
 		  JOIN studios s ON s.id = p.studio_id
@@ -58,11 +62,12 @@ func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID st
 			p        Product
 			credits  sql.NullInt64
 			validity sql.NullInt64
+			interval sql.NullString
 			heroInt  int
 		)
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
-			&p.Currency, &p.BillingType, &p.PassKind,
+			&p.Currency, &p.BillingType, &interval, &p.PassKind,
 			&credits, &validity, &heroInt,
 		); err != nil {
 			return nil, err
@@ -74,6 +79,10 @@ func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID st
 		if validity.Valid {
 			n := int(validity.Int64)
 			p.ValidityDays = &n
+		}
+		if interval.Valid {
+			v := interval.String
+			p.BillingInterval = &v
 		}
 		p.IsHero = heroInt != 0
 		products = append(products, p)
@@ -125,7 +134,7 @@ func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID st
 func (s *Store) GetProduct(ctx context.Context, studioID, productID string) (*Product, error) {
 	const q = `
 		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
-		       s.currency, p.billing_type, p.pass_kind,
+		       s.currency, p.billing_type, p.billing_interval, p.pass_kind,
 		       p.credits, p.validity_days, p.is_hero
 		  FROM products p
 		  JOIN studios s ON s.id = p.studio_id
@@ -134,11 +143,12 @@ func (s *Store) GetProduct(ctx context.Context, studioID, productID string) (*Pr
 		p        Product
 		credits  sql.NullInt64
 		validity sql.NullInt64
+		interval sql.NullString
 		heroInt  int
 	)
 	err := s.db.QueryRowContext(ctx, q, productID, studioID).Scan(
 		&p.ID, &p.Name, &p.Description, &p.PriceMinor,
-		&p.Currency, &p.BillingType, &p.PassKind,
+		&p.Currency, &p.BillingType, &interval, &p.PassKind,
 		&credits, &validity, &heroInt,
 	)
 	if err == sql.ErrNoRows {
@@ -154,6 +164,10 @@ func (s *Store) GetProduct(ctx context.Context, studioID, productID string) (*Pr
 	if validity.Valid {
 		n := int(validity.Int64)
 		p.ValidityDays = &n
+	}
+	if interval.Valid {
+		v := interval.String
+		p.BillingInterval = &v
 	}
 	p.IsHero = heroInt != 0
 
@@ -356,47 +370,26 @@ func writePurchaseAuditTx(
 }
 
 // ============================================================================
-// STRIPE WIRING — TODO (when the dev Stripe account is set up)
+// STRIPE WIRING
 // ============================================================================
 //
-// Today this file uses a dev_stub: CreatePendingPurchase mints placeholder
-// pi_/secret strings; ConfirmPurchase trusts the caller. The intent/confirm
-// SHAPE is real and locked in; only the network calls are missing.
+// Card payments flow through the studio's Stripe account via the
+// payments.Gateway wired on the Store (SetPaymentGateway). When the gateway is
+// nil (local dev / tests) the dev_stub path takes over: CreatePendingPurchase
+// mints placeholder pi_stub_ ids and ConfirmPurchase skips verification.
 //
-// Two call sites need real Stripe SDK calls. They're called out inline below.
-// Plus three system-level pieces that don't fit in this file:
+// Lifecycle:
+//   1. CreatePendingPurchase → gateway.CreateIntent (idempotency key =
+//      purchase_id) → returns client_secret for Stripe.js / PaymentSheet.
+//   2. Stripe collects + confirms the card on the client.
+//   3a. Webhook payment_intent.succeeded → ConfirmPurchaseByIntent  (authoritative)
+//   3b. Client POST /confirm → ConfirmPurchase (verifies via gateway.GetIntent,
+//       then finalises) — optimistic, just for instant UX.
+//   Both 3a and 3b call finalizePendingTx and are idempotent: they converge on
+//   one entitlement no matter the order or how many times they fire.
 //
-//   1. Add `github.com/stripe/stripe-go/v76` to go.mod.
-//
-//   2. Per-call key resolution: each call into Stripe needs the studio's
-//      secret_key (decrypted via Store.LoadStripeKeysForUse). DO NOT
-//      stash a process-global stripe.Key — this is a multi-tenant app
-//      and each studio brings its own keys.
-//
-//      Example shape:
-//          keys, err := store.LoadStripeKeysForUse(ctx, studioID)
-//          if err != nil { return err }
-//          sc := &client.API{}
-//          sc.Init(keys.SecretKey, nil)
-//          pi, err := sc.PaymentIntents.New(&stripe.PaymentIntentParams{...})
-//
-//   3. Webhook route: add POST /stripe/webhook (PUBLIC — not behind /admin
-//      nor /api/v1/auth). Verifies signature with the studio's
-//      webhook_secret, listens for `payment_intent.succeeded` and calls
-//      ConfirmPurchase. See cmd/server/main.go for where the route belongs
-//      (alongside the existing chi.NewRouter() setup).
-//
-//   4. Products UI: surface products.stripe_price_id on the product editor
-//      screen so studios can paste their `price_…` ids in. The column
-//      already exists; only the editor field is missing.
-//
-//   5. Tests: real-Stripe verification needs either a mocked
-//      paymentintent.Client interface (clean) or the Stripe test-mode
-//      sandbox (slower, but proves the actual SDK call works). Recommend
-//      the interface mock for unit tests + one e2e against the sandbox.
-//
-// Grep for "STRIPE TODO" to find every inline marker that lines up with
-// this list.
+// Multi-tenant: keys are resolved per call via LoadStripeKeysForUse — there is
+// no process-global stripe.Key.
 // ============================================================================
 
 // PendingPurchaseResult is what CreatePendingPurchase returns. The client
@@ -408,6 +401,10 @@ type PendingPurchaseResult struct {
 	Currency        string `json:"currency"`
 	StripePaymentID string `json:"stripe_payment_id"`
 	ClientSecret    string `json:"client_secret"`
+	// StripeCustomerID (cus_…) is the buyer's Customer the intent is attached
+	// to. The client pairs it with an ephemeral key to show saved cards in the
+	// PaymentSheet. Empty on the dev_stub path (no gateway).
+	StripeCustomerID string `json:"stripe_customer_id,omitempty"`
 }
 
 // CreatePendingPurchase records a purchase in 'pending' state without
@@ -421,53 +418,93 @@ func (s *Store) CreatePendingPurchase(
 	ctx context.Context,
 	studioID, userID, productID, paymentMethod, discountCode string,
 ) (*PendingPurchaseResult, error) {
+	// Phase 1 — validate (read-only). We resolve the product, currency and
+	// discount up front so the amount we hand Stripe is server-computed, never
+	// trusted from the client. Pending purchases don't count toward a
+	// discount's usage (that's counted on 'completed' rows in
+	// validateAndApplyDiscountTx), so doing this read separately from the
+	// insert below can't leak a single-use code.
+	rtx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	prod, err := loadProductForPurchaseTx(ctx, rtx, studioID, productID)
+	if err != nil {
+		rtx.Rollback()
+		return nil, err
+	}
+	discountID, discountMinor, err := validateAndApplyDiscountTx(
+		ctx, rtx, studioID, userID, productID, discountCode, prod.priceMinor,
+	)
+	if err != nil {
+		rtx.Rollback()
+		return nil, err
+	}
+	// Buyer email → the PaymentIntent's receipt_email so Stripe's receipt
+	// reaches them. Read in the same read tx; a missing row leaves it blank.
+	var buyerEmail string
+	_ = rtx.QueryRowContext(ctx,
+		`SELECT email FROM users WHERE id = ?`, userID).Scan(&buyerEmail)
+	rtx.Rollback()
+	finalMinor := prod.priceMinor - discountMinor
+
+	purchaseID := NewID()
+
+	// Phase 2 — create the PaymentIntent. Done outside any DB transaction so
+	// the (single-connection) SQLite write lock isn't held across a network
+	// call. The gateway is nil in dev/tests → dev_stub placeholders. The
+	// purchase_id doubles as the Stripe idempotency key, so a double-tap or
+	// retry returns the same intent instead of charging twice.
+	var stripePaymentID, clientSecret, stripeCustomerID string
+	if s.gateway != nil {
+		keys, err := s.LoadStripeKeysForUse(ctx, studioID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, ErrStripeNotConfigured
+			}
+			return nil, fmt.Errorf("load stripe keys: %w", err)
+		}
+		// Attach the buyer's Customer so the PaymentSheet can show their saved
+		// cards and offer to save this one. Reuses the same (studio,user)→cus_
+		// cache the subscription flow created.
+		stripeCustomerID, err = s.ensureStripeCustomer(ctx, keys.SecretKey, studioID, userID, buyerEmail)
+		if err != nil {
+			return nil, fmt.Errorf("ensure stripe customer: %w", err)
+		}
+		intent, err := s.gateway.CreateIntent(ctx, keys.SecretKey, payments.IntentParams{
+			AmountMinor:    int64(finalMinor),
+			Currency:       prod.currency,
+			IdempotencyKey: purchaseID,
+			Email:          buyerEmail,
+			Customer:       stripeCustomerID,
+			Metadata: map[string]string{
+				"purchase_id": purchaseID,
+				"studio_id":   studioID,
+				"user_id":     userID,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("stripe create intent: %w", err)
+		}
+		stripePaymentID, clientSecret = intent.ID, intent.ClientSecret
+	} else {
+		// The "_stub" tag makes it easy to grep dev DBs for rows created
+		// without a real Stripe account, and lets ConfirmPurchase skip the
+		// PaymentIntent.Get verification for them.
+		stripePaymentID = "pi_stub_" + NewID()
+		clientSecret = stripePaymentID + "_secret_" + NewID()
+	}
+
+	// Phase 3 — record the pending purchase + audit row.
+	var discountIDArg any
+	if discountID != "" {
+		discountIDArg = discountID
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-
-	prod, err := loadProductForPurchaseTx(ctx, tx, studioID, productID)
-	if err != nil {
-		return nil, err
-	}
-	discountID, discountMinor, err := validateAndApplyDiscountTx(
-		ctx, tx, studioID, userID, productID, discountCode, prod.priceMinor,
-	)
-	if err != nil {
-		return nil, err
-	}
-	finalMinor := prod.priceMinor - discountMinor
-	var discountIDArg any
-	if discountID != "" {
-		discountIDArg = discountID
-	}
-
-	purchaseID := NewID()
-	// STRIPE TODO — replace the next 2 lines with a real PaymentIntent.
-	//
-	//   keys, err := s.LoadStripeKeysForUse(ctx, studioID)
-	//   if err != nil { return nil, err }
-	//   sc := &client.API{}
-	//   sc.Init(keys.SecretKey, nil)
-	//   pi, err := sc.PaymentIntents.New(&stripe.PaymentIntentParams{
-	//       Amount:      stripe.Int64(int64(prod.priceMinor)),
-	//       Currency:    stripe.String(strings.ToLower(prod.currency)),
-	//       PaymentMethodTypes: stripe.StringSlice([]string{"card"}),
-	//       Metadata: map[string]string{
-	//           "purchase_id": purchaseID,
-	//           "studio_id":   studioID,
-	//           "user_id":     userID,
-	//       },
-	//   })
-	//   stripePaymentID := pi.ID
-	//   clientSecret    := pi.ClientSecret
-	//
-	// The "_stub" tag in the placeholder makes it easy to grep dev DBs
-	// for rows that were created before Stripe was wired in.
-	stripePaymentID := "pi_stub_" + NewID()
-	clientSecret := stripePaymentID + "_secret_" + NewID()
-
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO purchases
 		  (id, studio_id, user_id, product_id, list_price_minor, amount_minor,
@@ -492,12 +529,35 @@ func (s *Store) CreatePendingPurchase(
 		return nil, err
 	}
 	return &PendingPurchaseResult{
-		PurchaseID:      purchaseID,
-		AmountMinor:     prod.priceMinor,
-		Currency:        prod.currency,
-		StripePaymentID: stripePaymentID,
-		ClientSecret:    clientSecret,
+		PurchaseID:       purchaseID,
+		AmountMinor:      finalMinor,
+		Currency:         prod.currency,
+		StripePaymentID:  stripePaymentID,
+		ClientSecret:     clientSecret,
+		StripeCustomerID: stripeCustomerID,
 	}, nil
+}
+
+// StripeEphemeralKey mints an ephemeral key scoped to the buyer's Stripe
+// Customer, for the mobile PaymentSheet's saved-cards UI. stripeVersion is the
+// mobile SDK's pinned API version (sent by the client). Returns
+// ErrStripeNotConfigured when the studio has no keys.
+func (s *Store) StripeEphemeralKey(ctx context.Context, studioID, userID, email, stripeVersion string) (string, error) {
+	if s.gateway == nil {
+		return "", fmt.Errorf("payments gateway not configured")
+	}
+	keys, err := s.LoadStripeKeysForUse(ctx, studioID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", ErrStripeNotConfigured
+		}
+		return "", fmt.Errorf("load stripe keys: %w", err)
+	}
+	customerID, err := s.ensureStripeCustomer(ctx, keys.SecretKey, studioID, userID, email)
+	if err != nil {
+		return "", fmt.Errorf("ensure stripe customer: %w", err)
+	}
+	return s.gateway.CreateEphemeralKey(ctx, keys.SecretKey, customerID, stripeVersion)
 }
 
 // ConfirmPurchase finalises a pending purchase: mints the entitlement +
@@ -511,17 +571,147 @@ func (s *Store) CreatePendingPurchase(
 // trust the caller (the request flow itself proves the dev_stub path was
 // taken).
 func (s *Store) ConfirmPurchase(ctx context.Context, studioID, userID, purchaseID string) (string, error) {
+	// Read the minimal state needed to decide whether to verify with Stripe.
+	// Done before the write tx so any PaymentIntent.Get network call doesn't
+	// hold the SQLite write lock.
+	var (
+		status, stripePaymentID string
+		existingEntitlement     sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT status, COALESCE(stripe_payment_id,''), resulting_entitlement_id
+		  FROM purchases
+		 WHERE id = ? AND studio_id = ? AND user_id = ?`,
+		purchaseID, studioID, userID,
+	).Scan(&status, &stripePaymentID, &existingEntitlement)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if status == "completed" && existingEntitlement.Valid {
+		// Idempotent re-confirm — caller (or a webhook race) gets the same id.
+		return existingEntitlement.String, nil
+	}
+	if status != "pending" {
+		return "", fmt.Errorf("cannot confirm purchase in status %q", status)
+	}
+
+	// Verify the PaymentIntent actually succeeded before minting. Without this
+	// a client could POST /confirm without ever having paid. Skipped for
+	// dev_stub rows (pi_stub_…) and when no gateway is wired.
+	if s.gateway != nil && !strings.HasPrefix(stripePaymentID, "pi_stub_") {
+		keys, err := s.LoadStripeKeysForUse(ctx, studioID)
+		if err != nil {
+			return "", fmt.Errorf("load stripe keys: %w", err)
+		}
+		intent, err := s.gateway.GetIntent(ctx, keys.SecretKey, stripePaymentID)
+		if err != nil {
+			return "", fmt.Errorf("stripe lookup: %w", err)
+		}
+		if intent.Status != payments.StatusSucceeded {
+			return "", fmt.Errorf("payment not succeeded (status=%s)", intent.Status)
+		}
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
+	entitlementID, err := finalizePendingTx(ctx, s, tx, studioID, userID, purchaseID, "confirm")
+	if err != nil {
+		return "", err
+	}
+	return entitlementID, tx.Commit()
+}
 
+// ConfirmPurchaseByIntent is the authoritative, webhook-driven fulfilment
+// path. The signed payment_intent.succeeded event is already proof of payment,
+// so this skips the PaymentIntent.Get re-fetch the client path does. It
+// resolves the purchase (and its owner) from the Stripe PaymentIntent id, then
+// finalises through the same idempotent helper. Returns ErrNotFound when no
+// purchase matches the intent (e.g. an event for a different system).
+func (s *Store) ConfirmPurchaseByIntent(ctx context.Context, studioID, intentID string) (string, error) {
+	var userID, purchaseID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT user_id, id FROM purchases
+		 WHERE studio_id = ? AND stripe_payment_id = ?`,
+		studioID, intentID,
+	).Scan(&userID, &purchaseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	entitlementID, err := finalizePendingTx(ctx, s, tx, studioID, userID, purchaseID, "webhook")
+	if err != nil {
+		return "", err
+	}
+	return entitlementID, tx.Commit()
+}
+
+// VoidPurchaseByIntent marks a still-pending purchase 'voided' — used by the
+// webhook on payment_intent.payment_failed / .canceled, and by the janitor for
+// abandoned intents. Only pending rows are touched: a completed purchase
+// (payment already settled) is left alone, and a re-delivered void event is a
+// no-op. No discount release is needed — usage is only counted on 'completed'
+// rows, so a voided pending purchase never held a code.
+func (s *Store) VoidPurchaseByIntent(ctx context.Context, studioID, intentID, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var userID, purchaseID, status string
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_id, id, status FROM purchases
+		 WHERE studio_id = ? AND stripe_payment_id = ?`,
+		studioID, intentID,
+	).Scan(&userID, &purchaseID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "pending" {
+		return nil // already completed/voided — nothing to do.
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE purchases SET status = 'voided' WHERE id = ?`, purchaseID,
+	); err != nil {
+		return fmt.Errorf("void purchase: %w", err)
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, userID,
+		"purchase_void", "purchase", purchaseID, map[string]any{
+			"reason": reason,
+		}); err != nil {
+		return fmt.Errorf("audit purchase_void: %w", err)
+	}
+	return tx.Commit()
+}
+
+// finalizePendingTx mints the entitlement, flips the purchase to 'completed',
+// back-links it, and writes the completion audit row — all inside the caller's
+// transaction. Idempotent: a purchase already 'completed' with an entitlement
+// returns that id without rewriting; a non-pending/non-completed status errors.
+// The caller is responsible for proving payment first (client path verifies via
+// Stripe; webhook path is itself the proof).
+func finalizePendingTx(ctx context.Context, s *Store, tx *sql.Tx, studioID, userID, purchaseID, via string) (string, error) {
 	var (
 		status, productID   string
 		existingEntitlement sql.NullString
 	)
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT status, product_id, resulting_entitlement_id
 		  FROM purchases
 		 WHERE id = ? AND studio_id = ? AND user_id = ?`,
@@ -534,33 +724,11 @@ func (s *Store) ConfirmPurchase(ctx context.Context, studioID, userID, purchaseI
 		return "", err
 	}
 	if status == "completed" && existingEntitlement.Valid {
-		// Idempotent re-confirm — caller (or a retry) gets the same id.
-		return existingEntitlement.String, tx.Commit()
+		return existingEntitlement.String, nil
 	}
 	if status != "pending" {
 		return "", fmt.Errorf("cannot confirm purchase in status %q", status)
 	}
-
-	// STRIPE TODO — verify the PaymentIntent actually succeeded before
-	// minting the entitlement. Without this check a malicious client can
-	// POST /confirm without ever having paid.
-	//
-	//   var pi string
-	//   _ = tx.QueryRowContext(ctx,
-	//       `SELECT COALESCE(stripe_payment_id,'') FROM purchases WHERE id = ?`,
-	//       purchaseID,
-	//   ).Scan(&pi)
-	//   if !strings.HasPrefix(pi, "pi_stub_") { // real PI from Stripe
-	//       keys, err := s.LoadStripeKeysForUse(ctx, studioID)
-	//       if err != nil { return "", err }
-	//       sc := &client.API{}
-	//       sc.Init(keys.SecretKey, nil)
-	//       resolved, err := sc.PaymentIntents.Get(pi, nil)
-	//       if err != nil { return "", fmt.Errorf("stripe lookup: %w", err) }
-	//       if resolved.Status != stripe.PaymentIntentStatusSucceeded {
-	//           return "", fmt.Errorf("payment not succeeded (status=%s)", resolved.Status)
-	//       }
-	//   }
 
 	prod, err := loadProductForPurchaseTx(ctx, tx, studioID, productID)
 	if err != nil {
@@ -570,10 +738,8 @@ func (s *Store) ConfirmPurchase(ctx context.Context, studioID, userID, purchaseI
 	if err != nil {
 		return "", err
 	}
-	// Read the snapshot fields we need for the audit row before flipping
-	// status — payment_method + amount_minor + currency are all on the
-	// purchase row itself so we don't have to thread them through the
-	// caller.
+	// Read the snapshot fields the audit row needs (payment_method +
+	// amount_minor + currency live on the purchase row itself).
 	var (
 		paymentMethod string
 		amountMinor   int
@@ -594,10 +760,9 @@ func (s *Store) ConfirmPurchase(ctx context.Context, studioID, userID, purchaseI
 	); err != nil {
 		return "", fmt.Errorf("flip purchase to completed: %w", err)
 	}
-	// Mirror the sync CreatePurchase audit shape so a Stripe-confirmed
-	// row shows up identically in the activity log. Discount detail isn't
-	// available here without re-reading the row — the pending audit row
-	// already captured it, so we keep this one focused on "this completed".
+	// Mirror the sync CreatePurchase audit shape so a Stripe-confirmed row
+	// shows up identically in the activity log. `via` distinguishes the
+	// optimistic client confirm from the authoritative webhook.
 	if err := s.writeAuditTx(ctx, tx, studioID, userID,
 		"purchase", "purchase", purchaseID, map[string]any{
 			"product_name":   prod.name,
@@ -605,11 +770,11 @@ func (s *Store) ConfirmPurchase(ctx context.Context, studioID, userID, purchaseI
 			"amount_minor":   amountMinor,
 			"currency":       currency,
 			"payment_method": paymentMethod,
-			"via":            "confirm",
+			"via":            via,
 		}); err != nil {
 		return "", fmt.Errorf("audit purchase: %w", err)
 	}
-	return entitlementID, tx.Commit()
+	return entitlementID, nil
 }
 
 // EntitlementSnapshot is the minimal shape returned after a successful
