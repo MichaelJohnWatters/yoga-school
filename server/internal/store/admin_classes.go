@@ -436,6 +436,7 @@ func (s *Store) ListAdminInstructors(ctx context.Context, studioID string) ([]Ad
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, full_name FROM users
 		 WHERE studio_id = ? AND role = 'instructor'
+		   AND deactivated_at IS NULL AND erased_at IS NULL
 		 ORDER BY full_name ASC`, studioID,
 	)
 	if err != nil {

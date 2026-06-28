@@ -1473,6 +1473,14 @@ class ApiClient {
     );
   }
 
+  Future<void> adminDeactivateStaff(String id) async {
+    await _dio.post<void>('/admin/staff/$id/deactivate');
+  }
+
+  Future<void> adminReactivateStaff(String id) async {
+    await _dio.post<void>('/admin/staff/$id/reactivate');
+  }
+
   // ---- promotions ----
 
   Future<List<Promotion>> listPromotions() async {
