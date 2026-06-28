@@ -238,11 +238,35 @@ exit 0
     # for webhook delivery (set STRIPE_WEBHOOK_SECRET in .env to wire that too).
     local_resource(
         'yoga-bootstrap-api-with-stripe',
-        cmd=_bootstrap_cmd('-bootstrap-api') + ' && ./scripts/configure-stripe-dev.sh',
+        # configure-stripe is NOT run inline here — that deadlocked (this
+        # local_resource holds Tilt's serial update slot while the script
+        # blocks on yoga-server's /healthz, but the server can't finish
+        # booting in that window). Instead we just *trigger* the dedicated
+        # yoga-configure-stripe resource (deps on yoga-server), same retry
+        # pattern as the yoga-app trigger above, so it runs once the server
+        # is actually up.
+        cmd=_bootstrap_cmd('-bootstrap-api') + ' && ' +
+            'for i in 1 2 3 4 5 6 7 8 9 10; do tilt trigger yoga-configure-stripe 2>/dev/null && break; sleep 0.5; done',
         resource_deps=['yoga-firebase'],
         labels=['yoga-school'],
         trigger_mode=TRIGGER_MODE_MANUAL,
         auto_init=False,
+    )
+
+    # Points studio s52 at the Stripe test keys from .env (via
+    # /dev/configure-stripe). Its own resource — deps on yoga-server — rather
+    # than an inline tail of the bootstrap chain, so it waits for the server to
+    # be up instead of racing/deadlocking it. Idempotent + self-skips without
+    # keys, so a stray run is harmless. The script also waits 180s for /healthz
+    # as a belt-and-braces safety net.
+    local_resource(
+        'yoga-configure-stripe',
+        cmd=cd + './scripts/configure-stripe-dev.sh',
+        resource_deps=['yoga-server'],
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+        allow_parallel=True,
     )
 
     # Stripe webhook delivery — always on (Stripe is mandatory; the web hosted

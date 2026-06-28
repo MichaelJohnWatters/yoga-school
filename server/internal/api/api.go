@@ -162,6 +162,8 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/admin/staff", s.handleAdminListStaff)
 			r.Post("/admin/staff", s.handleAdminCreateStaff)
 			r.Patch("/admin/staff/{id}", s.handleAdminUpdateStaff)
+			r.Post("/admin/staff/{id}/deactivate", s.handleAdminDeactivateStaff)
+			r.Post("/admin/staff/{id}/reactivate", s.handleAdminReactivateStaff)
 			r.Get("/admin/promotions", s.handleAdminListPromotions)
 			r.Post("/admin/promotions", s.handleAdminCreatePromotion)
 			r.Patch("/admin/promotions/{id}", s.handleAdminUpdatePromotion)
@@ -344,6 +346,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			if err := s.store.LinkFirebaseUID(r.Context(), u.ID, v.UID); err != nil {
 				log.Printf("link firebase_uid: %v", err)
 			}
+		}
+		// A deactivated staff member (manager turned them off) can't sign in.
+		if u.Deactivated {
+			writeError(w, http.StatusForbidden, "account deactivated — contact your studio")
+			return
 		}
 		ctx := context.WithValue(r.Context(), ctxUser, u)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -2916,6 +2923,29 @@ func (s *Server) handleAdminUpdateStaff(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	err := s.store.UpdateStaff(r.Context(), u.StudioID, u.ID, id, in)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "staff member not found")
+		return
+	}
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminDeactivateStaff(w http.ResponseWriter, r *http.Request) {
+	s.setStaffActive(w, r, false)
+}
+
+func (s *Server) handleAdminReactivateStaff(w http.ResponseWriter, r *http.Request) {
+	s.setStaffActive(w, r, true)
+}
+
+func (s *Server) setStaffActive(w http.ResponseWriter, r *http.Request, active bool) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.SetStaffActive(r.Context(), u.StudioID, u.ID, id, active)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "staff member not found")
 		return

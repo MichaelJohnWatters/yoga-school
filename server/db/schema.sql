@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- Profile when ready.
   theme_mode_pref     TEXT NOT NULL DEFAULT 'light'
                         CHECK (theme_mode_pref IN ('light','dark','system')),
+  -- Set when a manager deactivates a staff member (they've left). NULL =
+  -- active. Unlike erasure the data is kept (rosters/reports/audit reference
+  -- them); a deactivated account is blocked at sign-in and hidden from the
+  -- instructor picker. Reversible via reactivate.
+  deactivated_at      TEXT,
   -- Set when the account has been erased under UK GDPR Art. 17 (right to
   -- erasure). The row is NOT deleted — financial (HMRC 6yr) and audit
   -- records reference user_id and must survive. Instead the PII columns are

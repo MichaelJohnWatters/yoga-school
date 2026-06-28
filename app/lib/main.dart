@@ -225,6 +225,18 @@ class _CheckoutReturnHandlerState extends ConsumerState<CheckoutReturnHandler> {
     }
     if (!mounted) return;
 
+    // 2b. If the optimistic confirm came back pending — the Checkout session
+    //     hadn't flipped to paid at the instant we returned — retry once now
+    //     that the webhook has had time to fulfil. Without this, a webhook that
+    //     wins the race leaves `entitlement` null and we'd skip the full-screen
+    //     success page (and just snackbar), even though the pass landed.
+    if (entitlement == null && sessionId != null && sessionId.isNotEmpty) {
+      try {
+        entitlement = await api.confirmCheckoutSession(sessionId);
+      } catch (_) {}
+      if (!mounted) return;
+    }
+
     // 3. "Buy pass and book" flow: auto-book the class the student set out to
     //    book, then land them back on the Book tab (behind the success page).
     var booked = false;

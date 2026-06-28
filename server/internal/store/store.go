@@ -159,6 +159,9 @@ type User struct {
 	PhotoURL      *string `json:"photo_url,omitempty"`
 	ThemeModePref string  `json:"theme_mode_pref"`
 	CreatedAt     string  `json:"created_at"`
+	// Deactivated is true for a staff member a manager has turned off. The
+	// auth middleware blocks their sign-in.
+	Deactivated bool `json:"-"`
 }
 
 // ---- queries --------------------------------------------------------------
@@ -291,16 +294,18 @@ func (s *Store) LinkFirebaseUID(ctx context.Context, userID, uid string) error {
 // the token's email claim is what links the external identity to our row.
 func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 	const q = `
-		SELECT id, studio_id, role, email, full_name, photo_url, theme_mode_pref, created_at
+		SELECT id, studio_id, role, email, full_name, photo_url, theme_mode_pref,
+		       created_at, deactivated_at
 		  FROM users
 		 WHERE email = ? AND erased_at IS NULL`
 	var (
-		out      User
-		photoURL sql.NullString
+		out         User
+		photoURL    sql.NullString
+		deactivated sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, q, email).Scan(
 		&out.ID, &out.StudioID, &out.Role, &out.Email, &out.FullName, &photoURL,
-		&out.ThemeModePref, &out.CreatedAt,
+		&out.ThemeModePref, &out.CreatedAt, &deactivated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -311,6 +316,7 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 	if photoURL.Valid {
 		out.PhotoURL = &photoURL.String
 	}
+	out.Deactivated = deactivated.Valid
 	return &out, nil
 }
 

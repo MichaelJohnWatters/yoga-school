@@ -196,6 +196,92 @@ func TestInstructorPayRate_OverridesDefaultInReport(t *testing.T) {
 	}
 }
 
+func TestSetStaffActive_DeactivateReactivate(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+
+	id, _ := s.CreateStaff(ctx, f.studioID, f.instructorID, StaffInput{
+		Role: "instructor", Email: "leaver@studio.com", FullName: "Leaver",
+	})
+
+	if err := s.SetStaffActive(ctx, f.studioID, f.instructorID, id, false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	if got := auditCount(t, s, f.studioID, "staff_deactivate"); got != 1 {
+		t.Errorf("staff_deactivate audit = %d, want 1", got)
+	}
+	if active := staffActive(t, s, f.studioID, id); active {
+		t.Error("member still active after deactivate")
+	}
+	// Deactivated instructor is hidden from the class-creation picker.
+	insts, _ := s.ListAdminInstructors(ctx, f.studioID)
+	for _, in := range insts {
+		if in.ID == id {
+			t.Error("deactivated instructor still in the picker")
+		}
+	}
+
+	if err := s.SetStaffActive(ctx, f.studioID, f.instructorID, id, true); err != nil {
+		t.Fatalf("reactivate: %v", err)
+	}
+	if got := auditCount(t, s, f.studioID, "staff_reactivate"); got != 1 {
+		t.Errorf("staff_reactivate audit = %d, want 1", got)
+	}
+	if active := staffActive(t, s, f.studioID, id); !active {
+		t.Error("member not active after reactivate")
+	}
+}
+
+func TestSetStaffActive_RejectsSelfDeactivate(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+
+	id, _ := s.CreateStaff(ctx, f.studioID, f.instructorID, StaffInput{
+		Role: "manager", Email: "self@studio.com", FullName: "Self",
+	})
+	if err := s.SetStaffActive(ctx, f.studioID, id, id, false); err == nil {
+		t.Error("expected error deactivating self, got nil")
+	}
+}
+
+func TestSetStaffActive_RejectsLastOwner(t *testing.T) {
+	s := newTestStore(t)
+	f := newFixture(t, s)
+	ctx := context.Background()
+
+	ownerID, _ := s.CreateStaff(ctx, f.studioID, f.instructorID, StaffInput{
+		Role: "owner", Email: "owner@studio.com", FullName: "Owner",
+	})
+	// Only owner in the studio → can't deactivate.
+	if err := s.SetStaffActive(ctx, f.studioID, f.instructorID, ownerID, false); err == nil {
+		t.Error("expected last-owner guard error, got nil")
+	}
+	// Add a second owner → now the first can be deactivated.
+	owner2, _ := s.CreateStaff(ctx, f.studioID, f.instructorID, StaffInput{
+		Role: "owner", Email: "owner2@studio.com", FullName: "Owner Two",
+	})
+	if err := s.SetStaffActive(ctx, f.studioID, owner2, ownerID, false); err != nil {
+		t.Errorf("deactivate owner with a spare owner present: %v", err)
+	}
+}
+
+func staffActive(t *testing.T, s *Store, studioID, id string) bool {
+	t.Helper()
+	rows, err := s.ListAdminStaff(context.Background(), studioID)
+	if err != nil {
+		t.Fatalf("ListAdminStaff: %v", err)
+	}
+	for _, m := range rows {
+		if m.ID == id {
+			return m.Active
+		}
+	}
+	t.Fatalf("staff %s not found", id)
+	return false
+}
+
 func TestUpdateStaff_NotFoundCrossStudio(t *testing.T) {
 	s := newTestStore(t)
 	f := newFixture(t, s)
