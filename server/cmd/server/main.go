@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"firebase.google.com/go/v4/messaging"
@@ -14,6 +17,8 @@ import (
 	"github.com/studio52/yoga-school/server/internal/api"
 	"github.com/studio52/yoga-school/server/internal/auth"
 	"github.com/studio52/yoga-school/server/internal/blob"
+	"github.com/studio52/yoga-school/server/internal/jobs"
+	"github.com/studio52/yoga-school/server/internal/payments"
 	"github.com/studio52/yoga-school/server/internal/push"
 	"github.com/studio52/yoga-school/server/internal/secrets"
 	"github.com/studio52/yoga-school/server/internal/store"
@@ -118,39 +123,58 @@ func main() {
 		log.Print("FIREBASE_STORAGE_BUCKET unset — image uploads disabled")
 	}
 
-	// Wire the Stripe credentials Sealer from env. Unset is fine in dev —
-	// the manager settings panel refuses secret writes, no other code
-	// path tries to decrypt. We DO refuse to boot if any studio already
-	// has saved keys and the master is missing — that pairing means an
-	// ops misconfig and silent password loss.
+	// Stripe is mandatory for a running server — there is no "Stripe disabled"
+	// mode. The encryption master (STRIPE_KEY_ENC_MASTER) is required so the
+	// studio's keys can be sealed/unsealed, and the live gateway is always
+	// wired (card purchases always go through Stripe; the dev_stub path is
+	// test-only). The -migrate / -bootstrap-api flows return before this, so
+	// schema/seed runs don't need the master.
 	sealer, err := secrets.SealerFromEnv()
 	if err != nil {
 		log.Fatalf("secrets: %v", err)
 	}
-	st.SetSealer(sealer)
 	if sealer == nil {
-		if n, err := st.HasEncryptedStripeKeys(ctx); err == nil && n > 0 {
-			log.Fatalf("STRIPE_KEY_ENC_MASTER unset but %d studio(s) have encrypted Stripe keys — refusing to boot", n)
-		}
-		log.Print("STRIPE_KEY_ENC_MASTER unset — Stripe key settings disabled")
+		log.Fatalf("STRIPE_KEY_ENC_MASTER is required (a 32-byte hex master key) — Stripe is mandatory; set it in the environment (.env in dev)")
 	}
+	st.SetSealer(sealer)
+	// The gateway holds no key itself — each call resolves the studio's secret
+	// via LoadStripeKeysForUse — so it's safe to set unconditionally.
+	st.SetPaymentGateway(payments.NewStripeGateway())
+	log.Print("Stripe payment gateway enabled")
 
-	// STRIPE TODO — once Stripe is wired (see
-	// internal/store/products.go header for the full checklist), add a
-	// POST /stripe/webhook handler ALONGSIDE the /api/v1 router but
-	// OUTSIDE the auth middleware: Stripe needs an unauthenticated POST
-	// path, and the handler proves the request is real by verifying the
-	// signature header against the studio's stored webhook_secret. The
-	// handler should call Store.ConfirmPurchase on `payment_intent.succeeded`
-	// events. Easiest place to hook it: mux at the top level so /api/v1
-	// stays as it is.
+	// Root context cancelled on SIGINT/SIGTERM — drives both the HTTP server's
+	// graceful shutdown and the janitor goroutine.
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Background janitor: reconciles stale pending purchases against Stripe and
+	// sweeps entitlement status. Ticks every 5 min; reconciles intents older
+	// than 15 min so an in-progress checkout isn't cut short.
+	janitor := jobs.NewJanitor(st, 5*time.Minute, 15*time.Minute)
+	go janitor.Run(rootCtx)
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           api.NewServer(st, fb).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("listening on %s (db=%s)", *addr, *dbPath)
-	log.Fatal(srv.ListenAndServe())
+	// Serve in a goroutine so main can block on the shutdown signal.
+	go func() {
+		log.Printf("listening on %s (db=%s)", *addr, *dbPath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server: %v", err)
+		}
+	}()
+
+	<-rootCtx.Done()
+	log.Print("shutdown signal received — draining")
+	stop() // restore default signal handling so a second Ctrl-C force-quits.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+	}
+	log.Print("stopped")
 }
 
 // projectRoot walks up from the binary's CWD looking for db/schema.sql.

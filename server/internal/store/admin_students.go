@@ -483,17 +483,13 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 		return nil, fmt.Errorf("refund must be none|unused|full")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
+	// Read entitlement + purchase up front (before any tx) so the real Stripe
+	// refund below doesn't hold the SQLite write lock across a network call.
 	var (
 		userID, userName, status, kind string
 		credR, credT                   sql.NullInt64
 	)
-	err = tx.QueryRowContext(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT e.user_id, u.full_name, e.status, e.pass_kind,
 		       e.credits_remaining, e.credits_total
 		  FROM entitlements e
@@ -511,19 +507,22 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 		return nil, fmt.Errorf("already voided")
 	}
 
-	// Look up the purchase for amount + currency.
-	var amount int
-	var currency, paymentMethod, purchaseID string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, amount_minor, currency, payment_method
+	// Look up the purchase for amount + currency + the Stripe intent.
+	var amount, alreadyRefunded int
+	var currency, paymentMethod, purchaseID, stripePaymentID string
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, amount_minor, refund_amount_minor, currency, payment_method,
+		       COALESCE(stripe_payment_id,'')
 		  FROM purchases WHERE resulting_entitlement_id = ?`,
 		entitlementID,
-	).Scan(&purchaseID, &amount, &currency, &paymentMethod)
+	).Scan(&purchaseID, &amount, &alreadyRefunded, &currency, &paymentMethod, &stripePaymentID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 
-	// Compute refund amount.
+	// Compute refund amount. "unused" prorates a credit pack by the fraction
+	// of credits the student hasn't spent — you only give back what wasn't
+	// used. This is the pass-allocation rule made concrete.
 	refunded := 0
 	switch in.Refund {
 	case "full":
@@ -535,6 +534,24 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 			refunded = amount // unlimited fallback: refund full
 		}
 	}
+	// Don't exceed what's still refundable (a prior partial refund may exist).
+	if refunded > amount-alreadyRefunded {
+		refunded = amount - alreadyRefunded
+	}
+
+	// Issue the real Stripe refund (no-op for non-card) before the DB tx.
+	if refunded > 0 {
+		if err := s.issueStripeRefund(ctx, studioID, stripePaymentID, refunded,
+			fmt.Sprintf("%s:void:%d", purchaseID, alreadyRefunded+refunded)); err != nil {
+			return nil, err
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 
 	// Cancel upcoming bookings that used this entitlement.
 	if _, err := tx.ExecContext(ctx, `
@@ -564,9 +581,16 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 		if refunded > 0 {
 			newStatus = "refunded"
 		}
+		// Record the money side too (amount, who, when) so the purchase row is
+		// the single source of truth for "how much was refunded".
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE purchases SET status = ? WHERE id = ?`,
-			newStatus, purchaseID,
+			UPDATE purchases
+			   SET status = ?,
+			       refund_amount_minor = refund_amount_minor + ?,
+			       refunded_at = COALESCE(refunded_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			       refunded_by = ?
+			 WHERE id = ?`,
+			newStatus, refunded, actorID, purchaseID,
 		); err != nil {
 			return nil, err
 		}

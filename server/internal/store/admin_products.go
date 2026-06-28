@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/studio52/yoga-school/server/internal/payments"
+	"github.com/studio52/yoga-school/server/internal/secrets"
 )
 
 // AdminProduct extends the public Product with manager-only fields.
@@ -27,7 +30,7 @@ type AdminProductUsage struct {
 func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]AdminProduct, error) {
 	const q = `
 		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
-		       s.currency, p.billing_type, p.pass_kind,
+		       s.currency, p.billing_type, p.billing_interval, p.pass_kind,
 		       p.credits, p.validity_days, p.is_hero,
 		       p.is_archived, p.display_order
 		  FROM products p
@@ -45,12 +48,13 @@ func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]Admin
 			p        AdminProduct
 			credits  sql.NullInt64
 			validity sql.NullInt64
+			interval sql.NullString
 			heroInt  int
 			archInt  int
 		)
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
-			&p.Currency, &p.BillingType, &p.PassKind,
+			&p.Currency, &p.BillingType, &interval, &p.PassKind,
 			&credits, &validity, &heroInt, &archInt, &p.DisplayOrder,
 		); err != nil {
 			return nil, err
@@ -62,6 +66,10 @@ func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]Admin
 		if validity.Valid {
 			n := int(validity.Int64)
 			p.ValidityDays = &n
+		}
+		if interval.Valid {
+			v := interval.String
+			p.BillingInterval = &v
 		}
 		p.IsHero = heroInt != 0
 		p.IsArchived = archInt != 0
@@ -180,16 +188,17 @@ func (s *Store) hydrateAdminProductExtras(ctx context.Context, studioID string, 
 
 // AdminProductInput is the body for POST + PATCH /admin/products.
 type AdminProductInput struct {
-	Name         *string  `json:"name,omitempty"`
-	Description  *string  `json:"description,omitempty"`
-	PriceMinor   *int     `json:"price_minor,omitempty"`
-	BillingType  *string  `json:"billing_type,omitempty"`
-	PassKind     *string  `json:"pass_kind,omitempty"`
-	Credits      *int     `json:"credits,omitempty"`
-	ValidityDays *int     `json:"validity_days,omitempty"`
-	IsHero       *bool    `json:"is_hero,omitempty"`
-	DisplayOrder *int     `json:"display_order,omitempty"`
-	ClassTypeIDs []string `json:"class_type_ids,omitempty"`
+	Name            *string  `json:"name,omitempty"`
+	Description     *string  `json:"description,omitempty"`
+	PriceMinor      *int     `json:"price_minor,omitempty"`
+	BillingType     *string  `json:"billing_type,omitempty"`
+	BillingInterval *string  `json:"billing_interval,omitempty"`
+	PassKind        *string  `json:"pass_kind,omitempty"`
+	Credits         *int     `json:"credits,omitempty"`
+	ValidityDays    *int     `json:"validity_days,omitempty"`
+	IsHero          *bool    `json:"is_hero,omitempty"`
+	DisplayOrder    *int     `json:"display_order,omitempty"`
+	ClassTypeIDs    []string `json:"class_type_ids,omitempty"`
 }
 
 func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string, in AdminProductInput) (string, error) {
@@ -214,13 +223,38 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string
 		return "", errors.New("pass_kind must be credit|unlimited")
 	}
 
+	// Recurring products bill on an interval (default monthly). One-time
+	// products carry no interval.
+	var interval any
+	intervalStr := ""
+	if *in.BillingType == "recurring" {
+		intervalStr = "month"
+		if in.BillingInterval != nil {
+			intervalStr = *in.BillingInterval
+		}
+		if intervalStr != "month" && intervalStr != "year" {
+			return "", errors.New("billing_interval must be month|year")
+		}
+		interval = intervalStr
+	}
+
+	id := NewID()
+
+	// Mirror a recurring product into the studio's Stripe account as a
+	// Product + recurring Price before persisting, so the row carries the
+	// price id the subscription checkout charges against. Skipped (ids left
+	// null, backfilled on a later save) when Stripe isn't configured yet.
+	stripeProductID, stripePriceID, err := s.mirrorRecurringPrice(
+		ctx, studioID, *in.BillingType, *in.Name, *in.PriceMinor, intervalStr)
+	if err != nil {
+		return "", err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
-
-	id := NewID()
 	hero := 0
 	if in.IsHero != nil && *in.IsHero {
 		hero = 1
@@ -243,11 +277,13 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO products
-		  (id, studio_id, name, description, price_minor, billing_type, pass_kind,
-		   credits, validity_days, is_hero, display_order, is_archived)
-		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-		id, studioID, *in.Name, description, *in.PriceMinor, *in.BillingType, *in.PassKind,
-		credits, validity, hero, order,
+		  (id, studio_id, name, description, price_minor, billing_type, billing_interval,
+		   pass_kind, credits, validity_days, is_hero, display_order, is_archived,
+		   stripe_product_id, stripe_price_id)
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		id, studioID, *in.Name, description, *in.PriceMinor, *in.BillingType, interval,
+		*in.PassKind, credits, validity, hero, order,
+		nullableStr(stripeProductID), nullableStr(stripePriceID),
 	)
 	if err != nil {
 		return "", err
@@ -267,6 +303,69 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string
 }
 
 func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, actorID, productID string, in AdminProductInput) error {
+	// Load current state up front so we can decide whether the Stripe Price
+	// needs (re)creating. Stripe Prices are immutable, so any price/interval
+	// change — or first-time recurring — mints a new Price and archives the
+	// old one. Done before the write tx so the network call doesn't hold the
+	// single-writer SQLite lock.
+	var (
+		curBillingType   string
+		curPriceMinor    int
+		curName          string
+		curInterval      sql.NullString
+		curStripePriceID sql.NullString
+	)
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT billing_type, price_minor, name, billing_interval, stripe_price_id
+		  FROM products WHERE id = ? AND studio_id = ?`,
+		productID, studioID,
+	).Scan(&curBillingType, &curPriceMinor, &curName, &curInterval, &curStripePriceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	effBillingType := curBillingType
+	if in.BillingType != nil {
+		effBillingType = *in.BillingType
+	}
+	effPrice := curPriceMinor
+	if in.PriceMinor != nil {
+		effPrice = *in.PriceMinor
+	}
+	effName := curName
+	if in.Name != nil {
+		effName = *in.Name
+	}
+	effInterval := curInterval.String
+	if in.BillingInterval != nil {
+		effInterval = *in.BillingInterval
+	}
+	if effBillingType == "recurring" {
+		if effInterval == "" {
+			effInterval = "month"
+		}
+		if effInterval != "month" && effInterval != "year" {
+			return errors.New("billing_interval must be month|year")
+		}
+	}
+
+	// (Re)mirror to Stripe when recurring and the price/interval changed, the
+	// product just became recurring, or it was never mirrored.
+	var newStripeProductID, newStripePriceID string
+	remirror := effBillingType == "recurring" && (curStripePriceID.String == "" ||
+		(in.PriceMinor != nil && *in.PriceMinor != curPriceMinor) ||
+		(in.BillingInterval != nil && *in.BillingInterval != curInterval.String) ||
+		(in.BillingType != nil && curBillingType != "recurring"))
+	if remirror {
+		pid, prid, err := s.mirrorRecurringPrice(ctx, studioID, effBillingType, effName, effPrice, effInterval)
+		if err != nil {
+			return err
+		}
+		newStripeProductID, newStripePriceID = pid, prid
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -293,6 +392,16 @@ func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, actorID, produ
 		}
 		set = append(set, "billing_type = ?")
 		args = append(args, *in.BillingType)
+	}
+	if effBillingType == "recurring" {
+		set = append(set, "billing_interval = ?")
+		args = append(args, effInterval)
+	} else if in.BillingType != nil { // switched to one_time
+		set = append(set, "billing_interval = NULL")
+	}
+	if remirror {
+		set = append(set, "stripe_product_id = ?", "stripe_price_id = ?")
+		args = append(args, nullableStr(newStripeProductID), nullableStr(newStripePriceID))
 	}
 	if in.PassKind != nil {
 		if *in.PassKind != "credit" && *in.PassKind != "unlimited" {
@@ -384,7 +493,53 @@ func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, actorID, produ
 	if err := s.writeAuditTx(ctx, tx, studioID, actorID, "product_update", "product", productID, detail); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Deactivate the superseded Stripe Price (best-effort: the repoint is
+	// already committed, so a stale active Price is harmless cosmetic clutter).
+	if remirror && curStripePriceID.String != "" {
+		if keys, err := s.stripeKeys(ctx, studioID); err == nil {
+			_ = s.gateway.ArchivePrice(ctx, keys.SecretKey, curStripePriceID.String)
+		}
+	}
+	return nil
+}
+
+// mirrorRecurringPrice creates a Stripe Product + recurring Price for a
+// recurring product and returns their ids. Returns ("","",nil) for one-time
+// products or when Stripe isn't configured yet (so the product still saves and
+// can be backfilled on a later edit once keys exist).
+func (s *Store) mirrorRecurringPrice(ctx context.Context, studioID, billingType, name string, priceMinor int, interval string) (string, string, error) {
+	if billingType != "recurring" || s.gateway == nil {
+		return "", "", nil
+	}
+	keys, err := s.LoadStripeKeysForUse(ctx, studioID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, secrets.ErrNoMasterKey) {
+			return "", "", nil // not configured — defer mirroring
+		}
+		return "", "", fmt.Errorf("load stripe keys: %w", err)
+	}
+	var currency string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT currency FROM studios WHERE id = ?`, studioID).Scan(&currency); err != nil {
+		return "", "", err
+	}
+	return s.gateway.CreateRecurringPrice(ctx, keys.SecretKey, payments.PriceParams{
+		ProductName: name,
+		AmountMinor: int64(priceMinor),
+		Currency:    currency,
+		Interval:    interval,
+	})
+}
+
+// nullableStr maps "" → nil so an empty id stores as SQL NULL.
+func nullableStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func (s *Store) replaceProductClassTypes(ctx context.Context, tx *sql.Tx, productID string, ids []string) error {

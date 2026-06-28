@@ -296,7 +296,7 @@ func (s *Store) EligibleEntitlements(ctx context.Context, studioID, userID, clas
 		   AND e.user_id   = ?
 		   AND e.status    = 'active'
 		   AND ect.class_type_id = c.class_type_id
-		   AND (e.expires_at IS NULL OR e.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		   AND (e.expires_at IS NULL OR e.expires_at >= c.starts_at)
 		   AND (e.pass_kind = 'unlimited' OR e.credits_remaining > 0)
 		 ORDER BY (e.pass_kind = 'unlimited') DESC, e.expires_at ASC`
 
@@ -334,6 +334,23 @@ type BookingError struct{ Code, Message string }
 
 func (e *BookingError) Error() string { return e.Message }
 
+// checkBookingWindow rejects a booking for a class scheduled beyond the
+// studio's book-ahead window. windowDays <= 0 means no limit. Shared by
+// CreateBooking and BookingPreview so the preview hides what the gate refuses.
+func checkBookingWindow(windowDays int, classStart time.Time) error {
+	if windowDays <= 0 {
+		return nil
+	}
+	maxStart := time.Now().UTC().AddDate(0, 0, windowDays)
+	if classStart.After(maxStart) {
+		return &BookingError{
+			Code:    "outside_booking_window",
+			Message: fmt.Sprintf("You can only book up to %d days in advance", windowDays),
+		}
+	}
+	return nil
+}
+
 // CreateBooking inserts a booking after verifying capacity + entitlement.
 // If plusOne is true, an additional is_plus_one=1 row is inserted in the same
 // transaction and credit consumption doubles. Gated by studio's
@@ -358,7 +375,7 @@ func (s *Store) CreateBooking(ctx context.Context, studioID, userID, classID, en
 	// Verify the class exists + has room (count both seats if +1).
 	// Also grab the class title so the audit row can render with a
 	// human label instead of an opaque class_id.
-	var capacity, bookedCount, cutoffHours, plusOneAllowed int
+	var capacity, bookedCount, cutoffHours, plusOneAllowed, bookingWindowDays int
 	var classStartStr, classTitle string
 	err = tx.QueryRowContext(ctx, `
 		SELECT c.starts_at,
@@ -367,12 +384,13 @@ func (s *Store) CreateBooking(ctx context.Context, studioID, userID, classID, en
 		         WHERE b.class_id = c.id AND b.status = 'booked'),
 		       s.free_cancel_cutoff_hours,
 		       s.allow_student_plus_one,
+		       s.booking_window_days,
 		       COALESCE(c.title,'')
 		  FROM classes c
 		  JOIN studios s ON s.id = c.studio_id
 		 WHERE c.id = ? AND c.studio_id = ? AND c.status = 'scheduled'`,
 		classID, studioID,
-	).Scan(&classStartStr, &capacity, &bookedCount, &cutoffHours, &plusOneAllowed, &classTitle)
+	).Scan(&classStartStr, &capacity, &bookedCount, &cutoffHours, &plusOneAllowed, &bookingWindowDays, &classTitle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", &BookingError{Code: "class_not_found", Message: "class not found"}
 	}
@@ -390,6 +408,11 @@ func (s *Store) CreateBooking(ctx context.Context, studioID, userID, classID, en
 			Code:    "class_already_started",
 			Message: "Class has already started",
 		}
+	}
+	// Book-ahead window: studios can cap how far in advance a student books
+	// (0 = no limit). Stops one student locking up seats months out.
+	if err := checkBookingWindow(bookingWindowDays, classStart); err != nil {
+		return "", err
 	}
 
 	// Refuse if the user is currently on the class's waitlist. The seat-
@@ -435,7 +458,7 @@ func (s *Store) CreateBooking(ctx context.Context, studioID, userID, classID, en
 		 WHERE e.id = ? AND e.user_id = ? AND e.studio_id = ?
 		   AND e.status = 'active'
 		   AND ect.class_type_id = c.class_type_id
-		   AND (e.expires_at IS NULL OR e.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		   AND (e.expires_at IS NULL OR e.expires_at >= c.starts_at)`,
 		classID, entitlementID, userID, studioID,
 	).Scan(&passKind, &creditsR)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -662,7 +685,7 @@ func (s *Store) AddPlusOneToBooking(ctx context.Context, studioID, userID, class
 		 WHERE e.id = ? AND e.user_id = ? AND e.studio_id = ?
 		   AND e.status = 'active'
 		   AND ect.class_type_id = c.class_type_id
-		   AND (e.expires_at IS NULL OR e.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		   AND (e.expires_at IS NULL OR e.expires_at >= c.starts_at)`,
 		classID, entitlementID, userID, studioID,
 	).Scan(&passKind, &creditsR)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -909,19 +932,20 @@ func (s *Store) BookingPreview(ctx context.Context, studioID, userID, classID, e
 	out := &BookingPreview{CanBook: true, PlusOneEligible: true}
 
 	// Class + capacity + studio plus-one gate.
-	var capacity, bookedCount, plusOneStudioAllowed int
+	var capacity, bookedCount, plusOneStudioAllowed, bookingWindowDays int
 	var classStartStr string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT c.starts_at,
 		       c.capacity,
 		       (SELECT COUNT(*) FROM bookings b
 		         WHERE b.class_id = c.id AND b.status = 'booked'),
-		       s.allow_student_plus_one
+		       s.allow_student_plus_one,
+		       s.booking_window_days
 		  FROM classes c
 		  JOIN studios s ON s.id = c.studio_id
 		 WHERE c.id = ? AND c.studio_id = ? AND c.status = 'scheduled'`,
 		classID, studioID,
-	).Scan(&classStartStr, &capacity, &bookedCount, &plusOneStudioAllowed)
+	).Scan(&classStartStr, &capacity, &bookedCount, &plusOneStudioAllowed, &bookingWindowDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -940,6 +964,15 @@ func (s *Store) BookingPreview(ctx context.Context, studioID, userID, classID, e
 		out.BlockMessage = "Class has already started"
 		out.PlusOneEligible = false
 		out.PlusOneBlockReason = "class_already_started"
+		return out, nil
+	}
+	if werr := checkBookingWindow(bookingWindowDays, classStart); werr != nil {
+		be := werr.(*BookingError)
+		out.CanBook = false
+		out.BlockReason = be.Code
+		out.BlockMessage = be.Message
+		out.PlusOneEligible = false
+		out.PlusOneBlockReason = be.Code
 		return out, nil
 	}
 	if bookedCount >= capacity {
@@ -967,7 +1000,7 @@ func (s *Store) BookingPreview(ctx context.Context, studioID, userID, classID, e
 		 WHERE e.id = ? AND e.user_id = ? AND e.studio_id = ?
 		   AND e.status = 'active'
 		   AND ect.class_type_id = c.class_type_id
-		   AND (e.expires_at IS NULL OR e.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		   AND (e.expires_at IS NULL OR e.expires_at >= c.starts_at)`,
 		classID, entitlementID, userID, studioID,
 	).Scan(&passKind, &creditsR)
 	if errors.Is(err, sql.ErrNoRows) {

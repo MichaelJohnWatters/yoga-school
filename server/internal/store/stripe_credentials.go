@@ -41,8 +41,15 @@ type StripeCredentialsView struct {
 	SecretKeySet       bool    `json:"secret_key_set"`
 	WebhookSecretLast4 *string `json:"webhook_secret_last4,omitempty"`
 	WebhookSecretSet   bool    `json:"webhook_secret_set"`
-	UpdatedBy          *string `json:"updated_by,omitempty"`
-	UpdatedAt          string  `json:"updated_at,omitempty"`
+	// Wallet (Apple Pay / Google Pay) presentation config — not secrets.
+	// These drive what the client PaymentSheet renders; actual availability
+	// also depends on the studio's Stripe Dashboard (dynamic methods).
+	ApplePayEnabled     bool    `json:"apple_pay_enabled"`
+	GooglePayEnabled    bool    `json:"google_pay_enabled"`
+	MerchantDisplayName *string `json:"merchant_display_name,omitempty"`
+	MerchantCountryCode *string `json:"merchant_country_code,omitempty"`
+	UpdatedBy           *string `json:"updated_by,omitempty"`
+	UpdatedAt           string  `json:"updated_at,omitempty"`
 	// EncryptionConfigured tells the UI whether the server has a master
 	// key. When false, the panel should disable secret-setting fields and
 	// surface an "ask ops to set STRIPE_KEY_ENC_MASTER" hint.
@@ -58,15 +65,19 @@ func (s *Store) StripeCredentialsFor(ctx context.Context, studioID string) (*Str
 		EncryptionConfigured: s.sealer.Available(),
 	}
 	var (
-		mode                                                   string
+		mode                                                    string
 		accountID, pubKey, secretLast4, webhookLast4, updatedBy sql.NullString
-		updatedAt                                              sql.NullString
+		updatedAt                                               sql.NullString
+		merchantName, merchantCountry                           sql.NullString
+		applePay, googlePay                                     int
 		secretCipher, webhookCipher                             []byte
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT mode, account_id, publishable_key,
 		       secret_key_cipher, secret_key_last4,
 		       webhook_secret_cipher, webhook_secret_last4,
+		       apple_pay_enabled, google_pay_enabled,
+		       merchant_display_name, merchant_country_code,
 		       updated_by, updated_at
 		  FROM studio_stripe_credentials
 		 WHERE studio_id = ?`,
@@ -74,6 +85,8 @@ func (s *Store) StripeCredentialsFor(ctx context.Context, studioID string) (*Str
 	).Scan(&mode, &accountID, &pubKey,
 		&secretCipher, &secretLast4,
 		&webhookCipher, &webhookLast4,
+		&applePay, &googlePay,
+		&merchantName, &merchantCountry,
 		&updatedBy, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil // empty form
@@ -82,6 +95,16 @@ func (s *Store) StripeCredentialsFor(ctx context.Context, studioID string) (*Str
 		return nil, err
 	}
 	out.Mode = mode
+	out.ApplePayEnabled = applePay != 0
+	out.GooglePayEnabled = googlePay != 0
+	if merchantName.Valid {
+		v := merchantName.String
+		out.MerchantDisplayName = &v
+	}
+	if merchantCountry.Valid {
+		v := merchantCountry.String
+		out.MerchantCountryCode = &v
+	}
 	if accountID.Valid {
 		v := accountID.String
 		out.AccountID = &v
@@ -115,11 +138,16 @@ func (s *Store) StripeCredentialsFor(ctx context.Context, studioID string) (*Str
 // doesn't touch a column leaves it alone. Pass an empty string to clear a
 // previously-set secret (the *_set bool flips back to false).
 type StripeCredentialsPatch struct {
-	Mode           *string `json:"mode,omitempty"`             // "test" | "live"
+	Mode           *string `json:"mode,omitempty"`           // "test" | "live"
 	AccountID      *string `json:"account_id,omitempty"`
 	PublishableKey *string `json:"publishable_key,omitempty"`
-	SecretKey      *string `json:"secret_key,omitempty"`       // plaintext sk_…
-	WebhookSecret  *string `json:"webhook_secret,omitempty"`   // plaintext whsec_…
+	SecretKey      *string `json:"secret_key,omitempty"`     // plaintext sk_…
+	WebhookSecret  *string `json:"webhook_secret,omitempty"` // plaintext whsec_…
+	// Wallet config (not secrets). nil → unchanged.
+	ApplePayEnabled     *bool   `json:"apple_pay_enabled,omitempty"`
+	GooglePayEnabled    *bool   `json:"google_pay_enabled,omitempty"`
+	MerchantDisplayName *string `json:"merchant_display_name,omitempty"` // "" clears
+	MerchantCountryCode *string `json:"merchant_country_code,omitempty"` // "" clears
 }
 
 // UpdateStripeCredentials upserts the row. Secrets pass through the
@@ -173,6 +201,38 @@ func (s *Store) UpdateStripeCredentials(ctx context.Context, studioID, actorID s
 		}
 	}
 
+	// Wallet config (not secrets). Bools: nil → unchanged. Strings: nil →
+	// unchanged, "" → clear.
+	applePay := boolToInt(cur.ApplePayEnabled)
+	if in.ApplePayEnabled != nil {
+		applePay = boolToInt(*in.ApplePayEnabled)
+	}
+	googlePay := boolToInt(cur.GooglePayEnabled)
+	if in.GooglePayEnabled != nil {
+		googlePay = boolToInt(*in.GooglePayEnabled)
+	}
+	var merchantName, merchantCountry any
+	if cur.MerchantDisplayName != nil {
+		merchantName = *cur.MerchantDisplayName
+	}
+	if in.MerchantDisplayName != nil {
+		if *in.MerchantDisplayName == "" {
+			merchantName = nil
+		} else {
+			merchantName = *in.MerchantDisplayName
+		}
+	}
+	if cur.MerchantCountryCode != nil {
+		merchantCountry = *cur.MerchantCountryCode
+	}
+	if in.MerchantCountryCode != nil {
+		if *in.MerchantCountryCode == "" {
+			merchantCountry = nil
+		} else {
+			merchantCountry = *in.MerchantCountryCode
+		}
+	}
+
 	// Secrets: nil → unchanged, "" → clear, non-empty → re-encrypt.
 	var (
 		secretCipher, secretNonce []byte
@@ -214,15 +274,21 @@ func (s *Store) UpdateStripeCredentials(ctx context.Context, studioID, actorID s
 	q := `
 		INSERT INTO studio_stripe_credentials
 		    (studio_id, mode, account_id, publishable_key,
+		     apple_pay_enabled, google_pay_enabled,
+		     merchant_display_name, merchant_country_code,
 		     secret_key_cipher, secret_key_nonce, secret_key_last4,
 		     webhook_secret_cipher, webhook_secret_nonce, webhook_secret_last4,
 		     updated_by, updated_at)
-		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		            strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		ON CONFLICT(studio_id) DO UPDATE SET
 		    mode = excluded.mode,
 		    account_id = excluded.account_id,
 		    publishable_key = excluded.publishable_key,
+		    apple_pay_enabled = excluded.apple_pay_enabled,
+		    google_pay_enabled = excluded.google_pay_enabled,
+		    merchant_display_name = excluded.merchant_display_name,
+		    merchant_country_code = excluded.merchant_country_code,
 		    secret_key_cipher = CASE WHEN ? THEN excluded.secret_key_cipher
 		                             ELSE studio_stripe_credentials.secret_key_cipher END,
 		    secret_key_nonce = CASE WHEN ? THEN excluded.secret_key_nonce
@@ -240,6 +306,7 @@ func (s *Store) UpdateStripeCredentials(ctx context.Context, studioID, actorID s
 
 	args := []any{
 		studioID, mode, accountID, pubKey,
+		applePay, googlePay, merchantName, merchantCountry,
 		secretCipher, secretNonce, secretLast4,
 		webhookCipher, webhookNonce, webhookLast4,
 		actorID,
@@ -268,6 +335,18 @@ func (s *Store) UpdateStripeCredentials(ctx context.Context, studioID, actorID s
 	}
 	if in.PublishableKey != nil {
 		detail["publishable_key"] = "set"
+	}
+	if in.ApplePayEnabled != nil {
+		detail["apple_pay_enabled"] = *in.ApplePayEnabled
+	}
+	if in.GooglePayEnabled != nil {
+		detail["google_pay_enabled"] = *in.GooglePayEnabled
+	}
+	if in.MerchantDisplayName != nil {
+		detail["merchant_display_name"] = "set"
+	}
+	if in.MerchantCountryCode != nil {
+		detail["merchant_country_code"] = "set"
 	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "stripe_credentials_update",
 		"studio", studioID, detail)
@@ -336,6 +415,51 @@ func (s *Store) LoadStripeKeysForUse(ctx context.Context, studioID string) (*Dec
 		out.WebhookSecret = v
 	}
 	return out, nil
+}
+
+// PublicPaymentConfig is the non-secret subset a signed-in student needs to
+// drive the client-side PaymentSheet. The publishable key is safe to expose
+// (it's meant for client use); secrets never appear here.
+type PublicPaymentConfig struct {
+	PublishableKey      string `json:"publishable_key"`
+	Mode                string `json:"mode"` // "test" | "live"
+	ApplePayEnabled     bool   `json:"apple_pay_enabled"`
+	GooglePayEnabled    bool   `json:"google_pay_enabled"`
+	MerchantDisplayName string `json:"merchant_display_name"`
+	MerchantCountryCode string `json:"merchant_country_code"`
+}
+
+// PaymentConfigFor returns the studio's public payment config for the client.
+// Reuses StripeCredentialsFor (which already masks secrets) and flattens it to
+// the safe-to-send shape. PublishableKey is empty when the studio hasn't
+// configured Stripe — the client treats that as "card payments unavailable".
+func (s *Store) PaymentConfigFor(ctx context.Context, studioID string) (*PublicPaymentConfig, error) {
+	v, err := s.StripeCredentialsFor(ctx, studioID)
+	if err != nil {
+		return nil, err
+	}
+	out := &PublicPaymentConfig{
+		Mode:             v.Mode,
+		ApplePayEnabled:  v.ApplePayEnabled,
+		GooglePayEnabled: v.GooglePayEnabled,
+	}
+	if v.PublishableKey != nil {
+		out.PublishableKey = *v.PublishableKey
+	}
+	if v.MerchantDisplayName != nil {
+		out.MerchantDisplayName = *v.MerchantDisplayName
+	}
+	if v.MerchantCountryCode != nil {
+		out.MerchantCountryCode = *v.MerchantCountryCode
+	}
+	return out, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // last4 returns the last 4 chars of a key for masked display. Returns the

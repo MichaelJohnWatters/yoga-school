@@ -9,6 +9,12 @@ def yoga_resources(root='.'):
 
     node_bin = os.getenv('HOME', '') + '/.nvm/versions/node/v20.20.1/bin'
 
+    # Source repo-root .env (Stripe keys + STRIPE_KEY_ENC_MASTER) into a
+    # resource's shell when present. Tilt doesn't auto-load .env; `set -a`
+    # exports every var so `go run` / `flutter test` inherit them. A missing
+    # .env is a no-op (current behaviour — Stripe stays disabled).
+    dotenv = 'set -a; [ -f .env ] && . ./.env; set +a; '
+
     local_resource(
         'yoga-firebase',
         serve_cmd=cd + 'PATH=' + node_bin + ':$PATH firebase emulators:start --only auth,storage --project yoga-school-dev',
@@ -37,12 +43,22 @@ def yoga_resources(root='.'):
         auto_init=False,
     )
 
+    # .env is sourced first so STRIPE_KEY_ENC_MASTER (when set) enables the
+    # Stripe payment gateway — without it the server runs in dev_stub mode, the
+    # same as before. A malformed master key makes the server refuse to boot by
+    # design (the prod-parity guard in SealerFromEnv).
     local_resource(
         'yoga-server',
-        serve_cmd=server_cd + 'FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIREBASE_PROJECT_ID=yoga-school-dev FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com STORAGE_EMULATOR_HOST=localhost:9199 MEDIA_PUBLIC_URL_BASE=https://localhost:5443 go run ./cmd/server -addr :8080',
+        serve_cmd=cd + dotenv + 'cd server && FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 FIREBASE_PROJECT_ID=yoga-school-dev FIREBASE_STORAGE_BUCKET=yoga-school-dev.appspot.com STORAGE_EMULATOR_HOST=localhost:9199 MEDIA_PUBLIC_URL_BASE=https://localhost:5443 go run ./cmd/server -addr :8080',
         resource_deps=['yoga-firebase'],
         labels=['yoga-school'],
         links=[link('http://localhost:8080', 'API')],
+        # Tilt serializes local_resource updates by default. The bootstrap-*-with-stripe chain
+        # ends with configure-stripe-dev.sh, which blocks waiting for this server's /healthz — but
+        # a serialized server can't start until that chain finishes, so it deadlocks (server never
+        # comes up, configure-stripe times out). allow_parallel lets the server boot *during* the
+        # bootstrap so the /healthz wait succeeds.
+        allow_parallel=True,
     )
 
     # --pid-file lets the hotreload watcher (below) signal this process on
@@ -210,6 +226,79 @@ exit 0
         'yoga-bootstrap-api',
         cmd=_bootstrap_cmd('-bootstrap-api'),
         resource_deps=['yoga-firebase'],
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+    )
+
+    # Same as yoga-bootstrap-api, then points studio s52 at the Stripe test keys
+    # from .env (via /dev/configure-stripe) so you can manually test the real
+    # Checkout flow without pasting keys in the manager UI. The Stripe step
+    # self-skips when .env has no keys. You still run `stripe listen` yourself
+    # for webhook delivery (set STRIPE_WEBHOOK_SECRET in .env to wire that too).
+    local_resource(
+        'yoga-bootstrap-api-with-stripe',
+        cmd=_bootstrap_cmd('-bootstrap-api') + ' && ./scripts/configure-stripe-dev.sh',
+        resource_deps=['yoga-firebase'],
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+    )
+
+    # Stripe webhook delivery — always on (Stripe is mandatory; the web hosted
+    # Checkout flow mints the pass via the checkout.session.completed webhook).
+    # Forwards straight to the Go server (:8080) — NOT through Caddy, which
+    # routes /stripe/* to the Flutter app. The studio path is s52 (the dev
+    # studio). One-time setup: `stripe login`, then put the signing secret from
+    # `stripe listen --print-secret` into .env as STRIPE_WEBHOOK_SECRET so
+    # configure-stripe-dev.sh wires it onto the studio.
+    local_resource(
+        'yoga-stripe-webhook',
+        serve_cmd=cd + 'stripe listen --forward-to localhost:8080/stripe/webhook/s52',
+        resource_deps=['yoga-server'],
+        labels=['yoga-school'],
+    )
+
+    # --- Stripe e2e tests (manual one-shots) ------------------------------
+    #
+    # Both read keys from repo-root .env and self-skip when the relevant key
+    # is absent, so a click never hard-fails on a fresh checkout.
+
+    # Go full-fulfilment e2e: real money→pass round-trip against Stripe test
+    # mode (creates a PaymentIntent, confirms it with pm_card_visa via the
+    # Stripe API, our ConfirmPurchase mints the pass, then a real refund).
+    # Self-contained — needs no running stack. Behind the `stripe_e2e` build
+    # tag so it's out of the normal suite; the test loads keys from .env (runs
+    # for real when present, skips when absent). -count=1 defeats Go's test
+    # cache so a click always re-runs.
+    local_resource(
+        'yoga-e2e-stripe-go',
+        cmd=cd + 'cd server && go test -tags stripe_e2e -run StripeRealAPI ./internal/store/ -v -count=1',
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+    )
+
+    # Flutter web hosted-Checkout e2e: drives the real UI (sign in → Buy →
+    # Pay) and asserts a real checkout.stripe.com URL is produced. Needs the
+    # stack up (server with STRIPE_KEY_ENC_MASTER, so it can store the studio's
+    # keys via /dev/configure-stripe) + the test publishable/secret keys.
+    # Web integration tests can't run via `flutter test -d chrome` ("web
+    # devices are not supported"); they need `flutter drive` + chromedriver
+    # against the headless web-server device. Start chromedriver, run the
+    # drive, then clean it up — exiting with the test's own status.
+    local_resource(
+        'yoga-e2e-stripe-flutter',
+        cmd=cd + dotenv + 'cd app || exit 1; ' +
+            'chromedriver --port=4444 >/dev/null 2>&1 & CDPID=$!; sleep 1; ' +
+            'flutter drive ' +
+            '--driver=test_driver/integration_test.dart ' +
+            '--target=integration_test/checkout_session_test.dart ' +
+            '-d web-server --browser-name=chrome ' +
+            '--dart-define=STRIPE_TEST_SK="${STRIPE_TEST_SK:-${STRIPE_SECRET_KEY:-}}" ' +
+            '--dart-define=STRIPE_TEST_PK="${STRIPE_TEST_PK:-${STRIPE_PUBLISHABLE_KEY:-}}"; ' +
+            'RC=$?; kill $CDPID 2>/dev/null; exit $RC',
+        resource_deps=['yoga-server'],
         labels=['yoga-school'],
         trigger_mode=TRIGGER_MODE_MANUAL,
         auto_init=False,

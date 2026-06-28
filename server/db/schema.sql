@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS studios (
   timezone                  TEXT NOT NULL DEFAULT 'Europe/London',
   currency                  TEXT NOT NULL DEFAULT 'GBP',
   free_cancel_cutoff_hours  INTEGER NOT NULL DEFAULT 12,
+  -- How many days ahead a student may book. 0 = no limit. Enforced in the
+  -- booking paths (CreateBooking / BookingPreview / AddPlusOne). Series
+  -- enrollments are exempt — those seats are allocated by a manager.
+  booking_window_days       INTEGER NOT NULL DEFAULT 14,
   allow_student_plus_one    INTEGER NOT NULL DEFAULT 0,
   -- Light slot: the theme served when the user's pref is "light" or
   -- "system" + the device is in light mode. Required (joined, not LEFT
@@ -297,12 +301,20 @@ CREATE TABLE IF NOT EXISTS products (
   pass_kind     TEXT NOT NULL CHECK (pass_kind IN ('credit','unlimited')),
   credits       INTEGER,
   validity_days INTEGER,
+  -- For recurring products: how often Stripe bills. NULL for one_time.
+  -- The Stripe recurring Price is created with this interval.
+  billing_interval TEXT CHECK (billing_interval IN ('month','year')),
   is_hero       INTEGER NOT NULL DEFAULT 0,
   display_order INTEGER NOT NULL DEFAULT 0,
   is_archived   INTEGER NOT NULL DEFAULT 0,
-  -- Optional Stripe Price id (price_…). Set once the studio mirrors the
-  -- product into Stripe so the intent flow can charge against it.
+  -- Stripe billing objects mirrored from this product into the studio's
+  -- Stripe account. stripe_price_id (price_…) is what Checkout charges
+  -- against; stripe_product_id (prod_…) owns it. Set when a recurring
+  -- product is saved with Stripe configured. A price/interval edit creates
+  -- a new Price (Stripe Prices are immutable), archives the old one, and
+  -- repoints stripe_price_id — existing subscribers stay on their old Price.
   stripe_price_id TEXT,
+  stripe_product_id TEXT,
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -344,6 +356,17 @@ CREATE TABLE IF NOT EXISTS purchases (
   -- for cash/comp/dev_stub paths.
   stripe_payment_id TEXT,
   resulting_entitlement_id TEXT REFERENCES entitlements(id),
+  -- Chargeback / dispute tracking. A dispute is a SEPARATE event on top of a
+  -- successful payment (the cardholder's bank claws funds back) — it never
+  -- auto-revokes the pass (money ≠ pass); it surfaces on the manager's
+  -- "Payments needing attention" screen for a deliberate decision. dispute_status
+  -- holds Stripe's raw status (needs_response | under_review | won | lost | …);
+  -- NULL = no dispute. dispute_due_at is the evidence-submission deadline.
+  dispute_status     TEXT,
+  dispute_reason     TEXT,
+  dispute_amount_minor INTEGER NOT NULL DEFAULT 0,
+  disputed_at        TEXT,
+  dispute_due_at     TEXT,
   created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id, created_at);
@@ -417,8 +440,91 @@ CREATE TABLE IF NOT EXISTS studio_stripe_credentials (
   webhook_secret_cipher      BLOB,
   webhook_secret_nonce       BLOB,
   webhook_secret_last4       TEXT,
+  -- Wallet (Apple Pay / Google Pay) presentation config. These are NOT
+  -- secrets — they drive what the client-side PaymentSheet renders. Actual
+  -- wallet availability is also governed by the studio's Stripe Dashboard
+  -- (dynamic payment methods read from there); these toggles are the app's
+  -- half. apple_pay needs a merchant identifier in the iOS app entitlements
+  -- (platform-level, not per studio), so we only store the enable flag here.
+  apple_pay_enabled          INTEGER NOT NULL DEFAULT 0,
+  google_pay_enabled         INTEGER NOT NULL DEFAULT 0,
+  merchant_display_name      TEXT,
+  merchant_country_code      TEXT,
   updated_by                 TEXT REFERENCES users(id),
   updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- Webhook idempotency. Stripe may redeliver the same event (retries, network
+-- flaps); we record each processed event id so a redelivery is a cheap no-op
+-- on top of the already-idempotent ConfirmPurchase. event_id is Stripe's
+-- evt_… string (app-assigned, no AUTOINCREMENT — portable to Postgres).
+CREATE TABLE IF NOT EXISTS processed_stripe_events (
+  event_id      TEXT PRIMARY KEY,
+  studio_id     TEXT NOT NULL REFERENCES studios(id),
+  event_type    TEXT NOT NULL,
+  processed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- ===== Memberships (recurring subscriptions) =============================
+--
+-- One Stripe Customer per (studio, student), reused across subscriptions so a
+-- student who re-subscribes keeps their saved payment methods. Created lazily
+-- on the first subscription checkout. cus_… lives only in the studio's Stripe
+-- account; we just cache the id.
+CREATE TABLE IF NOT EXISTS stripe_customers (
+  studio_id          TEXT NOT NULL REFERENCES studios(id),
+  user_id            TEXT NOT NULL REFERENCES users(id),
+  stripe_customer_id TEXT NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (studio_id, user_id)
+);
+
+-- A membership = a Stripe Subscription that rolls an unlimited entitlement.
+-- The webhook is authoritative (mirrors the one-time purchase design):
+--   checkout.session.completed (mode=subscription) → link sub, status='active'
+--   invoice.paid                                   → (re)grant/extend entitlement
+--   invoice.payment_failed                         → status='past_due'
+--   customer.subscription.updated                  → status + cancel_at_period_end
+--   customer.subscription.deleted                  → status='canceled', end access
+--
+-- stripe_checkout_session_id holds the cs_… until completion swaps in the
+-- sub_… (parallels how pending purchases hold cs_… in stripe_payment_id).
+-- entitlement_id points at the single rolling unlimited pass; renewals extend
+-- its expires_at rather than minting a new row.
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                         TEXT PRIMARY KEY,
+  studio_id                  TEXT NOT NULL REFERENCES studios(id),
+  user_id                    TEXT NOT NULL REFERENCES users(id),
+  product_id                 TEXT NOT NULL REFERENCES products(id),
+  stripe_customer_id         TEXT NOT NULL,
+  stripe_subscription_id     TEXT UNIQUE,
+  stripe_checkout_session_id TEXT,
+  status                     TEXT NOT NULL DEFAULT 'pending'
+                               CHECK (status IN ('pending','active','past_due',
+                                                 'canceled','incomplete_expired')),
+  cancel_at_period_end       INTEGER NOT NULL DEFAULT 0,
+  current_period_end         TEXT,
+  entitlement_id             TEXT REFERENCES entitlements(id),
+  currency                   TEXT NOT NULL,
+  amount_minor               INTEGER NOT NULL,
+  created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(studio_id, user_id, status);
+
+-- Stripe Terminal readers registered to a studio for in-person card payments.
+-- Each reader belongs to a Terminal Location (tml_…) in the studio's Stripe
+-- account; the first reader lazily creates the Location and later readers
+-- reuse it. We cache only the ids — the reader hardware + card data live in
+-- Stripe. In-person sales are ordinary card_present PaymentIntents fulfilled by
+-- the same payment_intent.succeeded webhook as online card sales.
+CREATE TABLE IF NOT EXISTS terminal_readers (
+  studio_id   TEXT NOT NULL REFERENCES studios(id),
+  reader_id   TEXT NOT NULL,        -- tmr_…
+  location_id TEXT NOT NULL,        -- tml_…
+  label       TEXT,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (studio_id, reader_id)
 );
 
 -- ===== Notifications + waitlist =========================================

@@ -50,6 +50,7 @@ class _AdminProductEditorScreenState
   final _credits = TextEditingController();
   final _validity = TextEditingController();
   String _billing = 'one_time';
+  String _interval = 'month'; // billing interval when _billing == 'recurring'
   String _passKind = 'credit';
   Set<String> _classTypeIds = {};
   AdminProduct? _original;
@@ -95,6 +96,7 @@ class _AdminProductEditorScreenState
     _description.text = p.description;
     _priceCents.text = (p.priceMinor / 100).toStringAsFixed(2);
     _billing = p.billingType;
+    _interval = p.billingInterval ?? 'month';
     _passKind = p.passKind;
     _credits.text = '${p.credits ?? 1}';
     _validity.text = '${p.validityDays ?? 30}';
@@ -112,6 +114,7 @@ class _AdminProductEditorScreenState
       'description': _description.text.trim(),
       'price_minor': _priceMinor,
       'billing_type': _billing,
+      if (_billing == 'recurring') 'billing_interval': _interval,
       'pass_kind': _passKind,
       'class_type_ids': _classTypeIds.toList(),
     };
@@ -303,6 +306,24 @@ class _LeftCard extends StatelessWidget {
               ),
             ),
           ),
+          if (state._billing == 'recurring') ...[
+            const SizedBox(height: 18),
+            _FieldGroup(
+              label: 'BILLS EVERY',
+              hint:
+                  'Recurring memberships auto-renew via Stripe. A recurring '
+                  'Price is created in your Stripe account on save — needs '
+                  'Stripe configured in Settings.',
+              child: _Seg(
+                value: state._interval,
+                options: const {'month': 'Month', 'year': 'Year'},
+                onChanged: (v) {
+                  state._interval = v;
+                  state.rebuild();
+                },
+              ),
+            ),
+          ],
           const SizedBox(height: 18),
           _twoColRow(
             left: _FieldGroup(

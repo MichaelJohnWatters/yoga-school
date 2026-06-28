@@ -15,14 +15,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'src/api/api_client.dart';
 import 'src/api/api_error.dart';
 import 'src/api/models.dart';
+import 'src/api/web_redirect.dart';
 import 'src/firebase_options.dart';
+import 'src/screens/buy_screen.dart' show productsProvider;
 import 'src/screens/customer_display.dart';
 import 'src/screens/desktop/desktop_shell.dart';
 import 'src/screens/desktop/responsive.dart';
 import 'src/screens/manager/manager_shell.dart';
+import 'src/screens/profile_screen.dart'
+    show
+        entitlementsProvider,
+        purchasesProvider,
+        subscriptionsProvider,
+        paymentMethodsProvider,
+        profileSegmentProvider,
+        profileSegBookings,
+        profileSegWallet;
+import 'src/screens/purchase_success_screen.dart';
 import 'src/screens/root_shell.dart';
 import 'src/screens/sign_in_screen.dart';
 import 'src/screens/splash_screen.dart';
+import 'src/widgets/visible_tab.dart' show currentTabProvider;
 import 'src/theme/yoga_theme.dart';
 import 'src/theme/yoga_tokens.dart';
 import 'src/auth/auth_state.dart';
@@ -117,13 +130,163 @@ class YogaApp extends ConsumerWidget {
       home: user.when(
         data: (u) {
           if (u == null) return const SignInScreen();
-          return _SignedInRoot(boot: boot);
+          return CheckoutReturnHandler(child: _SignedInRoot(boot: boot));
         },
         loading: () => const SplashScreen(),
         error: (e, _) => const SignInScreen(),
       ),
     );
   }
+}
+
+/// Handles the return leg of the web hosted-Checkout redirect. On web boot it
+/// inspects the URL for ?checkout=success|cancel (set as Stripe's return URL),
+/// refreshes the wallet (the webhook is what actually mints the pass), and
+/// surfaces a confirmation. A no-op on mobile / when there's no return param.
+class CheckoutReturnHandler extends ConsumerStatefulWidget {
+  final Widget child;
+  const CheckoutReturnHandler({super.key, required this.child});
+
+  @override
+  ConsumerState<CheckoutReturnHandler> createState() =>
+      _CheckoutReturnHandlerState();
+}
+
+class _CheckoutReturnHandlerState extends ConsumerState<CheckoutReturnHandler> {
+  @override
+  void initState() {
+    super.initState();
+    final qp = Uri.base.queryParameters;
+    if (kIsWeb &&
+        (qp.containsKey('checkout') || qp.containsKey('setup'))) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _handleReturn());
+    }
+  }
+
+  Future<void> _handleReturn() async {
+    final params = Uri.base.queryParameters;
+    final outcome = params['checkout'];
+    final setup = params['setup'];
+    final sessionId = params['session_id'];
+    final bookClass = params['book_class'];
+    final productId = params['product_id'];
+    clearCheckoutQuery(); // so a refresh doesn't re-fire this
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Add-card (setup) return — independent of the purchase flow.
+    if (setup != null) {
+      if (setup == 'success') {
+        ref.invalidate(paymentMethodsProvider);
+        messenger.showSnackBar(const SnackBar(content: Text('Card saved.')));
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Card not added — nothing changed.')),
+        );
+      }
+      return;
+    }
+
+    if (outcome == null) return;
+    if (outcome == 'cancel') {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Checkout cancelled — nothing was charged.')),
+      );
+      return;
+    }
+    if (outcome != 'success') return;
+
+    final api = ref.read(apiClientProvider);
+
+    // 1. Optimistic confirm: mint the pass now instead of waiting on the
+    //    webhook (which may not be running in dev, or may land after the
+    //    browser returns). Returns the minted entitlement; the webhook stays
+    //    the authoritative backstop.
+    PurchaseEntitlement? entitlement;
+    if (sessionId != null && sessionId.isNotEmpty) {
+      try {
+        entitlement = await api.confirmCheckoutSession(sessionId);
+      } catch (_) {}
+    }
+
+    // 2. Refresh the wallet so the pass shows up, polling briefly in case it
+    //    was the webhook (not our confirm) that minted it.
+    for (var i = 0; i < 6; i++) {
+      ref.invalidate(entitlementsProvider);
+      ref.invalidate(purchasesProvider);
+      ref.invalidate(productsProvider);
+      ref.invalidate(subscriptionsProvider);
+      try {
+        final ents = await ref.read(entitlementsProvider.future);
+        if (ents.any((e) => e.isActive)) break;
+      } catch (_) {}
+      if (entitlement != null) break;
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    if (!mounted) return;
+
+    // 3. "Buy pass and book" flow: auto-book the class the student set out to
+    //    book, then land them back on the Book tab (behind the success page).
+    var booked = false;
+    if (bookClass != null && bookClass.isNotEmpty) {
+      try {
+        var entId = entitlement?.id;
+        if (entId == null) {
+          final eligible = await api.eligibleEntitlements(bookClass);
+          if (eligible.isNotEmpty) entId = eligible.first.id;
+        }
+        if (entId != null) {
+          await api.createBooking(classId: bookClass, entitlementId: entId);
+          booked = true;
+        }
+      } catch (_) {
+        // Best effort — the pass still landed; the student can book manually.
+      }
+      // Return to the Book flow (both shells honour currentTabProvider).
+      ref.read(currentTabProvider.notifier).set(1);
+    }
+    if (!mounted) return;
+
+    // 4. Full-screen success page — the same one the mobile PaymentSheet flow
+    //    shows. Needs the product + minted entitlement; falls back to a
+    //    snackbar if either is missing (e.g. the webhook hasn't landed yet).
+    if (entitlement != null && productId != null && productId.isNotEmpty) {
+      try {
+        final product = await api.getProduct(productId);
+        if (!mounted) return;
+        await Navigator.of(context).push(MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => PurchaseSuccessScreen(
+            product: product,
+            entitlement: entitlement!,
+            autoBooked: booked,
+            onGoToBookings: () {
+              ref.read(currentTabProvider.notifier).set(3); // Profile
+              ref.read(profileSegmentProvider.notifier).set(profileSegBookings);
+            },
+            onGoToWallet: () {
+              ref.read(currentTabProvider.notifier).set(3);
+              ref.read(profileSegmentProvider.notifier).set(profileSegWallet);
+            },
+          ),
+        ));
+        return;
+      } catch (_) {
+        // Fall through to the snackbar.
+      }
+    }
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(booked
+            ? "You're booked — see you in class!"
+            : 'Payment received — your pass is ready.'),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _SignedInRoot extends ConsumerWidget {

@@ -149,6 +149,13 @@ Four DB roles, three functional tiers. Keep this aligned with
 
 ## Manager — operations
 
+- ☐ **In-person card payments (Stripe Terminal)** — take real card-present
+  payments at the front desk, replacing today's manual `card_present` record.
+  Recommended shape: a server-driven countertop reader (S700 / WisePOS E)
+  driven from the manager console — no Terminal SDK in the Flutter app, reuses
+  the existing PaymentIntent + webhook fulfilment + `cus_…`. Full design,
+  data model, phasing and open decisions in
+  [`docs/payments.md` → In-person payments](payments.md#in-person-payments-stripe-terminal--planned).
 - ☐ **Marketing broadcast** — manager composes a message, fans out to
   all students (in-app notification + optional email). Chat module
   already exists; this is a one-to-many variant.

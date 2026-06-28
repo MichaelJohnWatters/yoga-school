@@ -15,8 +15,10 @@ import '../../widgets/yoga_primitives.dart';
 import 'admin_audit_screen.dart';
 import 'admin_dashboard_screen.dart';
 import 'admin_discounts_screen.dart';
+import 'admin_payments_screen.dart';
 import 'admin_product_editor_screen.dart';
 import 'admin_products_screen.dart';
+import 'admin_promotions_screen.dart';
 import 'admin_reports_screen.dart';
 import 'admin_roster_screen.dart';
 import 'admin_schedule_screen.dart';
@@ -26,6 +28,7 @@ import 'admin_settings_screen.dart';
 import 'admin_student_detail_screen.dart';
 import 'admin_students_screen.dart';
 import 'admin_templates_screen.dart';
+import 'admin_terminal_screen.dart';
 
 enum ManagerSection {
   dashboard,
@@ -33,9 +36,12 @@ enum ManagerSection {
   templates,
   products,
   discounts,
+  promotions,
   series,
   students,
   roster,
+  payments,
+  terminal,
   reports,
   audit,
   settings,
@@ -60,6 +66,9 @@ bool isSectionVisible(ManagerSection s, AccessTier tier) {
     case ManagerSection.templates:
     case ManagerSection.products:
     case ManagerSection.discounts:
+    case ManagerSection.promotions:
+    case ManagerSection.payments:
+    case ManagerSection.terminal:
     case ManagerSection.reports:
     case ManagerSection.audit:
     case ManagerSection.settings:
@@ -175,9 +184,12 @@ class _ManagerShellState extends State<ManagerShell> {
         ManagerSection.templates => 'Templates',
         ManagerSection.products => 'Products',
         ManagerSection.discounts => 'Discounts',
+        ManagerSection.promotions => 'Promotions',
         ManagerSection.series => 'Series',
         ManagerSection.students => 'Students',
         ManagerSection.roster => 'Roster',
+        ManagerSection.payments => 'Payments',
+        ManagerSection.terminal => 'Terminal',
         ManagerSection.reports => 'Reports',
         ManagerSection.audit => 'Activity',
         ManagerSection.settings => 'Settings',
@@ -487,9 +499,12 @@ const _items = <_SidebarItem>[
   _SidebarItem(ManagerSection.templates, 'Templates', Icons.event_repeat_outlined),
   _SidebarItem(ManagerSection.products, 'Products', Icons.shopping_bag_outlined),
   _SidebarItem(ManagerSection.discounts, 'Discounts', Icons.local_offer_outlined),
+  _SidebarItem(ManagerSection.promotions, 'Promotions', Icons.campaign_outlined),
   _SidebarItem(ManagerSection.series, 'Series', Icons.school_outlined),
   _SidebarItem(ManagerSection.students, 'Students', Icons.person_outline),
   _SidebarItem(ManagerSection.roster, 'Roster', Icons.fact_check_outlined),
+  _SidebarItem(ManagerSection.payments, 'Payments', Icons.warning_amber_outlined),
+  _SidebarItem(ManagerSection.terminal, 'Terminal', Icons.point_of_sale_outlined),
   _SidebarItem(ManagerSection.reports, 'Reports', Icons.bar_chart_outlined),
   _SidebarItem(ManagerSection.audit, 'Activity', Icons.history),
   _SidebarItem(ManagerSection.settings, 'Settings', Icons.settings_outlined),
@@ -553,6 +568,7 @@ class _Content extends StatelessWidget {
               onClose: onCloseProductEditor,
             ),
       ManagerSection.discounts => const AdminDiscountsScreen(),
+      ManagerSection.promotions => const AdminPromotionsScreen(),
       ManagerSection.series => seriesRosterId == null
           ? AdminSeriesScreen(onView: onOpenSeriesRoster)
           : AdminSeriesRosterScreen(
@@ -565,6 +581,8 @@ class _Content extends StatelessWidget {
               studentId: studentDetailId!,
               onClose: onCloseStudent,
             ),
+      ManagerSection.payments => const AdminPaymentsScreen(),
+      ManagerSection.terminal => const AdminTerminalScreen(),
       ManagerSection.reports => const AdminReportsScreen(),
       ManagerSection.audit => const AdminAuditScreen(),
       ManagerSection.settings => AdminSettingsScreen(studio: studio),
