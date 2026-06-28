@@ -205,6 +205,29 @@ var auditMatrix = []auditCase{
 		},
 	},
 	{
+		name:           "staff_deactivate",
+		expectedAction: "staff_deactivate",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			id := seedStaff(t, r, "instructor",
+				"audit-deact-"+store.NewID()[:8]+"@studio.com", "Deact Me")
+			return http.MethodPost, "/admin/staff/" + id + "/deactivate", nil
+		},
+	},
+	{
+		name:           "staff_reactivate",
+		expectedAction: "staff_reactivate",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			id := seedStaff(t, r, "instructor",
+				"audit-react-"+store.NewID()[:8]+"@studio.com", "React Me")
+			// Deactivate first so reactivate has something to flip.
+			res := r.do(http.MethodPost, "/admin/staff/"+id+"/deactivate", nil)
+			if res.StatusCode >= 300 {
+				t.Fatalf("setup deactivate: %d", res.StatusCode)
+			}
+			return http.MethodPost, "/admin/staff/" + id + "/reactivate", nil
+		},
+	},
+	{
 		name:           "attendance_scan",
 		expectedAction: "attendance_scan",
 		build: func(t *testing.T, r *testRig) (string, string, any) {
