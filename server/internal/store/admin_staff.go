@@ -18,6 +18,9 @@ type StaffMember struct {
 	FullName     string  `json:"full_name"`
 	PhotoURL     *string `json:"photo_url,omitempty"`
 	PayRateMinor *int    `json:"pay_rate_minor,omitempty"`
+	// Active is false once a manager deactivates the member (deactivated_at
+	// set). Deactivated staff are returned so the UI can list + reactivate them.
+	Active bool `json:"active"`
 }
 
 // StaffInput is the body for POST/PATCH /admin/staff. PayRateMinor is a
@@ -37,10 +40,12 @@ func validStaffRole(r string) bool {
 
 func (s *Store) ListAdminStaff(ctx context.Context, studioID string) ([]StaffMember, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, role, email, full_name, photo_url, instructor_pay_rate_minor
+		SELECT id, role, email, full_name, photo_url, instructor_pay_rate_minor,
+		       deactivated_at
 		  FROM users
 		 WHERE studio_id = ? AND role IN ('instructor','manager','owner')
-		 ORDER BY role, full_name ASC`,
+		   AND erased_at IS NULL
+		 ORDER BY (deactivated_at IS NOT NULL), role, full_name ASC`,
 		studioID,
 	)
 	if err != nil {
@@ -50,11 +55,13 @@ func (s *Store) ListAdminStaff(ctx context.Context, studioID string) ([]StaffMem
 	out := []StaffMember{}
 	for rows.Next() {
 		var (
-			m        StaffMember
-			photoURL sql.NullString
-			rate     sql.NullInt64
+			m           StaffMember
+			photoURL    sql.NullString
+			rate        sql.NullInt64
+			deactivated sql.NullString
 		)
-		if err := rows.Scan(&m.ID, &m.Role, &m.Email, &m.FullName, &photoURL, &rate); err != nil {
+		if err := rows.Scan(&m.ID, &m.Role, &m.Email, &m.FullName, &photoURL, &rate,
+			&deactivated); err != nil {
 			return nil, err
 		}
 		if photoURL.Valid {
@@ -65,9 +72,72 @@ func (s *Store) ListAdminStaff(ctx context.Context, studioID string) ([]StaffMem
 			v := int(rate.Int64)
 			m.PayRateMinor = &v
 		}
+		m.Active = !deactivated.Valid
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SetStaffActive deactivates (active=false) or reactivates a staff member.
+// Deactivating stamps deactivated_at (blocks their sign-in + hides them from
+// the instructor picker); reactivating clears it. Guards: a manager can't
+// deactivate their own account, and can't deactivate the last active owner.
+// Audited as staff_deactivate / staff_reactivate.
+func (s *Store) SetStaffActive(ctx context.Context, studioID, actorID, id string, active bool) error {
+	if !active && actorID == id {
+		return fmt.Errorf("you can't deactivate your own account")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var role string
+	err = tx.QueryRowContext(ctx,
+		`SELECT role FROM users WHERE id = ? AND studio_id = ?
+		   AND role IN ('instructor','manager','owner') AND erased_at IS NULL`,
+		id, studioID,
+	).Scan(&role)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	if !active && role == "owner" {
+		var activeOwners int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM users
+			   WHERE studio_id = ? AND role = 'owner'
+			     AND deactivated_at IS NULL AND erased_at IS NULL`,
+			studioID,
+		).Scan(&activeOwners); err != nil {
+			return err
+		}
+		if activeOwners <= 1 {
+			return fmt.Errorf("can't deactivate the last active owner")
+		}
+	}
+
+	action := "staff_reactivate"
+	set := `deactivated_at = NULL`
+	if !active {
+		action = "staff_deactivate"
+		set = `deactivated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET `+set+` WHERE id = ? AND studio_id = ?`,
+		id, studioID,
+	); err != nil {
+		return err
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, actorID, action, "user", id,
+		map[string]any{"role": role}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateStaff(ctx context.Context, studioID, actorID string, in StaffInput) (string, error) {

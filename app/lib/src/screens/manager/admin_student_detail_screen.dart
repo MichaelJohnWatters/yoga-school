@@ -464,6 +464,21 @@ class _PurchaseRow extends StatelessWidget {
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
+          // TODO(refund): wire to POST /admin/purchases/{id}/refund
+          // (store.RefundPurchase already exists). Disabled placeholder until
+          // the money-only refund flow is built. Only shown on completed sales.
+          if (item.status == 'completed') ...[
+            const SizedBox(width: 10),
+            Tooltip(
+              message: 'Refunds — coming soon',
+              child: YButton(
+                label: 'Refund',
+                small: true,
+                variant: YButtonVariant.outline,
+                onTap: null, // disabled (greyed) — feature not built yet
+              ),
+            ),
+          ],
         ],
       ),
     );

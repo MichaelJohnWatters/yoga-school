@@ -2372,6 +2372,9 @@ class StaffMember {
   final String email;
   final String fullName;
   final String? photoUrl;
+  // False once a manager deactivates them (they've left). Deactivated staff
+  // still list (so they can be reactivated) but can't sign in.
+  final bool active;
 
   StaffMember({
     required this.id,
@@ -2379,6 +2382,7 @@ class StaffMember {
     required this.email,
     required this.fullName,
     required this.photoUrl,
+    required this.active,
   });
 
   factory StaffMember.fromJson(Map<String, dynamic> j) => StaffMember(
@@ -2387,6 +2391,7 @@ class StaffMember {
     email: j['email'] as String,
     fullName: j['full_name'] as String,
     photoUrl: j['photo_url'] as String?,
+    active: (j['active'] as bool?) ?? true,
   );
 }
 

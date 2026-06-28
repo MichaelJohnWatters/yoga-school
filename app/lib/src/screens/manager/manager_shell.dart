@@ -26,6 +26,7 @@ import 'admin_series_roster_screen.dart';
 import 'admin_series_screen.dart';
 import 'admin_settings_screen.dart';
 import 'admin_student_detail_screen.dart';
+import 'admin_staff_screen.dart';
 import 'admin_students_screen.dart';
 import 'admin_templates_screen.dart';
 import 'admin_terminal_screen.dart';
@@ -39,6 +40,7 @@ enum ManagerSection {
   promotions,
   series,
   students,
+  staff,
   roster,
   payments,
   terminal,
@@ -67,6 +69,7 @@ bool isSectionVisible(ManagerSection s, AccessTier tier) {
     case ManagerSection.products:
     case ManagerSection.discounts:
     case ManagerSection.promotions:
+    case ManagerSection.staff:
     case ManagerSection.payments:
     case ManagerSection.terminal:
     case ManagerSection.reports:
@@ -187,6 +190,7 @@ class _ManagerShellState extends State<ManagerShell> {
         ManagerSection.promotions => 'Promotions',
         ManagerSection.series => 'Series',
         ManagerSection.students => 'Students',
+        ManagerSection.staff => 'Staff',
         ManagerSection.roster => 'Roster',
         ManagerSection.payments => 'Payments',
         ManagerSection.terminal => 'Terminal',
@@ -502,6 +506,7 @@ const _items = <_SidebarItem>[
   _SidebarItem(ManagerSection.promotions, 'Promotions', Icons.campaign_outlined),
   _SidebarItem(ManagerSection.series, 'Series', Icons.school_outlined),
   _SidebarItem(ManagerSection.students, 'Students', Icons.person_outline),
+  _SidebarItem(ManagerSection.staff, 'Staff', Icons.badge_outlined),
   _SidebarItem(ManagerSection.roster, 'Roster', Icons.fact_check_outlined),
   _SidebarItem(ManagerSection.payments, 'Payments', Icons.warning_amber_outlined),
   _SidebarItem(ManagerSection.terminal, 'Terminal', Icons.point_of_sale_outlined),
@@ -581,6 +586,7 @@ class _Content extends StatelessWidget {
               studentId: studentDetailId!,
               onClose: onCloseStudent,
             ),
+      ManagerSection.staff => AdminStaffScreen(me: me),
       ManagerSection.payments => const AdminPaymentsScreen(),
       ManagerSection.terminal => const AdminTerminalScreen(),
       ManagerSection.reports => const AdminReportsScreen(),
