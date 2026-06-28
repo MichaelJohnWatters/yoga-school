@@ -16,6 +16,7 @@ import '../api/api_client.dart';
 import '../api/api_error.dart';
 import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
+import '../widgets/booking_success.dart';
 import '../widgets/yoga_primitives.dart';
 import 'buy_screen.dart';
 import 'chat_screen.dart';
@@ -435,7 +436,11 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
         plusOne: _plusOne,
         plusOneName: friendName,
       );
-      if (mounted) _close(context);
+      if (!mounted) return;
+      // Float a celebratory animation on the root overlay, then close the
+      // sheet straight away — the overlay is non-blocking and removes itself.
+      showBookingSuccessAnimation(context);
+      _close(context);
     } on BookingConflict catch (e) {
       setState(() {
         _submitting = false;
@@ -474,10 +479,27 @@ class _BookingSheetState extends ConsumerState<BookingSheet> {
               onPressed: () => Navigator.of(ctx).maybePop(),
             ),
           ),
-          body: BuyScreen(
-            coversClassTypeId: classRow.classTypeId,
-            bookAfterPurchaseClassId: classRow.id,
-            bookAfterPurchaseDay: classDay,
+          // BuyScreen carries the class-filter + auto-book logic, so we reuse
+          // it on both. On a wide (desktop) viewport, centre it in a capped
+          // column so it reads as a focused panel instead of a full-width
+          // mobile screen stretched across the window.
+          body: LayoutBuilder(
+            builder: (ctx, c) {
+              final buy = BuyScreen(
+                coversClassTypeId: classRow.classTypeId,
+                bookAfterPurchaseClassId: classRow.id,
+                bookAfterPurchaseDay: classDay,
+              );
+              if (c.maxWidth >= 700) {
+                return Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    child: buy,
+                  ),
+                );
+              }
+              return buy;
+            },
           ),
         ),
       ),

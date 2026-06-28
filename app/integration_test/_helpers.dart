@@ -41,6 +41,33 @@ Future<void> fillClass(String classId,
   }
 }
 
+/// Dev-only: point studio s52 at Stripe test keys so the web checkout flow
+/// creates a real Checkout Session. Requires the server to be running with
+/// STRIPE_KEY_ENC_MASTER set (otherwise secret writes are refused). Call before
+/// app.main().
+Future<void> configureStripeKeys({
+  required String secretKey,
+  required String publishableKey,
+  String webhookSecret = '',
+  String baseUrl = 'http://localhost:8080',
+}) async {
+  try {
+    await Dio().post(
+      '$baseUrl/dev/configure-stripe',
+      data: {
+        'studio_id': 's52',
+        'secret_key': secretKey,
+        'publishable_key': publishableKey,
+        if (webhookSecret.isNotEmpty) 'webhook_secret': webhookSecret,
+      },
+    );
+  } catch (e) {
+    throw StateError(
+        'dev configure-stripe failed — is the server running with '
+        'STRIPE_KEY_ENC_MASTER set? $e');
+  }
+}
+
 /// Force the view into mobile-shell territory (< 900px wide, see
 /// kDesktopBreakpoint) so every test exercises the same RootShell + bottom
 /// nav regardless of the browser window. Call before pumping `app.main()`.

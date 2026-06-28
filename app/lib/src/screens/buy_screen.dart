@@ -547,7 +547,7 @@ class _MembershipCard extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(bottom: 3, left: 1),
                     child: Text(
-                      '/month',
+                      product.billingInterval == 'year' ? '/year' : '/month',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,

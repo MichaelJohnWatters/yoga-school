@@ -5,12 +5,15 @@
 // History (muted).
 // Wallet: payment methods (stub), purchase history.
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_stripe/flutter_stripe.dart' as stripe;
 
 import '../api/api_client.dart';
 import '../api/api_error.dart';
 import '../api/models.dart';
+import '../api/web_redirect.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/appearance_card.dart';
 import '../widgets/yoga_primitives.dart';
@@ -26,6 +29,21 @@ final entitlementsProvider =
 final purchasesProvider =
     FutureProvider<List<WalletPurchase>>((ref) async {
   return ref.watch(apiClientProvider).myPurchases();
+});
+
+/// The user's saved cards (real, from Stripe). Refreshed after adding/removing.
+final paymentMethodsProvider =
+    FutureProvider<List<PaymentMethod>>((ref) async {
+  return ref.watch(apiClientProvider).listPaymentMethods();
+});
+
+// Keep in sync with checkout_sheet.dart's _stripeApiVersion — the ephemeral
+// key must be minted with the version flutter_stripe's SDK is pinned to.
+const _walletStripeApiVersion = '2020-08-27';
+
+final subscriptionsProvider =
+    FutureProvider<List<Subscription>>((ref) async {
+  return ref.watch(apiClientProvider).mySubscriptions();
 });
 
 final attendanceProvider =
@@ -47,6 +65,24 @@ final myBookingsPastProvider =
   return ref.watch(apiClientProvider).pastBookings();
 });
 
+/// Which Profile segment is showing: 0 = Overview, 1 = Bookings, 2 = Wallet.
+/// A provider (rather than local state) so other flows can deep-link into a
+/// segment — e.g. the purchase-success screen's "Go to wallet / bookings"
+/// buttons set the tab to Profile and this to the right segment.
+class ProfileSegmentNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+  void set(int i) {
+    if (state != i) state = i;
+  }
+}
+
+final profileSegmentProvider =
+    NotifierProvider<ProfileSegmentNotifier, int>(ProfileSegmentNotifier.new);
+
+const profileSegBookings = 1;
+const profileSegWallet = 2;
+
 class ProfileScreen extends ConsumerStatefulWidget {
   final Me me;
   final StudioConfig? studio;
@@ -57,8 +93,6 @@ class ProfileScreen extends ConsumerStatefulWidget {
 }
 
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
-  int _seg = 0;
-
   @override
   void initState() {
     super.initState();
@@ -70,12 +104,35 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       ref.invalidate(entitlementsProvider);
       ref.invalidate(purchasesProvider);
       ref.invalidate(attendanceProvider);
+      ref.invalidate(subscriptionsProvider);
+      ref.invalidate(myBookingsUpcomingProvider);
+      ref.invalidate(myBookingsPastProvider);
     });
+  }
+
+  /// Switch segment + silently refresh the data that segment shows, so tapping
+  /// Bookings/Wallet always reflects changes made elsewhere (a manager grant, a
+  /// cancellation, a fresh purchase) without a manual pull-to-refresh.
+  void _onSeg(int i) {
+    ref.read(profileSegmentProvider.notifier).set(i);
+    switch (i) {
+      case 1: // Bookings
+        ref.invalidate(myBookingsUpcomingProvider);
+        ref.invalidate(myBookingsPastProvider);
+      case 2: // Wallet
+        ref.invalidate(purchasesProvider);
+        ref.invalidate(subscriptionsProvider);
+      default: // Overview
+        ref.invalidate(entitlementsProvider);
+        ref.invalidate(attendanceProvider);
+        ref.invalidate(subscriptionsProvider);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final studio = widget.studio;
+    final seg = ref.watch(profileSegmentProvider);
     return RefreshIndicator(
       onRefresh: () async {
         ref.invalidate(entitlementsProvider);
@@ -99,11 +156,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           ],
           _Header(
             me: widget.me,
-            seg: _seg,
-            onSeg: (i) => setState(() => _seg = i),
+            seg: seg,
+            onSeg: _onSeg,
           ),
           const SizedBox(height: 18),
-          switch (_seg) {
+          switch (seg) {
             0 => const _OverviewBody(),
             1 => const _BookingsBody(),
             _ => const _WalletBody(),
@@ -243,6 +300,7 @@ class _OverviewBody extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Stats first.
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: attendance.when(
@@ -252,11 +310,7 @@ class _OverviewBody extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 18),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 20),
-          child: AppearanceCard(),
-        ),
-        const SizedBox(height: 18),
+        // Then the wallet content that matters most: passes + history.
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: const YSectionHead(title: 'Active passes'),
@@ -272,11 +326,227 @@ class _OverviewBody extends ConsumerWidget {
             child: _errorBox(context, "Can't load passes: ${ApiError.fromAny(e).message}"),
           ),
         ),
+        const SizedBox(height: 18),
+        const _MembershipSection(),
+        // Appearance (light/dark theme) last — least important, tucked away.
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20),
+          child: AppearanceCard(),
+        ),
+        const SizedBox(height: 18),
       ],
     );
   }
 }
 
+
+/// Membership status block in the Overview. Shows active/past-due/pending
+/// memberships with Manage (Stripe billing portal) + Cancel/Resume. Hidden
+/// entirely when the student has no ongoing membership.
+class _MembershipSection extends ConsumerWidget {
+  const _MembershipSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final subs = ref.watch(subscriptionsProvider);
+    return subs.maybeWhen(
+      data: (list) {
+        final ongoing = list
+            .where((s) => s.isActive || s.isPastDue || s.isPending)
+            .toList();
+        if (ongoing.isEmpty) return const SizedBox.shrink();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: YSectionHead(title: 'Membership'),
+            ),
+            for (final s in ongoing)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: _MembershipCard(sub: s),
+              ),
+            const SizedBox(height: 6),
+          ],
+        );
+      },
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
+}
+
+class _MembershipCard extends ConsumerStatefulWidget {
+  final Subscription sub;
+  const _MembershipCard({required this.sub});
+
+  @override
+  ConsumerState<_MembershipCard> createState() => _MembershipCardState();
+}
+
+class _MembershipCardState extends ConsumerState<_MembershipCard> {
+  bool _busy = false;
+
+  Future<void> _openPortal() async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (!kIsWeb) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Manage your membership in the web app for now.'),
+      ));
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final url = await ref
+          .read(apiClientProvider)
+          .billingPortalUrl(returnUrl: Uri.base.toString());
+      redirectToCheckout(url); // full-page navigate to Stripe's portal
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        messenger.showSnackBar(SnackBar(
+          content: Text("Couldn't open billing portal: ${ApiError.fromAny(e).message}"),
+        ));
+      }
+    }
+  }
+
+  Future<void> _cancel() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel membership?'),
+        content: const Text(
+          'Your access continues until the end of the current billing period, '
+          'then the membership ends. You can resume any time before then.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancel membership'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(apiClientProvider).cancelSubscription(widget.sub.id);
+      ref.invalidate(subscriptionsProvider);
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(
+          content: Text("Couldn't cancel: ${ApiError.fromAny(e).message}"),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resume() async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await ref.read(apiClientProvider).resumeSubscription(widget.sub.id);
+      ref.invalidate(subscriptionsProvider);
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(
+          content: Text("Couldn't resume: ${ApiError.fromAny(e).message}"),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final s = widget.sub;
+    final pastDue = s.isPastDue;
+    final period = s.currentPeriodEnd != null
+        ? _d(DateTime.parse(s.currentPeriodEnd!))
+        : null;
+
+    const danger = Color(0xFFA33B2E);
+    final (String statusLine, Color accent) = switch (s) {
+      _ when pastDue => ('Payment failed — update your card to restore access', danger),
+      _ when s.isPending => ('Awaiting payment confirmation…', y.muted),
+      _ when s.cancelAtPeriodEnd => (
+          period != null ? 'Ends $period' : 'Cancelling at period end',
+          y.muted,
+        ),
+      _ => (period != null ? 'Renews $period' : 'Active', y.primaryStrong),
+    };
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      decoration: BoxDecoration(
+        color: y.surface,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        border: Border.all(color: pastDue ? danger : y.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.autorenew_rounded, size: 18, color: accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  s.productName,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: y.text,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            statusLine,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: accent,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              if (pastDue || s.isActive)
+                TextButton(
+                  onPressed: _busy ? null : _openPortal,
+                  child: Text(pastDue ? 'Update payment' : 'Manage'),
+                ),
+              if (s.isActive && !s.cancelAtPeriodEnd)
+                TextButton(
+                  onPressed: _busy ? null : _cancel,
+                  child: const Text('Cancel'),
+                ),
+              if (s.cancelAtPeriodEnd)
+                FilledButton(
+                  onPressed: _busy ? null : _resume,
+                  child: const Text('Resume'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _StatsCard extends StatelessWidget {
   final AttendanceSummary attendance;
@@ -920,16 +1190,36 @@ class _WalletBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final purchases = ref.watch(purchasesProvider);
+    final methods = ref.watch(paymentMethodsProvider);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: const YSectionHead(title: 'Payment methods', action: 'Add'),
+          child: YSectionHead(
+            title: 'Payment methods',
+            action: 'Add',
+            onAction: () => _addCard(context, ref),
+          ),
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: _VisaCard(),
+          child: methods.when(
+            data: (list) => list.isEmpty
+                ? const _NoCardsYet()
+                : Column(
+                    children: [
+                      for (final m in list)
+                        _PaymentMethodRow(
+                          method: m,
+                          onDelete: () => _deleteCard(context, ref, m),
+                        ),
+                    ],
+                  ),
+            loading: () => _loaderBox(),
+            error: (e, _) => _errorBox(
+                context, "Can't load cards: ${ApiError.fromAny(e).message}"),
+          ),
         ),
         const SizedBox(height: 18),
         Padding(
@@ -958,14 +1248,106 @@ class _WalletBody extends ConsumerWidget {
       ],
     );
   }
+
+  /// Add a card with no charge. Native uses the PaymentSheet in setup mode;
+  /// web redirects to a hosted setup Checkout (returns via ?setup=success).
+  Future<void> _addCard(BuildContext context, WidgetRef ref) async {
+    final api = ref.read(apiClientProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (kIsWeb) {
+        final base = Uri.base;
+        String ret(String o) => base
+            .replace(queryParameters: {...base.queryParameters, 'setup': o})
+            .toString();
+        final url = await api.createSetupCheckout(
+          successUrl: ret('success'),
+          cancelUrl: ret('cancel'),
+        );
+        redirectToCheckout(url); // full-page navigate; return handled in main
+        return;
+      }
+      final cfg = await ref.read(paymentConfigProvider.future);
+      final setup = await api.createSetupIntent();
+      final ek = await api.stripeEphemeralKey(apiVersion: _walletStripeApiVersion);
+      stripe.Stripe.publishableKey = cfg.publishableKey;
+      await stripe.Stripe.instance.applySettings();
+      await stripe.Stripe.instance.initPaymentSheet(
+        paymentSheetParameters: stripe.SetupPaymentSheetParameters(
+          setupIntentClientSecret: setup.clientSecret,
+          customerId: setup.customerId,
+          customerEphemeralKeySecret: ek,
+          merchantDisplayName: cfg.merchantDisplayName.isEmpty
+              ? 'Yoga School'
+              : cfg.merchantDisplayName,
+        ),
+      );
+      await stripe.Stripe.instance.presentPaymentSheet();
+      ref.invalidate(paymentMethodsProvider);
+      messenger.showSnackBar(const SnackBar(content: Text('Card saved.')));
+    } on stripe.StripeException catch (e) {
+      if (e.error.code == stripe.FailureCode.Canceled) return; // dismissed
+      messenger.showSnackBar(SnackBar(
+        content: Text(
+            'Could not add card: ${e.error.localizedMessage ?? e.error.code}'),
+      ));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('Could not add card: ${ApiError.fromAny(e).message}'),
+      ));
+    }
+  }
+
+  Future<void> _deleteCard(
+      BuildContext context, WidgetRef ref, PaymentMethod m) async {
+    final y = context.yoga;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: y.surface,
+        title: Text('Remove card?', style: TextStyle(color: y.text)),
+        content: Text(
+          'Remove ${m.brandLabel} ···· ${m.last4} from your wallet? You can '
+          'always add it again at checkout.',
+          style: TextStyle(color: y.text, fontSize: 13.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(apiClientProvider).deletePaymentMethod(m.id);
+      ref.invalidate(paymentMethodsProvider);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not remove: ${ApiError.fromAny(e).message}'),
+        ));
+      }
+    }
+  }
 }
 
-class _VisaCard extends StatelessWidget {
+class _PaymentMethodRow extends StatelessWidget {
+  final PaymentMethod method;
+  final VoidCallback onDelete;
+  const _PaymentMethodRow({required this.method, required this.onDelete});
+
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       decoration: BoxDecoration(
         color: y.surface,
         borderRadius: BorderRadius.circular(y.radiusCard),
@@ -982,23 +1364,69 @@ class _VisaCard extends StatelessWidget {
             ),
             alignment: Alignment.center,
             child: Text(
-              'VISA',
+              method.brandLabel.toUpperCase(),
               style: TextStyle(
                 color: y.background,
-                fontSize: 10,
+                fontSize: 8.5,
                 fontWeight: FontWeight.w800,
-                letterSpacing: 0.5,
+                letterSpacing: 0.3,
               ),
             ),
           ),
           const SizedBox(width: 12),
-          const Expanded(
+          Expanded(
             child: Text(
-              '···· 4242',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+              '···· ${method.last4}',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
             ),
           ),
-          const YChip(kind: YChipKind.neutral, label: 'Default'),
+          if (method.expMonth > 0)
+            Text(
+              'Exp ${method.expMonth.toString().padLeft(2, '0')}/${method.expYear % 100}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
+              ),
+            ),
+          IconButton(
+            onPressed: onDelete,
+            icon: Icon(Icons.delete_outline, size: 18, color: y.muted),
+            tooltip: 'Remove',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoCardsYet extends StatelessWidget {
+  const _NoCardsYet();
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      decoration: BoxDecoration(
+        color: y.surface,
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        border: Border.all(color: y.border),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.credit_card_outlined, size: 18, color: y.muted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'No saved cards. Add one, or tick "save card" next time you pay.',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: y.muted,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1100,6 +1528,13 @@ class _PurchaseRow extends StatelessWidget {
       'card' => 'Card',
       _ => 'Card',
     };
+    // A 'completed' purchase is the settled, paid-for state — that's the
+    // implicit norm, so it gets no badge. Anything else (pending while Stripe
+    // confirms, voided after an abandoned/failed attempt, refunded) is called
+    // out so the row isn't mistaken for a paid pass. Non-settled rows also mute
+    // the price/title so they recede visually.
+    final badge = _statusBadge(context, item.status);
+    final settled = item.status == 'completed';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(
@@ -1113,7 +1548,7 @@ class _PurchaseRow extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w700,
-                    color: y.text,
+                    color: settled ? y.text : y.muted,
                   ),
                 ),
                 const SizedBox(height: 2),
@@ -1125,19 +1560,73 @@ class _PurchaseRow extends StatelessWidget {
                     color: y.muted,
                   ),
                 ),
+                const SizedBox(height: 2),
+                Text(
+                  item.passAwarded
+                      ? 'Pass added to wallet'
+                      : 'No pass added',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w500,
+                    color: y.muted.withValues(alpha: 0.7),
+                  ),
+                ),
               ],
             ),
           ),
-          Text(
-            item.formattedPrice(),
-            style: TextStyle(
-              fontSize: 14.5,
-              fontWeight: FontWeight.w800,
-              color: y.text,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                item.formattedPrice(),
+                style: TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w800,
+                  color: settled ? y.text : y.muted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              if (badge != null) ...[
+                const SizedBox(height: 4),
+                badge,
+              ],
+            ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// Badge for a purchase's lifecycle state. Returns null for the settled
+  /// ('completed') case — the absence of a badge reads as "paid", and tagging
+  /// every row would just be noise.
+  static Widget? _statusBadge(BuildContext context, String status) {
+    final y = context.yoga;
+    final (String, Color, Color)? spec = switch (status) {
+      'completed' => null,
+      // DB value stays 'pending', but to a student "Pending" implies money is
+      // moving — it isn't (no charge succeeded yet). Stripe's own dashboard
+      // labels a not-yet-succeeded payment "Incomplete"; mirror that.
+      'pending' => ('Incomplete', y.accentSoft, y.accent),
+      'voided' => ('Voided', y.surface2, y.muted),
+      'refunded' => ('Refunded', y.surface2, y.muted),
+      _ => (status, y.surface2, y.muted),
+    };
+    if (spec == null) return null;
+    final (label, bg, fg) = spec;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          color: fg,
+        ),
       ),
     );
   }

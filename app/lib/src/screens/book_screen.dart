@@ -243,9 +243,17 @@ class _BookScreenState extends ConsumerState<BookScreen> {
     if (rows.isEmpty) return _EmptyDay(day: _selected, onJumpTo: _pick);
     switch (_dayView) {
       case _DayView.sections:
-        return _SectionsList(rows: rows, onBookingChanged: _reload);
+        return _SectionsList(
+          rows: rows,
+          onBookingChanged: _reload,
+          bookingWindowDays: widget.studio.bookingWindowDays,
+        );
       case _DayView.timeline:
-        return _TimelineList(rows: rows, onBookingChanged: _reload);
+        return _TimelineList(
+          rows: rows,
+          onBookingChanged: _reload,
+          bookingWindowDays: widget.studio.bookingWindowDays,
+        );
     }
   }
 }
@@ -663,7 +671,12 @@ Future<void> _openBookingSheet(
 class _SectionsList extends StatelessWidget {
   final List<ClassRow> rows;
   final VoidCallback onBookingChanged;
-  const _SectionsList({required this.rows, required this.onBookingChanged});
+  final int bookingWindowDays;
+  const _SectionsList({
+    required this.rows,
+    required this.onBookingChanged,
+    required this.bookingWindowDays,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -703,6 +716,7 @@ class _SectionsList extends StatelessWidget {
                 _ClassListRow(
                   key: Key('class-row-${items[i].id}'),
                   row: items[i],
+                  bookingWindowDays: bookingWindowDays,
                   onTap: () =>
                       _openBookingSheet(context, items[i], onBookingChanged),
                 ),
@@ -751,7 +765,12 @@ class _SectionHeader extends StatelessWidget {
 class _TimelineList extends StatelessWidget {
   final List<ClassRow> rows;
   final VoidCallback onBookingChanged;
-  const _TimelineList({required this.rows, required this.onBookingChanged});
+  final int bookingWindowDays;
+  const _TimelineList({
+    required this.rows,
+    required this.onBookingChanged,
+    required this.bookingWindowDays,
+  });
 
   static const double _gutterWidth = 44;
   static const double _railOffset = 50; // gutter + ~6 to centre the rail
@@ -830,6 +849,7 @@ class _TimelineList extends StatelessWidget {
                                 _ClassListRow(
                                   key: Key('class-row-${cards[ci].id}'),
                                   row: cards[ci],
+                                  bookingWindowDays: bookingWindowDays,
                                   onTap: () => _openBookingSheet(context,
                                       cards[ci], onBookingChanged),
                                 ),
@@ -923,10 +943,27 @@ Color? _parseRoomAccent(String? raw) {
   return Color(int.parse(s.substring(1), radix: 16) | 0xFF000000);
 }
 
+/// "12 Aug" — compact day+month for the "Opens …" hint on not-yet-bookable
+/// class cards.
+String _shortDate(DateTime d) {
+  const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  final l = d.toLocal();
+  return '${l.day} ${mons[l.month - 1]}';
+}
+
 class _ClassListRow extends StatelessWidget {
   final ClassRow row;
   final VoidCallback onTap;
-  const _ClassListRow({super.key, required this.row, required this.onTap});
+  // Studio book-ahead window in days (0 = no limit). A class beyond it isn't
+  // yet bookable; we show it but render it inert so a tap can't error.
+  final int bookingWindowDays;
+  const _ClassListRow({
+    super.key,
+    required this.row,
+    required this.onTap,
+    this.bookingWindowDays = 0,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -939,19 +976,35 @@ class _ClassListRow extends StatelessWidget {
     // booking sheet for an ended class) and the state column hides any
     // "Book" / "Join waitlist" CTAs.
     final isPast = row.endsAt.toLocal().isBefore(DateTime.now());
+    // "Not yet open": beyond the studio's book-ahead window. Mirror the
+    // server gate (now + windowDays) so we never show Book on a class the
+    // server would reject. Distinct from past — a cool tint + "Opens {date}"
+    // rather than a grey fade, so the two read differently.
+    final bookableFrom = bookingWindowDays > 0
+        ? row.startsAt.subtract(Duration(days: bookingWindowDays))
+        : null;
+    final notYetOpen = !isPast &&
+        bookingWindowDays > 0 &&
+        localStart.isAfter(DateTime.now().add(Duration(days: bookingWindowDays)));
     final stripe = _parseRoomAccent(row.roomColor);
     // Card background gets a very low-alpha wash of the room colour
     // (12% — quieter than the manager Schedule's 18% because the
     // student card is bigger and a stronger tint would compete with
     // the body copy). Past cards stay neutral and rely on the global
-    // Opacity below to fade.
-    final cardBg = (stripe != null && !isPast)
-        ? Color.alphaBlend(stripe.withValues(alpha: 0.12), y.surface)
-        : y.surface;
+    // Opacity below to fade. Not-yet-open cards take a cool accent wash
+    // instead of the room colour to mark them as locked-for-now.
+    final Color cardBg;
+    if (notYetOpen) {
+      cardBg = Color.alphaBlend(y.accent.withValues(alpha: 0.07), y.surface);
+    } else if (stripe != null && !isPast) {
+      cardBg = Color.alphaBlend(stripe.withValues(alpha: 0.12), y.surface);
+    } else {
+      cardBg = y.surface;
+    }
     return Opacity(
       opacity: isPast ? 0.55 : 1.0,
       child: GestureDetector(
-      onTap: isPast ? null : onTap,
+      onTap: (isPast || notYetOpen) ? null : onTap,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(y.radiusCard),
         child: Stack(
@@ -965,7 +1018,11 @@ class _ClassListRow extends StatelessWidget {
               decoration: BoxDecoration(
                 color: cardBg,
                 borderRadius: BorderRadius.circular(y.radiusCard),
-                border: Border.all(color: y.border),
+                border: Border.all(
+                  color: notYetOpen
+                      ? y.accent.withValues(alpha: 0.35)
+                      : y.border,
+                ),
               ),
               child: Row(
           children: [
@@ -1056,7 +1113,10 @@ class _ClassListRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            _stateColumn(context, isPast: isPast),
+            _stateColumn(context,
+                isPast: isPast,
+                notYetOpen: notYetOpen,
+                bookableFrom: bookableFrom),
           ],
         ),
       ),
@@ -1075,8 +1135,35 @@ class _ClassListRow extends StatelessWidget {
     );
   }
 
-  Widget _stateColumn(BuildContext context, {required bool isPast}) {
+  Widget _stateColumn(
+    BuildContext context, {
+    required bool isPast,
+    bool notYetOpen = false,
+    DateTime? bookableFrom,
+  }) {
     final y = context.yoga;
+    // Not yet open: beyond the studio's book-ahead window. Show when booking
+    // opens instead of a Book CTA, in the cool accent hue so it reads as
+    // "locked for now" rather than "past" or "available".
+    if (notYetOpen) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          YChip(kind: YChipKind.accent, label: 'Not open yet'),
+          if (bookableFrom != null) ...[
+            const SizedBox(height: 5),
+            Text(
+              'Opens ${_shortDate(bookableFrom)}',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: y.muted,
+              ),
+            ),
+          ],
+        ],
+      );
+    }
     // Past classes never show action CTAs (no Book / Join waitlist).
     // Booked rows keep their chip as a record-of-attendance marker;
     // everything else collapses to nothing so the row reads as inert.

@@ -436,14 +436,17 @@ class _PoliciesCard extends ConsumerStatefulWidget {
 
 class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
   late int _cutoffHours;
+  late int _bookingWindowDays;
   late bool _plusOne;
   late String _buyLayout;
   late String _timezone;
   late final TextEditingController _cutoffCtrl;
+  late final TextEditingController _windowCtrl;
   bool _saving = false;
 
   bool get _dirty =>
       _cutoffHours != widget.studio.freeCancelCutoffHours ||
+      _bookingWindowDays != widget.studio.bookingWindowDays ||
       _plusOne != widget.studio.allowStudentPlusOne ||
       _buyLayout != widget.studio.buyLayout ||
       _timezone != widget.studio.timezone;
@@ -452,15 +455,18 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
   void initState() {
     super.initState();
     _cutoffHours = widget.studio.freeCancelCutoffHours;
+    _bookingWindowDays = widget.studio.bookingWindowDays;
     _plusOne = widget.studio.allowStudentPlusOne;
     _buyLayout = widget.studio.buyLayout;
     _timezone = widget.studio.timezone;
     _cutoffCtrl = TextEditingController(text: '$_cutoffHours');
+    _windowCtrl = TextEditingController(text: '$_bookingWindowDays');
   }
 
   @override
   void dispose() {
     _cutoffCtrl.dispose();
+    _windowCtrl.dispose();
     super.dispose();
   }
 
@@ -471,6 +477,7 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
           .read(apiClientProvider)
           .adminUpdateStudioConfig(
             freeCancelCutoffHours: _cutoffHours,
+            bookingWindowDays: _bookingWindowDays,
             allowStudentPlusOne: _plusOne,
             buyLayout: _buyLayout,
             timezone: _timezone != widget.studio.timezone ? _timezone : null,
@@ -548,6 +555,65 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
                   ),
                   Text(
                     'hours',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: y.muted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'BOOK-AHEAD WINDOW',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: y.muted,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'How far in advance students can book. 0 = no limit.',
+            style: TextStyle(fontSize: 12, color: y.muted),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: 150,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                border: Border.all(color: y.borderStrong),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _windowCtrl,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      onChanged: (v) {
+                        final n = int.tryParse(v);
+                        if (n != null) setState(() => _bookingWindowDays = n);
+                      },
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: y.text,
+                      ),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(vertical: 4),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    'days',
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -1842,6 +1908,10 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
   final _webhookCtrl = TextEditingController();
   bool _replaceSecret = false;
   bool _replaceWebhook = false;
+  late bool _applePay;
+  late bool _googlePay;
+  late final TextEditingController _merchantNameCtrl;
+  late final TextEditingController _merchantCountryCtrl;
   bool _saving = false;
   String? _error;
   String? _info;
@@ -1854,6 +1924,14 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
       text: widget.initial.accountId ?? '',
     );
     _pubCtrl = TextEditingController(text: widget.initial.publishableKey ?? '');
+    _applePay = widget.initial.applePayEnabled;
+    _googlePay = widget.initial.googlePayEnabled;
+    _merchantNameCtrl = TextEditingController(
+      text: widget.initial.merchantDisplayName ?? '',
+    );
+    _merchantCountryCtrl = TextEditingController(
+      text: widget.initial.merchantCountryCode ?? '',
+    );
   }
 
   @override
@@ -1862,6 +1940,8 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
     _pubCtrl.dispose();
     _secretCtrl.dispose();
     _webhookCtrl.dispose();
+    _merchantNameCtrl.dispose();
+    _merchantCountryCtrl.dispose();
     super.dispose();
   }
 
@@ -1883,6 +1963,11 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
       if (_replaceWebhook) {
         patch['webhook_secret'] = _webhookCtrl.text.trim();
       }
+      patch['apple_pay_enabled'] = _applePay;
+      patch['google_pay_enabled'] = _googlePay;
+      patch['merchant_display_name'] = _merchantNameCtrl.text.trim();
+      patch['merchant_country_code'] = _merchantCountryCtrl.text.trim()
+          .toUpperCase();
       await ref.read(apiClientProvider).adminUpdateStripeCredentials(patch);
       ref.invalidate(_stripeCredsProvider);
       if (mounted) {
@@ -1956,7 +2041,7 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
         ),
         const SizedBox(height: 12),
         _SecretRow(
-          label: 'SECRET KEY (sk_…)',
+          label: 'SECRET KEY (sk_… or rk_…)',
           last4: c.secretKeyLast4,
           isSet: c.secretKeySet,
           editing: _replaceSecret,
@@ -1967,6 +2052,14 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
             _replaceSecret = false;
             _secretCtrl.clear();
           }),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Recommended: paste a restricted key (rk_…), not your full secret '
+          'key. Create one in Stripe → Developers → API keys with write access '
+          'to Payment Intents, Checkout Sessions, Customers and Refunds. A '
+          'restricted key limits the damage if it ever leaks.',
+          style: TextStyle(fontSize: 11.5, color: y.muted, height: 1.4),
         ),
         const SizedBox(height: 12),
         _SecretRow(
@@ -1981,6 +2074,59 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
             _replaceWebhook = false;
             _webhookCtrl.clear();
           }),
+        ),
+        const SizedBox(height: 18),
+        Divider(color: y.border, height: 1),
+        const SizedBox(height: 14),
+        Text(
+          'WALLETS (APPLE PAY / GOOGLE PAY)',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.5,
+            color: y.muted,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Show wallet buttons in the in-app checkout. The wallet must also be '
+          'enabled in your Stripe Dashboard, and Apple Pay needs the app to be '
+          'set up with a merchant ID (one-time platform step).',
+          style: TextStyle(
+            fontSize: 11.5,
+            color: y.muted,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _WalletToggleRow(
+          label: 'Apple Pay',
+          value: _applePay,
+          onChanged: (v) => setState(() => _applePay = v),
+        ),
+        _WalletToggleRow(
+          label: 'Google Pay',
+          value: _googlePay,
+          onChanged: (v) => setState(() => _googlePay = v),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _StripeLabeledField(
+                label: 'MERCHANT DISPLAY NAME',
+                child: _StripeTextInput(controller: _merchantNameCtrl),
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 96,
+              child: _StripeLabeledField(
+                label: 'COUNTRY',
+                child: _StripeTextInput(controller: _merchantCountryCtrl),
+              ),
+            ),
+          ],
         ),
         if (_error != null) ...[
           const SizedBox(height: 10),
@@ -2010,6 +2156,44 @@ class _StripeFormState extends ConsumerState<_StripeForm> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _WalletToggleRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _WalletToggleRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+                color: y.text,
+              ),
+            ),
+          ),
+          Switch.adaptive(
+            value: value,
+            activeThumbColor: y.primary,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
     );
   }
 }

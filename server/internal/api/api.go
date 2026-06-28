@@ -64,6 +64,18 @@ func (s *Server) Routes() http.Handler {
 	// in eligible seed students. Used by the join-waitlist test to
 	// guarantee the under-test student lands on a full class.
 	r.Post("/dev/fill-class", s.handleDevFillClass)
+	// Dev-only: point a studio at Stripe test keys so the checkout
+	// integration test can create a real Checkout Session. Same emulator gate.
+	r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
+
+	// Stripe webhook — PUBLIC (no auth middleware): Stripe calls this
+	// server-to-server, and the handler proves the request is genuine by
+	// verifying the Stripe-Signature header against the studio's stored
+	// webhook secret. Per-studio path so we know which secret to verify
+	// against before parsing the body. This is the AUTHORITATIVE fulfilment
+	// path: payment_intent.succeeded mints the pass even if the app never
+	// returns to call /confirm.
+	r.Post("/stripe/webhook/{studioID}", s.handleStripeWebhook)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.auth)
@@ -158,6 +170,16 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/discounts", s.handleAdminCreateDiscount)
 			r.Delete("/admin/discounts/{id}", s.handleAdminArchiveDiscount)
 			r.Post("/admin/purchases/{id}/refund", s.handleAdminRefundPurchase)
+			r.Get("/admin/subscriptions", s.handleAdminListSubscriptions)
+			r.Post("/admin/subscriptions/{id}/cancel", s.handleAdminCancelSubscription)
+			// Stripe Terminal — in-person card payments at the front desk.
+			r.Get("/admin/terminal/readers", s.handleAdminListTerminalReaders)
+			r.Post("/admin/terminal/readers", s.handleAdminRegisterTerminalReader)
+			r.Delete("/admin/terminal/readers/{id}", s.handleAdminRemoveTerminalReader)
+			r.Post("/admin/terminal/charge", s.handleAdminTerminalCharge)
+			r.Post("/admin/terminal/cancel", s.handleAdminTerminalCancel)
+			// Chargebacks + past-due memberships needing a manager decision.
+			r.Get("/admin/payments/attention", s.handleAdminPaymentsAttention)
 			// Manager-initiated bookings: add a student to a class on
 			// their behalf, or remove an existing booking with an
 			// explicit refund / consume choice.
@@ -188,6 +210,32 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/purchases", s.handleCreatePurchase)
 		r.Post("/purchases/{id}/confirm", s.handleConfirmPurchase)
 		r.Get("/purchases", s.handleListPurchases)
+		// Mobile saved-cards: mints an ephemeral key scoped to the buyer's
+		// Stripe Customer so the PaymentSheet can list/save their cards.
+		r.Post("/payments/stripe-ephemeral-key", s.handleStripeEphemeralKey)
+		// Saved-card management (the wallet's Payment methods).
+		r.Get("/payments/methods", s.handleListPaymentMethods)
+		r.Delete("/payments/methods/{id}", s.handleDetachPaymentMethod)
+		r.Post("/payments/setup-intent", s.handleCreateSetupIntent)     // native
+		r.Post("/payments/setup-checkout", s.handleCreateSetupCheckout) // web
+		// Web payment surface: creates a hosted Stripe Checkout Session and
+		// returns the URL the browser redirects to. Fulfilment lands via the
+		// checkout.session.completed webhook.
+		r.Post("/checkout/session", s.handleCreateCheckoutSession)
+		// Web optimistic confirm: the success page calls this with the
+		// returned session id to mint the pass without waiting on the webhook.
+		r.Post("/checkout/session/confirm", s.handleConfirmCheckoutSession)
+		// Membership (recurring subscription) surface: a hosted Checkout in
+		// subscription mode + self-serve manage/cancel/resume. Fulfilment lands
+		// via the invoice.paid / customer.subscription.* webhooks.
+		r.Post("/checkout/subscription", s.handleCreateCheckoutSubscription)
+		r.Get("/me/subscriptions", s.handleMySubscriptions)
+		r.Post("/me/subscriptions/{id}/cancel", s.handleCancelMySubscription)
+		r.Post("/me/subscriptions/{id}/resume", s.handleResumeMySubscription)
+		r.Post("/me/billing-portal", s.handleBillingPortal)
+		// Non-secret Stripe config the client needs to render the
+		// PaymentSheet (publishable key, wallet toggles, merchant display).
+		r.Get("/studio/payment-config", s.handlePaymentConfig)
 		r.Get("/me/entitlements", s.handleMyEntitlements)
 		r.Get("/me/attendance", s.handleMyAttendance)
 		r.Get("/me/checkin-code", s.handleCheckInCode)
@@ -470,6 +518,10 @@ func (s *Server) handleJoinEnrollment(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "dev_stub"
 	}
+	if !paymentMethodAllowed(req.PaymentMethod) {
+		writeError(w, http.StatusForbidden, "card payment required")
+		return
+	}
 	bookingID, err := s.store.JoinEnrollment(r.Context(), u.StudioID, u.ID, id, req.PaymentMethod, req.DiscountCode)
 	if err != nil {
 		respondErr(w, err, "joinEnrollment")
@@ -660,6 +712,214 @@ func (s *Server) handleProductDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+type checkoutSessionReq struct {
+	ProductID    string `json:"product_id"`
+	DiscountCode string `json:"discount_code"`
+	SuccessURL   string `json:"success_url"`
+	CancelURL    string `json:"cancel_url"`
+}
+
+// handleCreateCheckoutSession creates a hosted Stripe Checkout Session for the
+// web flow and returns its URL + the pending purchase id. The client supplies
+// its own success/cancel return URLs (the app knows where to land the user).
+func (s *Server) handleCreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req checkoutSessionReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.ProductID == "" {
+		writeError(w, http.StatusBadRequest, "product_id is required")
+		return
+	}
+	if req.SuccessURL == "" || req.CancelURL == "" {
+		writeError(w, http.StatusBadRequest, "success_url and cancel_url are required")
+		return
+	}
+	out, err := s.store.CreateCheckoutPurchase(
+		r.Context(), u.StudioID, u.ID, req.ProductID, req.DiscountCode,
+		req.SuccessURL, req.CancelURL,
+	)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "createCheckoutSession")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type subscriptionCheckoutReq struct {
+	ProductID  string `json:"product_id"`
+	SuccessURL string `json:"success_url"`
+	CancelURL  string `json:"cancel_url"`
+}
+
+// handleCreateCheckoutSubscription starts a membership: it creates a hosted
+// Stripe Checkout Session in subscription mode and returns its URL + our
+// subscription id. The webhook (invoice.paid) grants the rolling pass.
+func (s *Server) handleCreateCheckoutSubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req subscriptionCheckoutReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.ProductID == "" {
+		writeError(w, http.StatusBadRequest, "product_id is required")
+		return
+	}
+	if req.SuccessURL == "" || req.CancelURL == "" {
+		writeError(w, http.StatusBadRequest, "success_url and cancel_url are required")
+		return
+	}
+	out, err := s.store.CreateCheckoutSubscription(
+		r.Context(), u.StudioID, u.ID, req.ProductID, req.SuccessURL, req.CancelURL)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "createCheckoutSubscription")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleMySubscriptions(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.ListMySubscriptions(r.Context(), u.StudioID, u.ID)
+	if err != nil {
+		log.Printf("my subscriptions: %v", err)
+		writeError(w, http.StatusInternalServerError, "subscriptions error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handleCancelMySubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.CancelMySubscription(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "cancelSubscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleResumeMySubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.ResumeMySubscription(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "resumeSubscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type billingPortalReq struct {
+	ReturnURL string `json:"return_url"`
+}
+
+func (s *Server) handleBillingPortal(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req billingPortalReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.ReturnURL == "" {
+		writeError(w, http.StatusBadRequest, "return_url is required")
+		return
+	}
+	url, err := s.store.BillingPortalURL(r.Context(), u.StudioID, u.ID, req.ReturnURL)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no billing account yet")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "billingPortal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
+}
+
+type confirmCheckoutSessionReq struct {
+	SessionID string `json:"session_id"`
+}
+
+// handleConfirmCheckoutSession is the web success page's optimistic confirm. It
+// returns one of three states so the client knows what to do:
+//   - {status:"completed", entitlement:…} — pass minted (book it / show it).
+//   - {status:"pending"}                  — paid not settled yet; keep polling.
+//   - {status:"unknown"}                  — no matching pending purchase (the
+//     webhook likely already handled it); the client falls back to its poll.
+func (s *Server) handleConfirmCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req confirmCheckoutSessionReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	entitlementID, completed, err := s.store.ConfirmCheckoutSessionForUser(
+		r.Context(), u.StudioID, u.ID, req.SessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "unknown"})
+		return
+	}
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "confirmCheckoutSession")
+		return
+	}
+	if !completed {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "pending"})
+		return
+	}
+	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	if err != nil {
+		log.Printf("get entitlement after checkout confirm: %v", err)
+		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "entitlement": ent})
+}
+
+// handlePaymentConfig returns the studio's non-secret Stripe config so the
+// client can initialise the PaymentSheet. Authed (any signed-in user) but
+// carries nothing sensitive — the secret key + webhook secret never leave the
+// server (that's what the admin-only credentials endpoint guards).
+func (s *Server) handlePaymentConfig(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	cfg, err := s.store.PaymentConfigFor(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("payment config: %v", err)
+		writeError(w, http.StatusInternalServerError, "payment config error")
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *Server) handleListProducts(w http.ResponseWriter, r *http.Request) {
@@ -2251,6 +2511,18 @@ func requiresStripeConfirm(method string) bool {
 	return method == "card"
 }
 
+// paymentMethodAllowed is the prod-safety gate for self-serve (student-
+// initiated) purchases. Only real `card` payments may settle here in
+// production; dev_stub / cash / comp / card_present / transfer are accepted
+// only in dev, signalled by the auth emulator being active (the same gate the
+// /dev/* routes use). Without this a prod client could POST
+// payment_method=dev_stub (or omit it, which defaults to dev_stub) and mint a
+// free pass. Legitimate cash/comp sales go through the manager grant flow, not
+// this endpoint.
+func paymentMethodAllowed(method string) bool {
+	return method == "card" || os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") != ""
+}
+
 func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var req createPurchaseReq
@@ -2265,6 +2537,10 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 	if req.PaymentMethod == "" {
 		req.PaymentMethod = "dev_stub"
 	}
+	if !paymentMethodAllowed(req.PaymentMethod) {
+		writeError(w, http.StatusForbidden, "card payment required")
+		return
+	}
 
 	// Intent flow: real card payment. Server records a 'pending' purchase
 	// and hands the client back a PaymentIntent client_secret so it can
@@ -2273,6 +2549,10 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 		out, err := s.store.CreatePendingPurchase(
 			r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod, req.DiscountCode,
 		)
+		if errors.Is(err, store.ErrStripeNotConfigured) {
+			writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+			return
+		}
 		if err != nil {
 			respondErr(w, err, "createPendingPurchase")
 			return
@@ -2329,6 +2609,244 @@ func (s *Server) handleConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 		"purchase_id": purchaseID,
 		"entitlement": ent,
 	})
+}
+
+// handleStripeEphemeralKey mints an ephemeral key for the caller's Stripe
+// Customer so the mobile PaymentSheet can show their saved cards. The client
+// sends its mobile-SDK API version (stripe_version) — the key must be created
+// with that version or the SDK rejects it.
+func (s *Server) handleStripeEphemeralKey(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		StripeVersion string `json:"stripe_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.StripeVersion == "" {
+		writeError(w, http.StatusBadRequest, "stripe_version is required")
+		return
+	}
+	secret, err := s.store.StripeEphemeralKey(r.Context(), u.StudioID, u.ID, u.Email, req.StripeVersion)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "stripeEphemeralKey")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
+}
+
+// ---- Saved card management (the wallet's Payment methods) ----
+
+func (s *Server) handleListPaymentMethods(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.ListMyPaymentMethods(r.Context(), u.StudioID, u.ID)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "listPaymentMethods")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handleDetachPaymentMethod(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	pmID := chi.URLParam(r, "id")
+	err := s.store.DetachMyPaymentMethod(r.Context(), u.StudioID, u.ID, pmID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "payment method not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "detachPaymentMethod")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCreateSetupIntent(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	secret, customerID, err := s.store.SetupIntentForCard(r.Context(), u.StudioID, u.ID, u.Email)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "createSetupIntent")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"client_secret": secret,
+		"customer_id":   customerID,
+	})
+}
+
+func (s *Server) handleCreateSetupCheckout(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		SuccessURL string `json:"success_url"`
+		CancelURL  string `json:"cancel_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.SuccessURL == "" || req.CancelURL == "" {
+		writeError(w, http.StatusBadRequest, "success_url and cancel_url are required")
+		return
+	}
+	url, err := s.store.SetupCheckoutForCard(r.Context(), u.StudioID, u.ID, u.Email, req.SuccessURL, req.CancelURL)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "createSetupCheckout")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
+}
+
+// ---- Stripe Terminal (in-person, manager-gated) ----
+
+func (s *Server) handleAdminListTerminalReaders(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.ListTerminalReaders(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("list terminal readers: %v", err)
+		writeError(w, http.StatusInternalServerError, "terminal readers error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handleAdminRegisterTerminalReader(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		RegistrationCode string `json:"registration_code"`
+		Label            string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	reader, err := s.store.RegisterTerminalReader(r.Context(), u.StudioID, u.ID, req.RegistrationCode, req.Label)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "registerTerminalReader")
+		return
+	}
+	writeJSON(w, http.StatusCreated, reader)
+}
+
+func (s *Server) handleAdminRemoveTerminalReader(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	readerID := chi.URLParam(r, "id")
+	err := s.store.RemoveTerminalReader(r.Context(), u.StudioID, u.ID, readerID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "reader not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "removeTerminalReader")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminTerminalCharge(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		UserID       string `json:"user_id"`
+		ProductID    string `json:"product_id"`
+		ReaderID     string `json:"reader_id"`
+		DiscountCode string `json:"discount_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.UserID == "" || req.ProductID == "" || req.ReaderID == "" {
+		writeError(w, http.StatusBadRequest, "user_id, product_id and reader_id are required")
+		return
+	}
+	out, err := s.store.ChargeInPerson(r.Context(), u.StudioID, u.ID, req.UserID, req.ProductID, req.DiscountCode, req.ReaderID)
+	if errors.Is(err, store.ErrStripeNotConfigured) {
+		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "reader or product not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "terminalCharge")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, out)
+}
+
+func (s *Server) handleAdminTerminalCancel(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		ReaderID string `json:"reader_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.ReaderID == "" {
+		writeError(w, http.StatusBadRequest, "reader_id is required")
+		return
+	}
+	err := s.store.CancelTerminalCharge(r.Context(), u.StudioID, req.ReaderID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "reader not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "terminalCancel")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleStripeWebhook receives Stripe's server-to-server event POSTs. It reads
+// the raw body (signature verification needs the exact bytes), hands off to the
+// store which verifies the signature against the studio's webhook secret and
+// applies the event, and maps the result to a status Stripe understands: 400
+// for a bad signature (don't retry), 500 for a transient failure (please
+// retry), 200 once handled or deduped.
+func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
+	studioID := chi.URLParam(r, "studioID")
+	// Cap the body — webhook payloads are small; this stops a hostile POST to
+	// the public path from forcing a huge read.
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read body")
+		return
+	}
+	sig := r.Header.Get("Stripe-Signature")
+	if err := s.store.HandleStripeEvent(r.Context(), studioID, payload, sig); err != nil {
+		if errors.Is(err, store.ErrWebhookSignature) {
+			writeError(w, http.StatusBadRequest, "invalid signature")
+			return
+		}
+		log.Printf("stripe webhook (studio=%s): %v", studioID, err)
+		writeError(w, http.StatusInternalServerError, "webhook handling failed")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // Per-booking single-use scan: the token alone identifies the booking. The
@@ -2589,6 +3107,52 @@ func (s *Server) handleAdminRefundPurchase(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleAdminListSubscriptions(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.AdminListSubscriptions(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("admin subscriptions: %v", err)
+		writeError(w, http.StatusInternalServerError, "subscriptions error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+type adminCancelSubscriptionReq struct {
+	Immediate bool `json:"immediate"`
+}
+
+func (s *Server) handleAdminCancelSubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	// Body is optional — default (no body) cancels at period end.
+	var req adminCancelSubscriptionReq
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	err := s.store.AdminCancelSubscription(r.Context(), u.StudioID, u.ID, id, req.Immediate)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "adminCancelSubscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminPaymentsAttention(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	rows, err := s.store.AdminListPaymentsAttention(r.Context(), u.StudioID)
+	if err != nil {
+		log.Printf("payments attention: %v", err)
+		writeError(w, http.StatusInternalServerError, "payments attention error")
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
 // handleDevResetTestState wipes non-seed bookings/purchases/etc. so
 // integration tests can re-run from a clean baseline. Only available
 // when the Firebase Auth emulator is in play — refuses with 404
@@ -2600,6 +3164,36 @@ func (s *Server) handleDevResetTestState(w http.ResponseWriter, r *http.Request)
 	}
 	if err := s.store.ResetTestState(r.Context()); err != nil {
 		respondErr(w, err, "internal")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDevConfigureStripe points a studio at Stripe test keys for the
+// checkout integration test. Body: {"studio_id":"s52","secret_key":"sk_test_…",
+// "publishable_key":"pk_test_…","webhook_secret":"whsec_…"}. studio_id defaults
+// to s52. Dev-only gate via the auth emulator.
+func (s *Server) handleDevConfigureStripe(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body struct {
+		StudioID       string `json:"studio_id"`
+		SecretKey      string `json:"secret_key"`
+		PublishableKey string `json:"publishable_key"`
+		WebhookSecret  string `json:"webhook_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if body.StudioID == "" {
+		body.StudioID = "s52"
+	}
+	if err := s.store.ConfigureTestStripeKeys(r.Context(), body.StudioID,
+		body.SecretKey, body.PublishableKey, body.WebhookSecret); err != nil {
+		respondErr(w, err, "configureStripe")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -273,6 +273,14 @@ var auditMatrix = []auditCase{
 		},
 	},
 	{
+		name:           "subscription_cancel",
+		expectedAction: "subscription_cancel",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			subID := seedActiveSubscription(t, r)
+			return http.MethodPost, "/admin/subscriptions/" + subID + "/cancel", nil
+		},
+	},
+	{
 		name:           "theme_create",
 		expectedAction: "theme_create",
 		build: func(t *testing.T, r *testRig) (string, string, any) {

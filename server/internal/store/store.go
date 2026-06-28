@@ -11,6 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/studio52/yoga-school/server/internal/payments"
 	"github.com/studio52/yoga-school/server/internal/secrets"
 )
 
@@ -38,6 +39,7 @@ type Store struct {
 	sealer     *secrets.Sealer
 	dispatcher PushDispatcher
 	media      MediaStorage
+	gateway    payments.Gateway
 }
 
 // SetPushDispatcher wires the FCM fan-out into the store. Calling this with
@@ -46,6 +48,12 @@ func (s *Store) SetPushDispatcher(d PushDispatcher) { s.dispatcher = d }
 
 // SetMediaStorage wires the blob backend for image uploads. nil disables it.
 func (s *Store) SetMediaStorage(m MediaStorage) { s.media = m }
+
+// SetPaymentGateway wires the Stripe gateway used by the card-payment paths
+// (CreatePendingPurchase / ConfirmPurchase). nil is allowed and selects the
+// dev_stub behaviour: pending purchases get placeholder pi_stub_ ids and
+// confirm trusts the caller — that's how tests + local dev run without Stripe.
+func (s *Store) SetPaymentGateway(g payments.Gateway) { s.gateway = g }
 
 // DB returns the underlying handle. Exposed for the push package, which
 // reads device_tokens and prunes dead rows independently of store methods.
@@ -119,6 +127,7 @@ type Studio struct {
 	Timezone              string `json:"timezone"`
 	Currency              string `json:"currency"`
 	FreeCancelCutoffHours int    `json:"free_cancel_cutoff_hours"`
+	BookingWindowDays     int    `json:"booking_window_days"`
 	AllowStudentPlusOne   bool   `json:"allow_student_plus_one"`
 	WelcomeMessage        string `json:"welcome_message"`
 	BuyLayout             string `json:"buy_layout"`
@@ -178,7 +187,7 @@ func (s *Store) StudioConfig(ctx context.Context, studioID string) (*Studio, err
 	// yet still load. Distinct join aliases keep the column list readable.
 	const q = `
 		SELECT s.id, s.name, s.timezone, s.currency,
-		       s.free_cancel_cutoff_hours, s.allow_student_plus_one,
+		       s.free_cancel_cutoff_hours, s.booking_window_days, s.allow_student_plus_one,
 		       COALESCE(s.welcome_message,''), s.buy_layout,
 		       lt.id, lt.name, lt.mode, lt.tokens, lt.splash_image_url,
 		       dt.id, dt.name, dt.mode, dt.tokens, dt.splash_image_url
@@ -199,7 +208,7 @@ func (s *Store) StudioConfig(ctx context.Context, studioID string) (*Studio, err
 	)
 	err := s.db.QueryRowContext(ctx, q, studioID).Scan(
 		&out.ID, &out.Name, &out.Timezone, &out.Currency,
-		&out.FreeCancelCutoffHours, &plusOneInt,
+		&out.FreeCancelCutoffHours, &out.BookingWindowDays, &plusOneInt,
 		&out.WelcomeMessage, &out.BuyLayout,
 		&out.ActiveThemeID, &out.ActiveThemeName, &out.ActiveThemeMode,
 		&lightTokens, &lightSplash,
