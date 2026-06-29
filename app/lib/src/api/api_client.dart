@@ -292,15 +292,19 @@ class ApiClient {
   /// Card-payment path: creates a Stripe PaymentIntent + pending purchase and
   /// returns the client_secret for the PaymentSheet. Finish with
   /// [confirmPurchase] once the sheet completes (the webhook backs it up).
+  /// Pass [productId] for a standalone pass, or [enrollmentId] to pay for a
+  /// series (the server resolves the series' product and tags the purchase).
   Future<PendingPurchase> createCardPurchaseIntent({
-    required String productId,
+    String? productId,
+    String? enrollmentId,
     String? discountCode,
   }) async {
     try {
       final r = await _dio.post<Map<String, dynamic>>(
         '/purchases',
         data: {
-          'product_id': productId,
+          if (productId != null) 'product_id': productId,
+          if (enrollmentId != null) 'enrollment_id': enrollmentId,
           'payment_method': 'card',
           if (discountCode != null && discountCode.isNotEmpty)
             'discount_code': discountCode,
@@ -371,8 +375,11 @@ class ApiClient {
   /// the URL to redirect the browser to. successUrl/cancelUrl are where Stripe
   /// returns the user. Fulfilment lands via the checkout.session.completed
   /// webhook, so the success page just refreshes the wallet.
+  /// Pass [productId] for a standalone pass, or [enrollmentId] to pay for a
+  /// series (the server resolves the series' product and tags the purchase).
   Future<CheckoutResult> createCheckoutSession({
-    required String productId,
+    String? productId,
+    String? enrollmentId,
     String? discountCode,
     required String successUrl,
     required String cancelUrl,
@@ -381,7 +388,8 @@ class ApiClient {
       final r = await _dio.post<Map<String, dynamic>>(
         '/checkout/session',
         data: {
-          'product_id': productId,
+          if (productId != null) 'product_id': productId,
+          if (enrollmentId != null) 'enrollment_id': enrollmentId,
           if (discountCode != null && discountCode.isNotEmpty)
             'discount_code': discountCode,
           'success_url': successUrl,
@@ -1001,6 +1009,12 @@ class ApiClient {
     if (description != null) body['description'] = description;
     if (capacity != null) body['capacity'] = capacity;
     await _dio.patch<void>('/admin/enrollments/$enrollmentId', data: body);
+  }
+
+  /// Retire a series (created in error). Hidden from students; enrolled
+  /// students keep their booked sessions. One-way.
+  Future<void> adminArchiveEnrollment(String enrollmentId) async {
+    await _dio.delete<void>('/admin/enrollments/$enrollmentId');
   }
 
   Future<SeriesRoster> adminSeriesRoster(String enrollmentId) async {
@@ -1698,6 +1712,7 @@ class ApiClient {
   Future<void> adminUpdateStudioConfig({
     int? freeCancelCutoffHours,
     int? bookingWindowDays,
+    int? subscriptionGraceDays,
     bool? allowStudentPlusOne,
     String? buyLayout,
     String? welcomeMessage,
@@ -1709,6 +1724,9 @@ class ApiClient {
     }
     if (bookingWindowDays != null) {
       body['booking_window_days'] = bookingWindowDays;
+    }
+    if (subscriptionGraceDays != null) {
+      body['subscription_grace_days'] = subscriptionGraceDays;
     }
     if (allowStudentPlusOne != null) {
       body['allow_student_plus_one'] = allowStudentPlusOne;

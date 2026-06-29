@@ -391,6 +391,14 @@ var auditMatrix = []auditCase{
 		},
 	},
 	{
+		name:           "series_archive",
+		expectedAction: "series_archive",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			id := seedEnrollment(t, r, "Series To Archive")
+			return http.MethodDelete, "/admin/enrollments/" + id, nil
+		},
+	},
+	{
 		name:           "discount_create",
 		expectedAction: "discount_create",
 		build: func(t *testing.T, r *testRig) (string, string, any) {

@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS studios (
   -- enrollments are exempt — those seats are allocated by a manager.
   booking_window_days       INTEGER NOT NULL DEFAULT 14,
   allow_student_plus_one    INTEGER NOT NULL DEFAULT 0,
+  -- Grace days added to a membership's paid period before access is cut, so a
+  -- slightly-late auto-renewal doesn't lock a paying member out mid-class.
+  -- Applied to the unlimited pass expiry on each invoice.paid. 0 = no grace.
+  subscription_grace_days   INTEGER NOT NULL DEFAULT 2,
   -- Light slot: the theme served when the user's pref is "light" or
   -- "system" + the device is in light mode. Required (joined, not LEFT
   -- JOIN'd) — every studio must have a light theme so the app always
@@ -215,6 +219,10 @@ CREATE TABLE IF NOT EXISTS enrollments (
   product_id    TEXT REFERENCES products(id),
   session_count INTEGER NOT NULL,
   capacity      INTEGER NOT NULL,
+  -- Set when a manager retires a series (e.g. created in error). Hidden from
+  -- the student Enrollments tab; existing enrolled students keep their booked
+  -- sessions. NULL = live.
+  archived_at   TEXT,
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -334,6 +342,10 @@ CREATE TABLE IF NOT EXISTS purchases (
   studio_id         TEXT NOT NULL REFERENCES studios(id),
   user_id           TEXT NOT NULL REFERENCES users(id),
   product_id        TEXT NOT NULL REFERENCES products(id),
+  -- Set when this purchase pays for a series/enrollment (the product is the
+  -- series' dedicated product). On fulfilment the student is enrolled into the
+  -- series (sessions booked); NULL = an ordinary standalone pass purchase.
+  enrollment_id     TEXT REFERENCES enrollments(id),
   -- amount_minor is what the customer actually paid (list - discount).
   -- list_price_minor is what the product cost before any discount; we
   -- store it explicitly so reports can compute gross-vs-net without

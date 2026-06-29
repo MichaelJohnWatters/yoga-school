@@ -11,7 +11,7 @@ import (
 // entitlementID + the real PI id.
 func completedCardPurchase(t *testing.T, ctx context.Context, s *Store, f fixture, g *fakeGateway, productID string) (string, string, string) {
 	t.Helper()
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}

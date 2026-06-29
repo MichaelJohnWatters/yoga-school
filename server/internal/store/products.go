@@ -416,7 +416,7 @@ type PendingPurchaseResult struct {
 // reports) talk to the intent flow end-to-end.
 func (s *Store) CreatePendingPurchase(
 	ctx context.Context,
-	studioID, userID, productID, paymentMethod, discountCode string,
+	studioID, userID, productID, paymentMethod, discountCode, enrollmentID string,
 ) (*PendingPurchaseResult, error) {
 	// Phase 1 — validate (read-only). We resolve the product, currency and
 	// discount up front so the amount we hand Stripe is server-computed, never
@@ -507,12 +507,12 @@ func (s *Store) CreatePendingPurchase(
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO purchases
-		  (id, studio_id, user_id, product_id, list_price_minor, amount_minor,
+		  (id, studio_id, user_id, product_id, enrollment_id, list_price_minor, amount_minor,
 		   discount_minor, discount_id, currency,
 		   payment_method, initiated_by, actor_role, status,
 		   stripe_payment_id)
-		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
-		purchaseID, studioID, userID, productID,
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
+		purchaseID, studioID, userID, productID, nullableString(enrollmentID),
 		prod.priceMinor, finalMinor, discountMinor, discountIDArg, prod.currency,
 		paymentMethod, userID, stripePaymentID,
 	); err != nil {
@@ -710,13 +710,14 @@ func finalizePendingTx(ctx context.Context, s *Store, tx *sql.Tx, studioID, user
 	var (
 		status, productID   string
 		existingEntitlement sql.NullString
+		enrollmentID        sql.NullString
 	)
 	err := tx.QueryRowContext(ctx, `
-		SELECT status, product_id, resulting_entitlement_id
+		SELECT status, product_id, resulting_entitlement_id, enrollment_id
 		  FROM purchases
 		 WHERE id = ? AND studio_id = ? AND user_id = ?`,
 		purchaseID, studioID, userID,
-	).Scan(&status, &productID, &existingEntitlement)
+	).Scan(&status, &productID, &existingEntitlement, &enrollmentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -726,8 +727,21 @@ func finalizePendingTx(ctx context.Context, s *Store, tx *sql.Tx, studioID, user
 	if status == "completed" && existingEntitlement.Valid {
 		return existingEntitlement.String, nil
 	}
+	// Terminal states (e.g. a series purchase auto-refunded because the series
+	// filled) — nothing to fulfil; treat a re-delivered webhook as a no-op
+	// rather than erroring into a Stripe retry loop.
+	if status == "refunded" || status == "voided" {
+		return "", nil
+	}
 	if status != "pending" {
 		return "", fmt.Errorf("cannot confirm purchase in status %q", status)
+	}
+
+	// Series purchase: enroll into the series (sessions booked) instead of
+	// minting a standalone pass. Returns ErrSeriesFull if it filled since
+	// checkout — the caller refunds.
+	if enrollmentID.Valid && enrollmentID.String != "" {
+		return enrollIntoSeriesTx(ctx, s, tx, studioID, userID, enrollmentID.String, purchaseID)
 	}
 
 	prod, err := loadProductForPurchaseTx(ctx, tx, studioID, productID)
