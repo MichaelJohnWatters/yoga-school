@@ -152,6 +152,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/enrollments", s.handleAdminCreateSeries)
 			r.Patch("/admin/enrollments/{id}", s.handleAdminUpdateEnrollment)
 			r.Delete("/admin/enrollments/{id}", s.handleAdminArchiveEnrollment)
+			r.Post("/admin/enrollments/{id}/enroll", s.handleAdminEnrollStudent)
 			r.Post("/admin/students/{id}/grant", s.handleAdminGrantPass)
 			r.Post("/admin/students/{id}/entitlements/{eid}/adjust",
 				s.handleAdminAdjustCredits)
@@ -175,6 +176,8 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/purchases/{id}/refund", s.handleAdminRefundPurchase)
 			r.Get("/admin/subscriptions", s.handleAdminListSubscriptions)
 			r.Post("/admin/subscriptions/{id}/cancel", s.handleAdminCancelSubscription)
+			r.Post("/admin/subscriptions/{id}/refund", s.handleAdminRefundSubscription)
+			r.Post("/admin/subscriptions/{id}/resume", s.handleAdminResumeSubscription)
 			// Stripe Terminal — in-person card payments at the front desk.
 			r.Get("/admin/terminal/readers", s.handleAdminListTerminalReaders)
 			r.Post("/admin/terminal/readers", s.handleAdminRegisterTerminalReader)
@@ -2078,6 +2081,47 @@ func (s *Server) handleAdminArchiveEnrollment(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type adminEnrollStudentReq struct {
+	UserID        string `json:"user_id"`
+	PaymentMethod string `json:"payment_method"`
+	DiscountCode  string `json:"discount_code,omitempty"`
+}
+
+// handleAdminEnrollStudent signs a student into a series from the desk (comp /
+// cash / card / transfer). Capacity + already-enrolled are enforced in the
+// store and map to 409s.
+func (s *Server) handleAdminEnrollStudent(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	var req adminEnrollStudentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	switch req.PaymentMethod {
+	case "cash", "card", "card_present", "transfer", "comp":
+	case "":
+		req.PaymentMethod = "comp"
+	default:
+		writeError(w, http.StatusBadRequest,
+			"payment_method must be cash|card|card_present|transfer|comp")
+		return
+	}
+	bookingID, err := s.store.ManagerEnrollStudent(
+		r.Context(), u.StudioID, u.ID, id, req.UserID, req.PaymentMethod, req.DiscountCode)
+	if err != nil {
+		respondErr(w, err, "adminEnrollStudent")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"enrollment_booking_id": bookingID,
+	})
+}
+
 func (s *Server) handleAdminSeriesRoster(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
@@ -3225,6 +3269,43 @@ func (s *Server) handleAdminCancelSubscription(w http.ResponseWriter, r *http.Re
 	}
 	if err != nil {
 		respondErr(w, err, "adminCancelSubscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAdminRefundSubscription refunds the latest membership payment and
+// cancels the subscription now (revoking access + releasing future seats).
+func (s *Server) handleAdminRefundSubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.AdminRefundMembership(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if errors.Is(err, store.ErrNoRefundablePayment) {
+		writeError(w, http.StatusConflict,
+			"No recorded payment to refund yet — refund this one via the Stripe dashboard.")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "adminRefundSubscription")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminResumeSubscription(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.AdminResumeSubscription(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if err != nil {
+		respondErr(w, err, "adminResumeSubscription")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

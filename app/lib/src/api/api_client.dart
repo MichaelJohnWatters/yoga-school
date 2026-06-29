@@ -1017,6 +1017,22 @@ class ApiClient {
     await _dio.delete<void>('/admin/enrollments/$enrollmentId');
   }
 
+  /// Sign a student into a series from the desk (comp / cash / card / transfer).
+  /// Mirrors a paid join: mints the entitlement + books every session.
+  Future<void> adminEnrollStudent({
+    required String enrollmentId,
+    required String userId,
+    required String paymentMethod,
+    String? discountCode,
+  }) async {
+    await _dio.post<void>('/admin/enrollments/$enrollmentId/enroll', data: {
+      'user_id': userId,
+      'payment_method': paymentMethod,
+      if (discountCode != null && discountCode.isNotEmpty)
+        'discount_code': discountCode,
+    });
+  }
+
   Future<SeriesRoster> adminSeriesRoster(String enrollmentId) async {
     final r = await _dio.get<Map<String, dynamic>>(
       '/admin/enrollments/$enrollmentId/roster',
@@ -1684,6 +1700,17 @@ class ApiClient {
   Future<void> adminCancelSubscription(String id, {bool immediate = false}) async {
     await _dio.post<void>('/admin/subscriptions/$id/cancel',
         data: {'immediate': immediate});
+  }
+
+  /// Refund the latest membership payment + cancel now (revokes access +
+  /// releases future seats). 409 if there's no captured payment to refund.
+  Future<void> adminRefundSubscription(String id) async {
+    await _dio.post<void>('/admin/subscriptions/$id/refund');
+  }
+
+  /// Clear a scheduled end-of-period cancellation (member changed their mind).
+  Future<void> adminResumeSubscription(String id) async {
+    await _dio.post<void>('/admin/subscriptions/$id/resume');
   }
 
   /// Open chargebacks + past-due memberships needing a manager decision.

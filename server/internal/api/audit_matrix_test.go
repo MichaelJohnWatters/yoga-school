@@ -304,6 +304,27 @@ var auditMatrix = []auditCase{
 		},
 	},
 	{
+		name:           "subscription_refund",
+		expectedAction: "subscription_refund",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			subID := seedActiveSubscription(t, r)
+			mustExec(t, r.server.store,
+				`UPDATE subscriptions SET last_payment_intent_id = 'pi_audit_x' WHERE id = ?`,
+				subID)
+			return http.MethodPost, "/admin/subscriptions/" + subID + "/refund", nil
+		},
+	},
+	{
+		name:           "subscription_resume",
+		expectedAction: "subscription_resume",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			subID := seedActiveSubscription(t, r)
+			mustExec(t, r.server.store,
+				`UPDATE subscriptions SET cancel_at_period_end = 1 WHERE id = ?`, subID)
+			return http.MethodPost, "/admin/subscriptions/" + subID + "/resume", nil
+		},
+	},
+	{
 		name:           "theme_create",
 		expectedAction: "theme_create",
 		build: func(t *testing.T, r *testRig) (string, string, any) {
@@ -396,6 +417,16 @@ var auditMatrix = []auditCase{
 		build: func(t *testing.T, r *testRig) (string, string, any) {
 			id := seedEnrollment(t, r, "Series To Archive")
 			return http.MethodDelete, "/admin/enrollments/" + id, nil
+		},
+	},
+	{
+		name:           "series_manager_enroll",
+		expectedAction: "series_manager_enroll",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			enrollmentID := seedEnrollableSeries(t, r)
+			studentID := seedStudent(t, r)
+			return http.MethodPost, "/admin/enrollments/" + enrollmentID + "/enroll",
+				map[string]any{"user_id": studentID, "payment_method": "comp"}
 		},
 	},
 	{
@@ -859,6 +890,32 @@ func seedEnrollment(t *testing.T, r *testRig, title string) string {
 		 VALUES (?, ?, ?, 4, 10)`,
 		id, r.studioID, title)
 	return id
+}
+
+// seedEnrollableSeries builds a complete series (product + class type + future
+// sessions) via the real CreateSeries path, so the manager-enroll route has a
+// series a student can actually be signed into.
+func seedEnrollableSeries(t *testing.T, r *testRig) string {
+	t.Helper()
+	_, instructorID, roomID := lookupSchedulingPrereqs(t, r)
+	start := time.Now().UTC().AddDate(0, 0, 7)
+	res, err := r.server.store.CreateSeries(context.Background(), r.studioID, r.mgrID,
+		store.NewSeriesInput{
+			Title:        "Enrollable Series",
+			PriceMinor:   6000,
+			InstructorID: instructorID,
+			RoomID:       roomID,
+			Weekday:      int((start.Weekday() + 6) % 7), // Mon=0
+			StartHour:    18,
+			DurationMins: 60,
+			Capacity:     5,
+			SessionCount: 3,
+			StartsOn:     start.Format("2006-01-02"),
+		})
+	if err != nil {
+		t.Fatalf("CreateSeries: %v", err)
+	}
+	return res.EnrollmentID
 }
 
 // seedDiscount inserts a fixed-amount discount with no code so the archive
