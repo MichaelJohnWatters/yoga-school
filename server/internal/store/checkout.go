@@ -50,6 +50,14 @@ func (s *Store) CreateCheckoutPurchase(
 		rtx.Rollback()
 		return nil, err
 	}
+	// 'prevent' products: refuse a duplicate before creating the Stripe session.
+	// Series purchases (enrollmentID set) use their own already-enrolled gate.
+	if enrollmentID == "" {
+		if err := assertDuplicateAllowedTx(ctx, rtx, prod, studioID, userID, productID); err != nil {
+			rtx.Rollback()
+			return nil, err
+		}
+	}
 	discountID, discountMinor, err := validateAndApplyDiscountTx(
 		ctx, rtx, studioID, userID, productID, discountCode, prod.priceMinor,
 	)

@@ -13,6 +13,7 @@ import (
 // interface so the janitor is unit-testable with a fake.
 type Reconciler interface {
 	ReconcilePendingPurchases(ctx context.Context, olderThan time.Duration) (confirmed, voided int, err error)
+	ReconcileStalePendingCheckouts(ctx context.Context, minAge time.Duration) (confirmed, voided int, err error)
 	SweepEntitlements(ctx context.Context) (expired, depleted int, err error)
 	// ReconcileSubscriptions expires membership checkouts that were started
 	// but never completed (the student opened Checkout and walked away).
@@ -58,6 +59,13 @@ func (j *Janitor) tick(ctx context.Context) {
 		log.Printf("janitor: reconcile pending: %v", err)
 	} else if c > 0 || v > 0 {
 		log.Printf("janitor: reconciled pending purchases (confirmed=%d voided=%d)", c, v)
+	}
+	// Web checkout (cs_) pendings whose expired/completed webhook was missed.
+	// 25h is past Stripe's 24h session lifetime, so an unpaid one is truly dead.
+	if c, v, err := j.store.ReconcileStalePendingCheckouts(ctx, 25*time.Hour); err != nil {
+		log.Printf("janitor: reconcile stale checkouts: %v", err)
+	} else if c > 0 || v > 0 {
+		log.Printf("janitor: reconciled stale checkouts (confirmed=%d voided=%d)", c, v)
 	}
 	if e, d, err := j.store.SweepEntitlements(ctx); err != nil {
 		log.Printf("janitor: sweep entitlements: %v", err)

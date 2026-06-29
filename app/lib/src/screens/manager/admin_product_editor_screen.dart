@@ -52,6 +52,7 @@ class _AdminProductEditorScreenState
   String _billing = 'one_time';
   String _interval = 'month'; // billing interval when _billing == 'recurring'
   String _passKind = 'credit';
+  String _duplicatePolicy = 'allow'; // allow | prevent | topup
   Set<String> _classTypeIds = {};
   AdminProduct? _original;
   AdminProductUsage? _usage;
@@ -98,6 +99,7 @@ class _AdminProductEditorScreenState
     _billing = p.billingType;
     _interval = p.billingInterval ?? 'month';
     _passKind = p.passKind;
+    _duplicatePolicy = p.duplicatePolicy;
     _credits.text = '${p.credits ?? 1}';
     _validity.text = '${p.validityDays ?? 30}';
     _classTypeIds = Set.from(p.classTypeIds);
@@ -116,6 +118,7 @@ class _AdminProductEditorScreenState
       'billing_type': _billing,
       if (_billing == 'recurring') 'billing_interval': _interval,
       'pass_kind': _passKind,
+      'duplicate_policy': _duplicatePolicy,
       'class_type_ids': _classTypeIds.toList(),
     };
     if (_passKind == 'credit') {
@@ -349,6 +352,30 @@ class _LeftCard extends StatelessWidget {
                 suffix: 'days',
                 width: 160,
               ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          _FieldGroup(
+            label: 'REPEAT PURCHASES',
+            hint: switch (state._duplicatePolicy) {
+              'prevent' =>
+                'Block buying this while they still hold a usable one.',
+              'topup' =>
+                'Buying again adds onto their existing pass (credits + validity) '
+                    'instead of creating a separate one.',
+              _ => 'Each purchase creates a separate pass (credits stack).',
+            },
+            child: _Seg(
+              value: state._duplicatePolicy,
+              options: const {
+                'allow': 'Allow',
+                'prevent': 'Prevent',
+                'topup': 'Top-up',
+              },
+              onChanged: (v) {
+                state._duplicatePolicy = v;
+                state.rebuild();
+              },
             ),
           ),
           const SizedBox(height: 18),

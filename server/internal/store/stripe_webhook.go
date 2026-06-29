@@ -78,6 +78,24 @@ func (s *Store) HandleStripeEvent(ctx context.Context, studioID string, payload 
 				return err
 			}
 		}
+	case "checkout.session.async_payment_succeeded":
+		// A delayed-settlement web payment (e.g. bank debit) that completed the
+		// session unpaid and only now actually paid — fulfil it now. Same path
+		// as a synchronous paid completion.
+		_, err := s.ConfirmPurchaseBySession(ctx, studioID, evt.SessionID, evt.IntentID)
+		if errors.Is(err, ErrSeriesFull) {
+			if rerr := s.refundFullEnrollment(ctx, studioID, evt.SessionID, evt.IntentID); rerr != nil {
+				return rerr
+			}
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	case "checkout.session.async_payment_failed":
+		// The delayed payment ultimately failed — void the pending purchase.
+		if err := s.VoidPurchaseByIntent(ctx, studioID, evt.SessionID, evt.Type); err != nil &&
+			!errors.Is(err, ErrNotFound) {
+			return err
+		}
 	case "invoice.paid":
 		// Membership payment (initial or renewal) → grant/extend the pass.
 		if err := s.RecordInvoicePaid(ctx, studioID, evt); err != nil &&

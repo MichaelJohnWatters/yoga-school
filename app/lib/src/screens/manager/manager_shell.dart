@@ -585,6 +585,7 @@ class _Content extends StatelessWidget {
           : AdminStudentDetailScreen(
               studentId: studentDetailId!,
               onClose: onCloseStudent,
+              onOpenClass: onOpenRoster,
             ),
       ManagerSection.staff => AdminStaffScreen(me: me),
       ManagerSection.payments => const AdminPaymentsScreen(),

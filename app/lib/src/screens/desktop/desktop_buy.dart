@@ -13,7 +13,12 @@ import '../../api/models.dart';
 import '../../api/api_error.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
-import '../buy_screen.dart' show productsProvider;
+import '../buy_screen.dart'
+    show
+        productsProvider,
+        activeMembershipProductIdsProvider,
+        heldUsablePassProductIdsProvider,
+        passDuplicateState;
 import '../checkout_sheet.dart' show CheckoutSheet;
 
 class DesktopBuy extends ConsumerWidget {
@@ -148,17 +153,16 @@ class _GridBody extends StatelessWidget {
   }
 }
 
-class _GridCard extends StatelessWidget {
+class _GridCard extends ConsumerWidget {
   final Product product;
   const _GridCard({required this.product});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    return InkWell(
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    final dup =
+        passDuplicateState(product, ref.watch(heldUsablePassProductIdsProvider));
+    final card = Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: y.surface,
@@ -194,18 +198,26 @@ class _GridCard extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Text(
-              product.terms(),
+              dup.note ?? product.terms(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: y.muted,
+                color: dup.note != null ? y.accent : y.muted,
               ),
             ),
           ],
         ),
-      ),
+      );
+    return InkWell(
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: dup.gated
+          ? () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('You already have this pass.')),
+              )
+          : () => _openCheckout(context, product),
+      child: dup.gated ? Opacity(opacity: 0.6, child: card) : card,
     );
   }
 }
@@ -232,21 +244,22 @@ class _EmptyBuy extends StatelessWidget {
   }
 }
 
-class _MembershipCard extends StatelessWidget {
+class _MembershipCard extends ConsumerWidget {
   final Product product;
   const _MembershipCard({required this.product});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
     final fill = product.isHero;
     final bg = fill ? y.primary : y.primarySoft;
     final fg = fill ? y.onPrimary : y.text;
     final muted = fill ? y.onPrimary.withValues(alpha: 0.85) : y.muted;
-    return InkWell(
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    final tagColor = fill ? y.onPrimary : y.primary;
+    // Already on this membership? Show it as the current plan, not buyable.
+    final owned =
+        ref.watch(activeMembershipProductIdsProvider).contains(product.id);
+    final card = Container(
         padding: const EdgeInsets.all(18),
         constraints: const BoxConstraints(minHeight: 132),
         decoration: BoxDecoration(
@@ -260,17 +273,17 @@ class _MembershipCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  Icons.autorenew,
+                  owned ? Icons.check_circle : Icons.autorenew,
                   size: 14,
-                  color: fill ? y.onPrimary : y.primary,
+                  color: tagColor,
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  'Membership',
+                  owned ? 'Current plan' : 'Membership',
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
-                    color: fill ? y.onPrimary : y.primary,
+                    color: tagColor,
                   ),
                 ),
               ],
@@ -325,7 +338,21 @@ class _MembershipCard extends StatelessWidget {
             ),
           ],
         ),
+      );
+
+    if (!owned) {
+      return InkWell(
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        onTap: () => _openCheckout(context, product),
+        child: card,
+      );
+    }
+    return InkWell(
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You're already on this plan.")),
       ),
+      child: Opacity(opacity: 0.85, child: card),
     );
   }
 }
@@ -360,17 +387,16 @@ class _TwoUp extends StatelessWidget {
   }
 }
 
-class _PackRow extends StatelessWidget {
+class _PackRow extends ConsumerWidget {
   final Product product;
   const _PackRow({required this.product});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    return InkWell(
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    final dup =
+        passDuplicateState(product, ref.watch(heldUsablePassProductIdsProvider));
+    final row = Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
           color: y.surface,
@@ -401,6 +427,17 @@ class _PackRow extends StatelessWidget {
                       color: y.muted,
                     ),
                   ),
+                  if (dup.note != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      dup.note!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: y.accent,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -418,7 +455,15 @@ class _PackRow extends StatelessWidget {
             ),
           ],
         ),
-      ),
+      );
+    return InkWell(
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: dup.gated
+          ? () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('You already have this pass.')),
+              )
+          : () => _openCheckout(context, product),
+      child: dup.gated ? Opacity(opacity: 0.6, child: row) : row,
     );
   }
 }

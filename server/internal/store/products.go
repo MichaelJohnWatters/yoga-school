@@ -23,6 +23,7 @@ type Product struct {
 	Credits         *int     `json:"credits,omitempty"`
 	ValidityDays    *int     `json:"validity_days,omitempty"`
 	IsHero          bool     `json:"is_hero"`
+	DuplicatePolicy string   `json:"duplicate_policy"` // allow | prevent | topup
 	ClassTypeIDs    []string `json:"class_type_ids"`
 	DisciplineSet   []string `json:"disciplines"`
 }
@@ -35,7 +36,7 @@ func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID st
 	q := `
 		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
 		       s.currency, p.billing_type, p.billing_interval, p.pass_kind,
-		       p.credits, p.validity_days, p.is_hero
+		       p.credits, p.validity_days, p.is_hero, p.duplicate_policy
 		  FROM products p
 		  JOIN studios s ON s.id = p.studio_id
 		 WHERE p.studio_id = ? AND p.is_archived = 0`
@@ -68,7 +69,7 @@ func (s *Store) ListProducts(ctx context.Context, studioID, coversClassTypeID st
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
 			&p.Currency, &p.BillingType, &interval, &p.PassKind,
-			&credits, &validity, &heroInt,
+			&credits, &validity, &heroInt, &p.DuplicatePolicy,
 		); err != nil {
 			return nil, err
 		}
@@ -206,6 +207,7 @@ type productForPurchase struct {
 	priceMinor                            int
 	credits, validityDays                 sql.NullInt64
 	stripePriceID                         sql.NullString
+	duplicatePolicy                       string // allow | prevent | topup
 }
 
 // loadProductForPurchaseTx fetches the product + studio currency in a
@@ -215,13 +217,15 @@ func loadProductForPurchaseTx(ctx context.Context, tx *sql.Tx, studioID, product
 	out := &productForPurchase{}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT p.name, s.currency, p.billing_type, p.pass_kind,
-		       p.price_minor, p.credits, p.validity_days, p.stripe_price_id
+		       p.price_minor, p.credits, p.validity_days, p.stripe_price_id,
+		       p.duplicate_policy
 		  FROM products p
 		  JOIN studios s ON s.id = p.studio_id
 		 WHERE p.id = ? AND p.studio_id = ? AND p.is_archived = 0`,
 		productID, studioID,
 	).Scan(&out.name, &out.currency, &out.billingType, &out.passKind,
 		&out.priceMinor, &out.credits, &out.validityDays, &out.stripePriceID,
+		&out.duplicatePolicy,
 	); err != nil {
 		return nil, fmt.Errorf("product lookup: %w", err)
 	}
@@ -265,6 +269,108 @@ func insertEntitlementSnapshotTx(ctx context.Context, tx *sql.Tx, studioID, user
 	return entitlementID, nil
 }
 
+// ErrDuplicatePass is returned by the buy paths when a product's
+// duplicate_policy is 'prevent' and the student already holds a usable
+// entitlement of it. Mapped to 409.
+var ErrDuplicatePass = errors.New("you already hold this pass")
+
+// studentHoldsUsablePass reports whether the student already has a live,
+// still-usable entitlement minted from this product — an active credit pass
+// with credits left, or an unlimited pass that hasn't expired. Drives the
+// 'prevent' gate and is the soft-warning signal the client mirrors.
+func studentHoldsUsablePass(ctx context.Context, q rowQuerier, studioID, userID, productID string) (bool, error) {
+	var n int
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM entitlements
+		 WHERE studio_id = ? AND user_id = ? AND source_product_id = ?
+		   AND status = 'active'
+		   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		   AND (pass_kind = 'unlimited' OR COALESCE(credits_remaining,0) > 0)`,
+		studioID, userID, productID,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// assertDuplicateAllowedTx enforces a 'prevent' product's no-duplicate rule at
+// purchase time, before any charge. 'allow' and 'topup' never block here.
+func assertDuplicateAllowedTx(ctx context.Context, q rowQuerier, prod *productForPurchase, studioID, userID, productID string) error {
+	if prod.duplicatePolicy != "prevent" {
+		return nil
+	}
+	held, err := studentHoldsUsablePass(ctx, q, studioID, userID, productID)
+	if err != nil {
+		return err
+	}
+	if held {
+		return ErrDuplicatePass
+	}
+	return nil
+}
+
+// mintOrTopUpEntitlementTx mints a fresh entitlement, except when the product's
+// policy is 'topup' and the student already holds a usable one — then it merges
+// into that pass (adds credits, extends validity) and returns its id. 'allow'
+// and 'prevent' always mint (prevent is gated earlier, at purchase time).
+func mintOrTopUpEntitlementTx(ctx context.Context, tx *sql.Tx, studioID, userID, productID string, prod *productForPurchase) (string, error) {
+	if prod.duplicatePolicy == "topup" {
+		var existing string
+		var curExpiry sql.NullString
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, expires_at FROM entitlements
+			 WHERE studio_id = ? AND user_id = ? AND source_product_id = ?
+			   AND status = 'active'
+			   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+			 ORDER BY (expires_at IS NULL) DESC, expires_at DESC
+			 LIMIT 1`,
+			studioID, userID, productID,
+		).Scan(&existing, &curExpiry)
+		if err == nil {
+			// New expiry = the later of the existing window and a fresh one from
+			// this product's validity. A never-expiring pass stays never-expiring.
+			var newExpiry any
+			switch {
+			case !curExpiry.Valid:
+				newExpiry = nil
+			case prod.validityDays.Valid:
+				cand := time.Now().UTC().
+					Add(time.Duration(prod.validityDays.Int64) * 24 * time.Hour).
+					Format(time.RFC3339)
+				if cand > curExpiry.String { // RFC3339 UTC sorts lexically
+					newExpiry = cand
+				} else {
+					newExpiry = curExpiry.String
+				}
+			default:
+				newExpiry = curExpiry.String
+			}
+			if prod.credits.Valid {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE entitlements
+					   SET credits_total = COALESCE(credits_total,0) + ?,
+					       credits_remaining = COALESCE(credits_remaining,0) + ?,
+					       expires_at = ?
+					 WHERE id = ?`,
+					int(prod.credits.Int64), int(prod.credits.Int64), newExpiry, existing,
+				); err != nil {
+					return "", fmt.Errorf("top up credits: %w", err)
+				}
+			} else if _, err := tx.ExecContext(ctx,
+				`UPDATE entitlements SET expires_at = ? WHERE id = ?`, newExpiry, existing,
+			); err != nil {
+				return "", fmt.Errorf("extend entitlement: %w", err)
+			}
+			return existing, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		// No existing pass to top up → mint a fresh one.
+	}
+	return insertEntitlementSnapshotTx(ctx, tx, studioID, userID, productID, prod)
+}
+
 // CreatePurchase records a purchase + entitlement synchronously. Use this
 // for payment methods that don't need a confirmation step: cash, comp,
 // card_present, dev_stub. For Stripe card payments call CreatePendingPurchase
@@ -289,6 +395,9 @@ func (s *Store) CreatePurchase(
 	if err != nil {
 		return "", "", err
 	}
+	if err := assertDuplicateAllowedTx(ctx, tx, prod, studioID, userID, productID); err != nil {
+		return "", "", err
+	}
 	discountID, discountMinor, err := validateAndApplyDiscountTx(
 		ctx, tx, studioID, userID, productID, discountCode, prod.priceMinor,
 	)
@@ -297,7 +406,7 @@ func (s *Store) CreatePurchase(
 	}
 	finalMinor := prod.priceMinor - discountMinor
 
-	entitlementID, err := insertEntitlementSnapshotTx(ctx, tx, studioID, userID, productID, prod)
+	entitlementID, err := mintOrTopUpEntitlementTx(ctx, tx, studioID, userID, productID, prod)
 	if err != nil {
 		return "", "", err
 	}
@@ -432,6 +541,14 @@ func (s *Store) CreatePendingPurchase(
 	if err != nil {
 		rtx.Rollback()
 		return nil, err
+	}
+	// 'prevent' products: refuse a duplicate before charging. Series purchases
+	// (enrollmentID set) have their own already-enrolled gate.
+	if enrollmentID == "" {
+		if err := assertDuplicateAllowedTx(ctx, rtx, prod, studioID, userID, productID); err != nil {
+			rtx.Rollback()
+			return nil, err
+		}
 	}
 	discountID, discountMinor, err := validateAndApplyDiscountTx(
 		ctx, rtx, studioID, userID, productID, discountCode, prod.priceMinor,
@@ -748,7 +865,7 @@ func finalizePendingTx(ctx context.Context, s *Store, tx *sql.Tx, studioID, user
 	if err != nil {
 		return "", err
 	}
-	entitlementID, err := insertEntitlementSnapshotTx(ctx, tx, studioID, userID, productID, prod)
+	entitlementID, err := mintOrTopUpEntitlementTx(ctx, tx, studioID, userID, productID, prod)
 	if err != nil {
 		return "", err
 	}

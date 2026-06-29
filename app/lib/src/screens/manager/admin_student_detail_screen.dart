@@ -26,10 +26,12 @@ final adminStudentDetailProvider =
 class AdminStudentDetailScreen extends ConsumerWidget {
   final String studentId;
   final VoidCallback onClose;
+  final void Function(String classId) onOpenClass;
   const AdminStudentDetailScreen({
     super.key,
     required this.studentId,
     required this.onClose,
+    required this.onOpenClass,
   });
 
   @override
@@ -38,7 +40,7 @@ class AdminStudentDetailScreen extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(30, 26, 30, 26),
       child: detail.when(
-        data: (d) => _Body(detail: d, onClose: onClose),
+        data: (d) => _Body(detail: d, onClose: onClose, onOpenClass: onOpenClass),
         loading: () =>
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
         error: (e, _) => Center(
@@ -55,7 +57,12 @@ class AdminStudentDetailScreen extends ConsumerWidget {
 class _Body extends ConsumerWidget {
   final AdminStudentDetail detail;
   final VoidCallback onClose;
-  const _Body({required this.detail, required this.onClose});
+  final void Function(String classId) onOpenClass;
+  const _Body({
+    required this.detail,
+    required this.onClose,
+    required this.onOpenClass,
+  });
 
   void _afterChange(WidgetRef ref) {
     ref.invalidate(adminStudentDetailProvider(detail.id));
@@ -183,6 +190,14 @@ class _Body extends ConsumerWidget {
                                       );
                                       if (saved == true) _afterChange(ref);
                                     },
+                                    onCancelMembership: () async {
+                                      final changed =
+                                          await showCancelMembershipDialog(
+                                        context: context,
+                                        entitlement: active[i],
+                                      );
+                                      if (changed == true) _afterChange(ref);
+                                    },
                                   ),
                               ],
                             ),
@@ -220,6 +235,13 @@ class _Body extends ConsumerWidget {
                                   _PurchaseRow(
                                     item: detail.purchases[i],
                                     isLast: i == detail.purchases.length - 1,
+                                    onRefund: () async {
+                                      final done = await showRefundPurchaseDialog(
+                                        context: context,
+                                        purchase: detail.purchases[i],
+                                      );
+                                      if (done == true) _afterChange(ref);
+                                    },
                                   ),
                               ],
                             ),
@@ -232,7 +254,10 @@ class _Body extends ConsumerWidget {
                           : Column(
                               children: [
                                 for (final u in detail.upcoming)
-                                  _UpcomingRow(item: u),
+                                  _UpcomingRow(
+                                    item: u,
+                                    onTap: () => onOpenClass(u.classId),
+                                  ),
                               ],
                             ),
                     ),
@@ -289,17 +314,20 @@ class _ActivePassRow extends StatelessWidget {
   final bool isLast;
   final VoidCallback onAdjust;
   final VoidCallback onVoid;
+  final VoidCallback onCancelMembership;
   const _ActivePassRow({
     required this.item,
     required this.isLast,
     required this.onAdjust,
     required this.onVoid,
+    required this.onCancelMembership,
   });
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     final isCredit = item.passKind == 'credit';
+    final isMembership = item.isMembership;
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12),
       decoration: BoxDecoration(
@@ -332,34 +360,64 @@ class _ActivePassRow extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  _subline(item),
+                  isMembership ? _membershipSubline(item) : _subline(item),
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: y.muted,
+                    color: item.cancelAtPeriodEnd ? y.accent : y.muted,
                   ),
                 ),
               ],
             ),
           ),
-          if (isCredit) ...[
+          if (isMembership) ...[
+            // A membership must be cancelled (stops Stripe billing), not voided
+            // (which would kill the pass but keep charging).
             YButton(
-              label: 'Adjust',
+              label: 'Cancel',
               variant: YButtonVariant.outline,
               small: true,
-              onTap: onAdjust,
+              onTap: onCancelMembership,
             ),
-            const SizedBox(width: 8),
+          ] else ...[
+            if (isCredit) ...[
+              YButton(
+                label: 'Adjust',
+                variant: YButtonVariant.outline,
+                small: true,
+                onTap: onAdjust,
+              ),
+              const SizedBox(width: 8),
+            ],
+            YButton(
+              label: 'Void',
+              variant: YButtonVariant.outline,
+              small: true,
+              onTap: onVoid,
+            ),
           ],
-          YButton(
-            label: 'Void',
-            variant: YButtonVariant.outline,
-            small: true,
-            onTap: onVoid,
-          ),
         ],
       ),
     );
+  }
+
+  static String _membershipSubline(WalletEntitlement e) {
+    String date(DateTime d) {
+      const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      final l = d.toLocal();
+      return '${l.day} ${mons[l.month - 1]} ${l.year}';
+    }
+
+    if (e.cancelAtPeriodEnd) {
+      return e.renewsAt != null
+          ? 'Membership · cancels ${date(e.renewsAt!)}'
+          : 'Membership · cancellation scheduled';
+    }
+    final base = e.subscriptionStatus == 'past_due'
+        ? 'Membership · payment past due'
+        : 'Membership';
+    return e.renewsAt != null ? '$base · renews ${date(e.renewsAt!)}' : base;
   }
 
   static String _subline(WalletEntitlement e) {
@@ -420,7 +478,12 @@ class _HistoryRow extends StatelessWidget {
 class _PurchaseRow extends StatelessWidget {
   final WalletPurchase item;
   final bool isLast;
-  const _PurchaseRow({required this.item, required this.isLast});
+  final VoidCallback onRefund;
+  const _PurchaseRow({
+    required this.item,
+    required this.isLast,
+    required this.onRefund,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -464,20 +527,19 @@ class _PurchaseRow extends StatelessWidget {
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
-          // TODO(refund): wire to POST /admin/purchases/{id}/refund
-          // (store.RefundPurchase already exists). Disabled placeholder until
-          // the money-only refund flow is built. Only shown on completed sales.
+          // Money-only refund (doesn't void the pass — that's the Void action
+          // on the pass row). Only on completed sales.
           if (item.status == 'completed') ...[
             const SizedBox(width: 10),
-            Tooltip(
-              message: 'Refunds — coming soon',
-              child: YButton(
-                label: 'Refund',
-                small: true,
-                variant: YButtonVariant.outline,
-                onTap: null, // disabled (greyed) — feature not built yet
-              ),
+            YButton(
+              label: 'Refund',
+              small: true,
+              variant: YButtonVariant.outline,
+              onTap: onRefund,
             ),
+          ] else if (item.status == 'refunded') ...[
+            const SizedBox(width: 10),
+            const YChip(kind: YChipKind.full, label: 'Refunded'),
           ],
         ],
       ),
@@ -503,7 +565,8 @@ class _PurchaseRow extends StatelessWidget {
 
 class _UpcomingRow extends StatelessWidget {
   final UpcomingBooking item;
-  const _UpcomingRow({required this.item});
+  final VoidCallback onTap;
+  const _UpcomingRow({required this.item, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -512,35 +575,42 @@ class _UpcomingRow extends StatelessWidget {
     final hh = '${local.hour}:${local.minute.toString().padLeft(2, '0')}';
     const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     final dow = dows[(local.weekday + 6) % 7];
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item.title,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: y.text,
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.title,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: y.text,
+                    ),
                   ),
-                ),
-                Text(
-                  '$dow ${local.day} · $hh · ${item.instructorName}',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w500,
-                    color: y.muted,
+                  Text(
+                    '$dow ${local.day} · $hh · ${item.instructorName}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          const YChip(kind: YChipKind.booked, label: 'Booked', leadingCheck: true),
-        ],
+            const YChip(
+                kind: YChipKind.booked, label: 'Booked', leadingCheck: true),
+            const SizedBox(width: 6),
+            Icon(Icons.chevron_right, size: 16, color: y.muted),
+          ],
+        ),
       ),
     );
   }
@@ -774,6 +844,396 @@ class _EraseConfirmDialogState extends ConsumerState<_EraseConfirmDialog> {
                           ),
                         ),
                       ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Cancel a membership the right way: stop the Stripe subscription. "At
+/// renewal" keeps access until the paid period ends; "Now" revokes access and
+/// releases future bookings immediately. Returns true if anything changed.
+Future<bool?> showCancelMembershipDialog({
+  required BuildContext context,
+  required WalletEntitlement entitlement,
+}) {
+  return showDialog<bool>(
+    context: context,
+    barrierColor: const Color(0x80100A05),
+    builder: (_) => _CancelMembershipDialog(entitlement: entitlement),
+  );
+}
+
+class _CancelMembershipDialog extends ConsumerStatefulWidget {
+  final WalletEntitlement entitlement;
+  const _CancelMembershipDialog({required this.entitlement});
+
+  @override
+  ConsumerState<_CancelMembershipDialog> createState() =>
+      _CancelMembershipDialogState();
+}
+
+class _CancelMembershipDialogState
+    extends ConsumerState<_CancelMembershipDialog> {
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _run(Future<void> Function(ApiClient api, String subId) op) async {
+    final subId = widget.entitlement.subscriptionId;
+    if (subId == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await op(ref.read(apiClientProvider), subId);
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = ApiError.fromAny(e).message;
+      });
+    }
+  }
+
+  Future<void> _cancel({required bool immediate}) =>
+      _run((api, subId) => api.adminCancelSubscription(subId, immediate: immediate));
+
+  Future<void> _refund() => _run((api, subId) => api.adminRefundSubscription(subId));
+
+  Future<void> _resume() => _run((api, subId) => api.adminResumeSubscription(subId));
+
+  String _renewLabel() {
+    final d = widget.entitlement.renewsAt?.toLocal();
+    if (d == null) return 'the end of the paid period';
+    const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${d.day} ${mons[d.month - 1]} ${d.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final alreadyScheduled = widget.entitlement.cancelAtPeriodEnd;
+    return Center(
+      child: SizedBox(
+        width: 460,
+        child: Material(
+          color: y.surface,
+          borderRadius: BorderRadius.circular(y.radiusCard),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Cancel membership',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: y.text,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  alreadyScheduled
+                      ? 'Already set to cancel on ${_renewLabel()}. You can end it '
+                          'immediately instead.'
+                      : 'Stops the auto-renewing Stripe subscription. Choose when '
+                          'access ends.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: y.muted,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (alreadyScheduled)
+                  _CancelOption(
+                    title: 'Resume membership',
+                    sub: 'Clears the scheduled cancellation; billing continues.',
+                    onTap: _busy ? null : _resume,
+                  ),
+                if (!alreadyScheduled)
+                  _CancelOption(
+                    title: 'Cancel at renewal',
+                    sub: 'Keeps access until ${_renewLabel()}; no further charges.',
+                    onTap: _busy ? null : () => _cancel(immediate: false),
+                  ),
+                const SizedBox(height: 10),
+                _CancelOption(
+                  title: 'Cancel now',
+                  sub: 'Revokes access immediately and frees their booked seats.',
+                  danger: true,
+                  onTap: _busy ? null : () => _cancel(immediate: true),
+                ),
+                const SizedBox(height: 10),
+                _CancelOption(
+                  title: 'Refund & cancel',
+                  sub: 'Refunds the latest payment, then cancels now (revokes '
+                      'access + frees their booked seats).',
+                  danger: true,
+                  onTap: _busy ? null : _refund,
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _error!,
+                    style: const TextStyle(
+                        color: Color(0xFFA33B2E), fontSize: 12.5),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: YButton(
+                    label: 'Keep membership',
+                    variant: YButtonVariant.outline,
+                    small: true,
+                    onTap: _busy ? null : () => Navigator.of(context).pop(false),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CancelOption extends StatelessWidget {
+  final String title;
+  final String sub;
+  final bool danger;
+  final VoidCallback? onTap;
+  const _CancelOption({
+    required this.title,
+    required this.sub,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    final accent = danger ? const Color(0xFFA33B2E) : y.primary;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: y.surface2,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: y.border),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: accent,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    sub,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: y.muted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, size: 18, color: y.muted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Money-only refund of a completed purchase (full or partial). Does NOT void
+/// the pass — managers use the pass-row Void for that. Returns true on success.
+Future<bool?> showRefundPurchaseDialog({
+  required BuildContext context,
+  required WalletPurchase purchase,
+}) {
+  return showDialog<bool>(
+    context: context,
+    barrierColor: const Color(0x80100A05),
+    builder: (_) => _RefundPurchaseDialog(purchase: purchase),
+  );
+}
+
+class _RefundPurchaseDialog extends ConsumerStatefulWidget {
+  final WalletPurchase purchase;
+  const _RefundPurchaseDialog({required this.purchase});
+
+  @override
+  ConsumerState<_RefundPurchaseDialog> createState() =>
+      _RefundPurchaseDialogState();
+}
+
+class _RefundPurchaseDialogState extends ConsumerState<_RefundPurchaseDialog> {
+  late final TextEditingController _amount;
+  final _note = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _amount = TextEditingController(
+        text: (widget.purchase.amountMinor / 100).toStringAsFixed(2));
+  }
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final v = double.tryParse(_amount.text.trim());
+    if (v == null || v <= 0) {
+      setState(() => _error = 'Enter a valid amount.');
+      return;
+    }
+    final minor = (v * 100).round();
+    if (minor > widget.purchase.amountMinor) {
+      setState(() => _error = "Can't refund more than the sale.");
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(apiClientProvider).adminRefundPurchase(
+            purchaseId: widget.purchase.id,
+            refundAmountMinor: minor,
+            note: _note.text.trim(),
+          );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = ApiError.fromAny(e).message;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final y = context.yoga;
+    return Center(
+      child: SizedBox(
+        width: 420,
+        child: Material(
+          color: y.surface,
+          borderRadius: BorderRadius.circular(y.radiusCard),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Refund ${widget.purchase.productName}',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: y.text,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Refunds the money via Stripe (card sales) and records it. The '
+                  'pass itself stays active — use Void to revoke access.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: y.muted,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'AMOUNT',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: y.muted,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _amount,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  style: TextStyle(fontSize: 14, color: y.text),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    prefixText: '£ ',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: y.borderStrong),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _note,
+                  style: TextStyle(fontSize: 14, color: y.text),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'Note (optional)',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: y.borderStrong),
+                    ),
+                  ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 10),
+                  Text(_error!,
+                      style: const TextStyle(
+                          color: Color(0xFFA33B2E), fontSize: 12.5)),
+                ],
+                const SizedBox(height: 18),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    YButton(
+                      label: 'Cancel',
+                      variant: YButtonVariant.outline,
+                      small: true,
+                      onTap: _busy ? null : () => Navigator.of(context).pop(false),
+                    ),
+                    const SizedBox(width: 10),
+                    YButton(
+                      label: _busy ? 'Refunding…' : 'Refund',
+                      small: true,
+                      onTap: _busy ? null : _submit,
                     ),
                   ],
                 ),

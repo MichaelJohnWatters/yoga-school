@@ -736,6 +736,25 @@ func (g *StripeGateway) VerifyWebhook(payload []byte, sigHeader, webhookSecret s
 				}
 			}
 		}
+		// Capture the PaymentIntent that paid this invoice so a manager can later
+		// refund it. Prefer the expanded payments list; fall back to deriving it
+		// from the confirmation secret (pi_…_secret_…).
+		if inv.Payments != nil {
+			for _, p := range inv.Payments.Data {
+				if p.Payment != nil && p.Payment.PaymentIntent != nil &&
+					p.Payment.PaymentIntent.ID != "" {
+					out.IntentID = p.Payment.PaymentIntent.ID
+					break
+				}
+			}
+		}
+		if out.IntentID == "" && inv.ConfirmationSecret != nil {
+			if cs := inv.ConfirmationSecret.ClientSecret; cs != "" {
+				if i := strings.Index(cs, "_secret_"); i > 0 {
+					out.IntentID = cs[:i]
+				}
+			}
+		}
 	case strings.HasPrefix(out.Type, "customer.subscription."):
 		var sub stripe.Subscription
 		if err := json.Unmarshal(evt.Data.Raw, &sub); err != nil {

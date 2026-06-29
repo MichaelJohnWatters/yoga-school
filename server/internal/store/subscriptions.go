@@ -38,6 +38,12 @@ type Subscription struct {
 	UserName          string `json:"user_name,omitempty"` // populated for admin views
 }
 
+// ErrAlreadySubscribed means the student already holds a live (active or
+// past_due) subscription to this membership product — block a second sign-up so
+// they aren't double-charged with two unlimited passes. A pending row (abandoned
+// checkout) does NOT block, so they can always retry.
+var ErrAlreadySubscribed = errors.New("already subscribed to this membership")
+
 // CreateCheckoutSubscription is the membership buy surface: it ensures a Stripe
 // Customer for the buyer, records a pending subscription row, and creates a
 // hosted Checkout Session in subscription mode against the product's recurring
@@ -71,6 +77,22 @@ func (s *Store) CreateCheckoutSubscription(
 
 	if prod.billingType != "recurring" {
 		return nil, fmt.Errorf("product %s is not a recurring membership", productID)
+	}
+
+	// Block a duplicate sign-up to the same membership: a live (active/past_due)
+	// subscription already covers them. Pending rows (abandoned checkout) don't
+	// block, so a retry after bailing out of Checkout still works.
+	var live int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM subscriptions
+		 WHERE studio_id = ? AND user_id = ? AND product_id = ?
+		   AND status IN ('active','past_due')`,
+		studioID, userID, productID,
+	).Scan(&live); err != nil {
+		return nil, fmt.Errorf("check existing subscription: %w", err)
+	}
+	if live > 0 {
+		return nil, ErrAlreadySubscribed
 	}
 
 	keys, err := s.LoadStripeKeysForUse(ctx, studioID)
@@ -266,6 +288,15 @@ func (s *Store) RecordInvoicePaid(ctx context.Context, studioID string, evt paym
 			return fmt.Errorf("link sub on invoice: %w", err)
 		}
 	}
+	// Remember this invoice's PaymentIntent so a manager can refund the latest
+	// membership payment in-app later.
+	if evt.IntentID != "" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE subscriptions SET last_payment_intent_id = ? WHERE id = ?`,
+			evt.IntentID, rowID); err != nil {
+			return fmt.Errorf("record invoice payment intent: %w", err)
+		}
+	}
 
 	// Compute the new expiry from the billing-period end (+grace), falling
 	// back to the product's validity window if the event carried no period.
@@ -330,6 +361,35 @@ func (s *Store) RecordInvoicePaid(ctx context.Context, studioID string, evt paym
 		nullableTime(evt.CurrentPeriodEnd), rowID,
 	); err != nil {
 		return fmt.Errorf("activate subscription: %w", err)
+	}
+
+	// Record the invoice as a completed purchase so membership income shows up
+	// in revenue reports, a dashboard refund (charge.refunded) and a chargeback
+	// (charge.dispute.*) can find it by stripe_payment_id, and each renewal is
+	// individually refundable. Keyed on the invoice's PaymentIntent so a
+	// redelivered event can't double-insert.
+	if evt.IntentID != "" {
+		var amountMinor int
+		var currency string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT amount_minor, currency FROM subscriptions WHERE id = ?`, rowID,
+		).Scan(&amountMinor, &currency); err != nil {
+			return fmt.Errorf("load subscription amount: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO purchases
+			  (id, studio_id, user_id, product_id, list_price_minor, amount_minor,
+			   currency, payment_method, initiated_by, actor_role, status,
+			   stripe_payment_id, resulting_entitlement_id)
+			SELECT ?, ?, ?, ?, ?, ?, ?, 'card', ?, 'student', 'completed', ?, ?
+			 WHERE NOT EXISTS (
+			   SELECT 1 FROM purchases WHERE stripe_payment_id = ?
+			 )`,
+			NewID(), studioID, userID, productID, amountMinor, amountMinor,
+			currency, userID, evt.IntentID, entID, evt.IntentID,
+		); err != nil {
+			return fmt.Errorf("record membership purchase: %w", err)
+		}
 	}
 	return tx.Commit()
 }
@@ -512,6 +572,40 @@ func findSubscriptionForInvoiceTx(ctx context.Context, tx *sql.Tx, studioID stri
 	}
 	err = sql.ErrNoRows
 	return
+}
+
+// AdminResumeSubscription clears a scheduled end-of-period cancellation on
+// behalf of a member (e.g. they changed their mind at the desk). Audited.
+func (s *Store) AdminResumeSubscription(ctx context.Context, studioID, actorID, subID string) error {
+	var ownerID string
+	var stripeSubID sql.NullString
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT user_id, stripe_subscription_id FROM subscriptions WHERE studio_id = ? AND id = ?`,
+		studioID, subID,
+	).Scan(&ownerID, &stripeSubID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !stripeSubID.Valid || stripeSubID.String == "" {
+		return fmt.Errorf("subscription not yet active")
+	}
+	keys, err := s.stripeKeys(ctx, studioID)
+	if err != nil {
+		return err
+	}
+	if err := s.gateway.ResumeSubscription(ctx, keys.SecretKey, stripeSubID.String); err != nil {
+		return fmt.Errorf("resume subscription: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE subscriptions SET cancel_at_period_end = 0,
+		       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE id = ?`, subID); err != nil {
+		return err
+	}
+	return s.WriteAudit(ctx, studioID, actorID, "subscription_resume", "subscription", subID,
+		map[string]any{"on_behalf_of": ownerID})
 }
 
 // ===== Student-facing reads + mutations =================================
@@ -749,6 +843,52 @@ func (s *Store) AdminCancelSubscription(ctx context.Context, studioID, actorID, 
 	}
 	return s.WriteAudit(ctx, studioID, actorID, "subscription_cancel",
 		"subscription", subID, map[string]any{"on_behalf_of": ownerID, "immediate": immediate})
+}
+
+// ErrNoRefundablePayment means we have no recorded PaymentIntent for the
+// membership's latest invoice (e.g. a subscription that hasn't renewed since we
+// began capturing it) — the manager should refund via the Stripe Dashboard.
+var ErrNoRefundablePayment = errors.New("no recorded membership payment to refund")
+
+// AdminRefundMembership refunds the latest membership payment and cancels the
+// subscription immediately — which also revokes access and releases the
+// student's future booked seats (cancelFutureBookingsTx, via the immediate
+// cancel). Audited subscription_refund (the cancel adds its own row).
+func (s *Store) AdminRefundMembership(ctx context.Context, studioID, actorID, subID string) error {
+	var (
+		ownerID, currency string
+		amountMinor       int
+		lastPI            sql.NullString
+	)
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT user_id, currency, amount_minor, last_payment_intent_id
+		  FROM subscriptions WHERE studio_id = ? AND id = ?`,
+		studioID, subID,
+	).Scan(&ownerID, &currency, &amountMinor, &lastPI); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !lastPI.Valid || lastPI.String == "" {
+		return ErrNoRefundablePayment
+	}
+	// Cancel now: stops billing, revokes access, releases future bookings.
+	if err := s.AdminCancelSubscription(ctx, studioID, actorID, subID, true); err != nil {
+		return err
+	}
+	// Refund the latest paid invoice. Idempotency key keeps a retry from
+	// double-paying.
+	if err := s.issueStripeRefund(ctx, studioID, lastPI.String, amountMinor,
+		"subrefund:"+subID+":"+lastPI.String); err != nil {
+		return err
+	}
+	return s.WriteAudit(ctx, studioID, actorID, "subscription_refund", "subscription", subID,
+		map[string]any{
+			"on_behalf_of": ownerID,
+			"amount_minor": amountMinor,
+			"currency":     currency,
+		})
 }
 
 // ===== shared helpers ====================================================
