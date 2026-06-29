@@ -80,11 +80,14 @@ func TestConfirmCheckoutSessionForUser_MintsWhenPaid(t *testing.T) {
 	}
 	assertPurchaseStatus(t, s, out.PurchaseID, "completed")
 
-	// Idempotent: a second confirm (now id swapped to pi_) by the old session
-	// returns ErrNotFound — the client falls back to its entitlement poll.
-	_, _, err = s.ConfirmCheckoutSessionForUser(ctx, f.studioID, f.studentID, sessionID)
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("second confirm: want ErrNotFound, got %v", err)
+	// Idempotent: a second confirm by the old session id still resolves, even
+	// though the webhook swapped stripe_payment_id to the pi_ PaymentIntent —
+	// we re-resolve via the session's PaymentIntent and return the same
+	// entitlement, so the web success page shows instead of a "not found".
+	ent2, done2, err2 := s.ConfirmCheckoutSessionForUser(ctx, f.studioID, f.studentID, sessionID)
+	if err2 != nil || !done2 || ent2 != ent {
+		t.Fatalf("second confirm: got ent=%q done=%v err=%v, want %q/true/nil",
+			ent2, done2, err2, ent)
 	}
 
 	// Another user can't confirm someone else's session.
