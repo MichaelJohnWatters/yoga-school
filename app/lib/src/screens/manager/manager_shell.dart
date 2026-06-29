@@ -15,6 +15,7 @@ import '../../widgets/yoga_primitives.dart';
 import 'admin_audit_screen.dart';
 import 'admin_dashboard_screen.dart';
 import 'admin_discounts_screen.dart';
+import 'admin_memberships_screen.dart';
 import 'admin_payments_screen.dart';
 import 'admin_product_editor_screen.dart';
 import 'admin_products_screen.dart';
@@ -43,6 +44,7 @@ enum ManagerSection {
   staff,
   roster,
   payments,
+  memberships,
   terminal,
   reports,
   audit,
@@ -71,6 +73,7 @@ bool isSectionVisible(ManagerSection s, AccessTier tier) {
     case ManagerSection.promotions:
     case ManagerSection.staff:
     case ManagerSection.payments:
+    case ManagerSection.memberships:
     case ManagerSection.terminal:
     case ManagerSection.reports:
     case ManagerSection.audit:
@@ -193,6 +196,7 @@ class _ManagerShellState extends State<ManagerShell> {
         ManagerSection.staff => 'Staff',
         ManagerSection.roster => 'Roster',
         ManagerSection.payments => 'Payments',
+        ManagerSection.memberships => 'Memberships',
         ManagerSection.terminal => 'Terminal',
         ManagerSection.reports => 'Reports',
         ManagerSection.audit => 'Activity',
@@ -509,6 +513,7 @@ const _items = <_SidebarItem>[
   _SidebarItem(ManagerSection.staff, 'Staff', Icons.badge_outlined),
   _SidebarItem(ManagerSection.roster, 'Roster', Icons.fact_check_outlined),
   _SidebarItem(ManagerSection.payments, 'Payments', Icons.warning_amber_outlined),
+  _SidebarItem(ManagerSection.memberships, 'Memberships', Icons.card_membership_outlined),
   _SidebarItem(ManagerSection.terminal, 'Terminal', Icons.point_of_sale_outlined),
   _SidebarItem(ManagerSection.reports, 'Reports', Icons.bar_chart_outlined),
   _SidebarItem(ManagerSection.audit, 'Activity', Icons.history),
@@ -589,6 +594,7 @@ class _Content extends StatelessWidget {
             ),
       ManagerSection.staff => AdminStaffScreen(me: me),
       ManagerSection.payments => const AdminPaymentsScreen(),
+      ManagerSection.memberships => AdminMembershipsScreen(onOpenStudent: onOpenStudent),
       ManagerSection.terminal => const AdminTerminalScreen(),
       ManagerSection.reports => const AdminReportsScreen(),
       ManagerSection.audit => const AdminAuditScreen(),

@@ -558,6 +558,7 @@ class Subscription {
   final String? currentPeriodEnd; // RFC3339, when known
   final String currency;
   final int amountMinor;
+  final String? userId; // admin views only
   final String? userName; // admin views only
 
   Subscription({
@@ -570,7 +571,25 @@ class Subscription {
     required this.currency,
     required this.amountMinor,
     required this.userName,
+    this.userId,
   });
+
+  DateTime? get currentPeriodEndDate =>
+      currentPeriodEnd == null ? null : DateTime.tryParse(currentPeriodEnd!);
+
+  String formattedAmount() {
+    final symbol = switch (currency.toUpperCase()) {
+      'GBP' => '£',
+      'USD' => '\$',
+      'EUR' => '€',
+      _ => '$currency ',
+    };
+    final whole = amountMinor ~/ 100;
+    final cents = amountMinor % 100;
+    return cents == 0
+        ? '$symbol$whole'
+        : '$symbol$whole.${cents.toString().padLeft(2, '0')}';
+  }
 
   factory Subscription.fromJson(Map<String, dynamic> j) => Subscription(
     id: j['id'] as String,
@@ -583,6 +602,9 @@ class Subscription {
         : j['current_period_end'] as String,
     currency: j['currency'] as String,
     amountMinor: j['amount_minor'] as int,
+    userId: (j['user_id'] as String?)?.isEmpty ?? true
+        ? null
+        : j['user_id'] as String,
     userName: (j['user_name'] as String?)?.isEmpty ?? true
         ? null
         : j['user_name'] as String,
