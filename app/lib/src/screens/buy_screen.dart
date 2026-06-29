@@ -14,6 +14,7 @@ import '../api/models.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
 import 'checkout_sheet.dart';
+import 'profile_screen.dart' show subscriptionsProvider, entitlementsProvider;
 
 /// Keyed by the optional class-type id. Pass null for the unrestricted list
 /// (the default Buy tab); pass a class type when the buyer arrived from a
@@ -29,6 +30,52 @@ final productsProvider = FutureProvider
       .watch(apiClientProvider)
       .listProducts(coversClassTypeId: coversClassTypeId);
 });
+
+/// The membership product ids the student already holds (active or past_due).
+/// Used to render those cards as "Current plan" rather than buyable, matching
+/// the server's duplicate-subscription guard. A pending (abandoned checkout)
+/// subscription is deliberately excluded so they can still retry.
+// Derived from subscriptionsProvider so it refreshes whenever that does (e.g.
+// RootShell's app-resume refresh after a membership purchase completes).
+final activeMembershipProductIdsProvider = Provider<Set<String>>((ref) {
+  final subs = ref.watch(subscriptionsProvider).asData?.value ?? const [];
+  return subs
+      .where((s) => s.status == 'active' || s.status == 'past_due')
+      .map((s) => s.productId)
+      .toSet();
+});
+
+/// Product ids the student already holds a *usable* pass for (active, not
+/// expired, credits left). Drives the per-product duplicate_policy hints/gating
+/// on the buy cards. Derived from entitlementsProvider so it tracks the wallet.
+final heldUsablePassProductIdsProvider = Provider<Set<String>>((ref) {
+  final ents = ref.watch(entitlementsProvider).asData?.value ?? const [];
+  final now = DateTime.now();
+  return ents
+      .where((e) {
+        if (e.status != 'active') return false;
+        if (e.expiresAt != null && !e.expiresAt!.isAfter(now)) return false;
+        if (e.passKind == 'credit') return (e.creditsRemaining ?? 0) > 0;
+        return true;
+      })
+      .map((e) => e.sourceProductId)
+      .whereType<String>()
+      .toSet();
+});
+
+/// What a pass product's duplicate_policy means for a student who already holds
+/// a usable one: whether to block the buy, and an optional hint to show.
+({bool gated, String? note}) passDuplicateState(Product p, Set<String> held) {
+  if (!held.contains(p.id)) return (gated: false, note: null);
+  switch (p.duplicatePolicy) {
+    case 'prevent':
+      return (gated: true, note: 'Already owned');
+    case 'topup':
+      return (gated: false, note: 'Tops up your existing pass');
+    default: // allow — no nag
+      return (gated: false, note: null);
+  }
+}
 
 /// Buy filter — student's chosen discipline. `all` shows everything;
 /// specific filters keep only products whose discipline set contains the
@@ -348,18 +395,16 @@ class _GridBody extends StatelessWidget {
   }
 }
 
-class _GridCard extends StatelessWidget {
+class _GridCard extends ConsumerWidget {
   final Product product;
   const _GridCard({required this.product});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    return InkWell(
-      key: Key('product-row-${product.id}'),
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    final dup =
+        passDuplicateState(product, ref.watch(heldUsablePassProductIdsProvider));
+    final card = Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: y.surface,
@@ -395,18 +440,27 @@ class _GridCard extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Text(
-              product.terms(),
+              dup.note ?? product.terms(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w600,
-                color: y.muted,
+                color: dup.note != null ? y.accent : y.muted,
               ),
             ),
           ],
         ),
-      ),
+      );
+    return InkWell(
+      key: Key('product-row-${product.id}'),
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: dup.gated
+          ? () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('You already have this pass.')),
+              )
+          : () => _openCheckout(context, product),
+      child: dup.gated ? Opacity(opacity: 0.6, child: card) : card,
     );
   }
 }
@@ -485,23 +539,24 @@ class _MembershipsGrid extends StatelessWidget {
   }
 }
 
-class _MembershipCard extends StatelessWidget {
+class _MembershipCard extends ConsumerWidget {
   final Product product;
   final bool expand;
   const _MembershipCard({required this.product, this.expand = false});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
     final fill = product.isHero;
     final bg = fill ? y.primary : y.primarySoft;
     final fg = fill ? y.onPrimary : y.text;
     final muted = fill ? y.onPrimary.withValues(alpha: 0.85) : y.muted;
-    return InkWell(
-      key: Key('product-row-${product.id}'),
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    // Already on this membership? Render it as the current plan, not buyable —
+    // the server would reject a duplicate sign-up anyway (already_subscribed).
+    // Default to buyable while the subscriptions list is loading.
+    final owned =
+        ref.watch(activeMembershipProductIdsProvider).contains(product.id);
+    final card = Container(
         constraints: const BoxConstraints(minHeight: 108),
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
         decoration: BoxDecoration(
@@ -513,7 +568,7 @@ class _MembershipCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: expand ? MainAxisSize.min : MainAxisSize.max,
           children: [
-            _MembershipTag(onFill: fill),
+            _MembershipTag(onFill: fill, currentPlan: owned),
             const SizedBox(height: 6),
             Text(
               product.name,
@@ -571,19 +626,55 @@ class _MembershipCard extends StatelessWidget {
             ),
           ],
         ),
+      );
+
+    if (!owned) {
+      return InkWell(
+        key: Key('product-row-${product.id}'),
+        borderRadius: BorderRadius.circular(y.radiusCard),
+        onTap: () => _openCheckout(context, product),
+        child: card,
+      );
+    }
+    // Already the current plan → not buyable; a tap explains why.
+    return InkWell(
+      key: Key('product-row-${product.id}'),
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You're already on this plan.")),
       ),
+      child: Opacity(opacity: 0.85, child: card),
     );
   }
 }
 
 class _MembershipTag extends StatelessWidget {
   final bool onFill;
-  const _MembershipTag({required this.onFill});
+  final bool currentPlan;
+  const _MembershipTag({required this.onFill, this.currentPlan = false});
 
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
     final color = onFill ? y.onPrimary : y.primary;
+    if (currentPlan) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.check_circle, size: 12, color: color),
+          const SizedBox(width: 5),
+          Text(
+            'CURRENT PLAN',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.6,
+              color: color,
+            ),
+          ),
+        ],
+      );
+    }
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -603,18 +694,16 @@ class _MembershipTag extends StatelessWidget {
   }
 }
 
-class _PackRow extends StatelessWidget {
+class _PackRow extends ConsumerWidget {
   final Product product;
   const _PackRow({required this.product});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final y = context.yoga;
-    return InkWell(
-      key: Key('product-row-${product.id}'),
-      borderRadius: BorderRadius.circular(y.radiusCard),
-      onTap: () => _openCheckout(context, product),
-      child: Container(
+    final dup =
+        passDuplicateState(product, ref.watch(heldUsablePassProductIdsProvider));
+    final row = Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: y.surface,
@@ -645,6 +734,17 @@ class _PackRow extends StatelessWidget {
                       color: y.muted,
                     ),
                   ),
+                  if (dup.note != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      dup.note!,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.accent,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -662,7 +762,16 @@ class _PackRow extends StatelessWidget {
             ),
           ],
         ),
-      ),
+      );
+    return InkWell(
+      key: Key('product-row-${product.id}'),
+      borderRadius: BorderRadius.circular(y.radiusCard),
+      onTap: dup.gated
+          ? () => ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('You already have this pass.')),
+              )
+          : () => _openCheckout(context, product),
+      child: dup.gated ? Opacity(opacity: 0.6, child: row) : row,
     );
   }
 }

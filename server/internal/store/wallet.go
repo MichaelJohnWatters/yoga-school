@@ -19,6 +19,13 @@ type EntitlementWalletItem struct {
 	Disciplines      []string `json:"disciplines"`
 	// Lets the buy flow detect "you already own this pass" warnings.
 	SourceProductID *string `json:"source_product_id,omitempty"`
+	// Subscription backing this pass, when it's a membership. Lets the manager
+	// student page offer "Cancel at renewal" / "Cancel now" instead of a plain
+	// void (which wouldn't stop Stripe billing). Null for one-off passes.
+	SubscriptionID     *string `json:"subscription_id,omitempty"`
+	SubscriptionStatus *string `json:"subscription_status,omitempty"`
+	RenewsAt           *string `json:"renews_at,omitempty"` // current_period_end
+	CancelAtPeriodEnd  bool    `json:"cancel_at_period_end"`
 }
 
 // MyEntitlements returns the caller's entitlements, freshest first.
@@ -28,8 +35,12 @@ func (s *Store) MyEntitlements(ctx context.Context, userID string) ([]Entitlemen
 		SELECT e.id, e.label, e.pass_kind, e.status,
 		       e.credits_total, e.credits_remaining,
 		       COALESCE(e.expires_at,''), e.created_at,
-		       e.source_product_id
+		       e.source_product_id,
+		       sub.id, sub.status, sub.current_period_end, COALESCE(sub.cancel_at_period_end,0)
 		  FROM entitlements e
+		  LEFT JOIN subscriptions sub
+		         ON sub.entitlement_id = e.id
+		        AND sub.status IN ('active','past_due')
 		 WHERE e.user_id = ?
 		 ORDER BY (e.status = 'active') DESC, e.created_at DESC`
 	rows, err := s.db.QueryContext(ctx, q, userID)
@@ -42,18 +53,36 @@ func (s *Store) MyEntitlements(ctx context.Context, userID string) ([]Entitlemen
 	ids := []any{}
 	for rows.Next() {
 		var (
-			it       EntitlementWalletItem
-			creditsT sql.NullInt64
-			creditsR sql.NullInt64
-			srcProd  sql.NullString
+			it        EntitlementWalletItem
+			creditsT  sql.NullInt64
+			creditsR  sql.NullInt64
+			srcProd   sql.NullString
+			subID     sql.NullString
+			subStatus sql.NullString
+			renewsAt  sql.NullString
+			cancelEnd int
 		)
 		if err := rows.Scan(&it.ID, &it.Label, &it.PassKind, &it.Status,
-			&creditsT, &creditsR, &it.ExpiresAt, &it.CreatedAt, &srcProd); err != nil {
+			&creditsT, &creditsR, &it.ExpiresAt, &it.CreatedAt, &srcProd,
+			&subID, &subStatus, &renewsAt, &cancelEnd); err != nil {
 			return nil, err
 		}
 		if srcProd.Valid {
 			s := srcProd.String
 			it.SourceProductID = &s
+		}
+		if subID.Valid {
+			v := subID.String
+			it.SubscriptionID = &v
+			if subStatus.Valid {
+				ss := subStatus.String
+				it.SubscriptionStatus = &ss
+			}
+			if renewsAt.Valid && renewsAt.String != "" {
+				ra := renewsAt.String
+				it.RenewsAt = &ra
+			}
+			it.CancelAtPeriodEnd = cancelEnd != 0
 		}
 		if creditsT.Valid {
 			n := int(creditsT.Int64)

@@ -10,6 +10,7 @@ import '../../api/api_error.dart';
 import '../../api/models.dart';
 import '../../theme/yoga_tokens.dart';
 import '../../widgets/yoga_primitives.dart';
+import 'enroll_student_dialog.dart';
 import 'manager_shell.dart';
 
 final adminSeriesRosterProvider =
@@ -32,7 +33,18 @@ class AdminSeriesRosterScreen extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(30, 26, 30, 26),
       child: data.when(
-        data: (r) => _Body(roster: r, onClose: onClose),
+        data: (r) => _Body(
+          roster: r,
+          onClose: onClose,
+          onEnroll: () async {
+            final ok = await showEnrollStudentDialog(
+              context: context,
+              enrollmentId: enrollmentId,
+              seatsLeft: r.series.capacity - r.students.length,
+            );
+            if (ok == true) ref.invalidate(adminSeriesRosterProvider(enrollmentId));
+          },
+        ),
         loading: () =>
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
         error: (e, _) => Center(
@@ -49,7 +61,12 @@ class AdminSeriesRosterScreen extends ConsumerWidget {
 class _Body extends StatelessWidget {
   final SeriesRoster roster;
   final VoidCallback onClose;
-  const _Body({required this.roster, required this.onClose});
+  final VoidCallback onEnroll;
+  const _Body({
+    required this.roster,
+    required this.onClose,
+    required this.onEnroll,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -61,6 +78,11 @@ class _Body extends StatelessWidget {
           title: s.title,
           sub: '${s.sessionCount} sessions · ${roster.students.length} of ${s.capacity} enrolled',
           actions: [
+            YButton(
+              label: '+ Enroll a student',
+              small: true,
+              onTap: onEnroll,
+            ),
             YButton(
               label: 'Back',
               variant: YButtonVariant.outline,

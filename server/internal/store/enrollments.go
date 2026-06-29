@@ -162,15 +162,36 @@ func (s *Store) GetEnrollmentDetail(ctx context.Context, studioID, userID, enrol
 	return det, sRows.Err()
 }
 
-// JoinEnrollment atomically: creates an entitlement + a purchase, an
+// JoinEnrollment is the student-initiated sync enrol (dev_stub / comp paths);
+// real student purchases go through Stripe. See enrollStudentSync.
+func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollmentID, paymentMethod, discountCode string) (string, error) {
+	return s.enrollStudentSync(ctx, studioID, userID, enrollmentID,
+		paymentMethod, discountCode, userID, "student", "series_join")
+}
+
+// ManagerEnrollStudent signs a student into a series from the manager console
+// (desk sign-ups: comp / cash / card / transfer). Same side-effects as a paid
+// join — mints the series entitlement, books every session, records a completed
+// purchase — but the purchase + audit attribute to the acting manager. Audited
+// as series_manager_enroll.
+func (s *Store) ManagerEnrollStudent(ctx context.Context, studioID, actorID, enrollmentID, studentID, paymentMethod, discountCode string) (string, error) {
+	return s.enrollStudentSync(ctx, studioID, studentID, enrollmentID,
+		paymentMethod, discountCode, actorID, "manager", "series_manager_enroll")
+}
+
+// enrollStudentSync atomically: creates an entitlement + a purchase, an
 // enrollment_bookings row, and a booking for each future session.
 // Returns the created enrollment_bookings ID.
+//
+// userID is the student being enrolled; actorID/actorRole/auditAction describe
+// who initiated it (the student themselves, or a manager at the desk) so the
+// purchase row + audit log attribute correctly.
 //
 // discountCode is optional; pass "" for no discount. When set, the code is
 // validated inside the tx and recorded on the purchase row alongside the
 // list price. Returns *BookingError for discount-related failures so the
 // API layer can surface a structured 409.
-func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollmentID, paymentMethod, discountCode string) (string, error) {
+func (s *Store) enrollStudentSync(ctx context.Context, studioID, userID, enrollmentID, paymentMethod, discountCode, actorID, actorRole, auditAction string) (string, error) {
 	switch paymentMethod {
 	case "cash", "card", "card_present", "transfer", "comp", "dev_stub":
 	default:
@@ -193,7 +214,7 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", err
 	}
 	if already > 0 {
-		return "", fmt.Errorf("already enrolled in this series")
+		return "", ErrAlreadyEnrolled
 	}
 
 	// Capacity check.
@@ -213,7 +234,7 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", err
 	}
 	if currentlyEnrolled >= capacity {
-		return "", fmt.Errorf("enrollment is full")
+		return "", ErrSeriesFull
 	}
 
 	// Product + currency for the purchase row. Also grab the enrollment
@@ -317,10 +338,10 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		     discount_minor, discount_id,
 		     payment_method, initiated_by, actor_role, status,
 		     resulting_entitlement_id)
-		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'completed', ?)`,
+		    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)`,
 		purchaseID, studioID, userID, productID, priceMinor, amountMinor, currency,
 		discountMinor, discountIDPtr,
-		paymentMethod, userID, entitlementID,
+		paymentMethod, actorID, actorRole, entitlementID,
 	); err != nil {
 		return "", err
 	}
@@ -363,9 +384,12 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 	if discountCode != "" {
 		auditDetail["discount_code"] = discountCode
 	}
-	if err := s.writeAuditTx(ctx, tx, studioID, userID,
-		"series_join", "enrollment", enrollmentID, auditDetail); err != nil {
-		return "", fmt.Errorf("audit series_join: %w", err)
+	if actorRole != "student" {
+		auditDetail["student_id"] = userID
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, actorID,
+		auditAction, "enrollment", enrollmentID, auditDetail); err != nil {
+		return "", fmt.Errorf("audit %s: %w", auditAction, err)
 	}
 	return enrollBookingID, tx.Commit()
 }
