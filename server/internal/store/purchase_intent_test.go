@@ -34,7 +34,7 @@ func TestCreatePendingPurchase_DoesNotMintEntitlementYet(t *testing.T) {
 	ctx := context.Background()
 	productID := seedTenPack(t, s, f)
 
-	out, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	out, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("intent: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestConfirmPurchase_MintsEntitlementAndFlipsStatus(t *testing.T) {
 	ctx := context.Background()
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestConfirmPurchase_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestConfirmPurchase_NotFoundCrossUser(t *testing.T) {
 	ctx := context.Background()
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

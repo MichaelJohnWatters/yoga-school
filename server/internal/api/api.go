@@ -151,6 +151,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/admin/class-templates/{id}/undo", s.handleAdminUndoClassTemplate)
 			r.Post("/admin/enrollments", s.handleAdminCreateSeries)
 			r.Patch("/admin/enrollments/{id}", s.handleAdminUpdateEnrollment)
+			r.Delete("/admin/enrollments/{id}", s.handleAdminArchiveEnrollment)
 			r.Post("/admin/students/{id}/grant", s.handleAdminGrantPass)
 			r.Post("/admin/students/{id}/entitlements/{eid}/adjust",
 				s.handleAdminAdjustCredits)
@@ -487,7 +488,7 @@ func (s *Server) handleListClasses(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListEnrollments(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	rows, err := s.store.ListEnrollments(r.Context(), u.StudioID, u.ID)
+	rows, err := s.store.ListEnrollments(r.Context(), u.StudioID, u.ID, false)
 	if err != nil {
 		log.Printf("list enrollments: %v", err)
 		writeError(w, http.StatusInternalServerError, "enrollments error")
@@ -723,6 +724,7 @@ func (s *Server) handleProductDetail(w http.ResponseWriter, r *http.Request) {
 
 type checkoutSessionReq struct {
 	ProductID    string `json:"product_id"`
+	EnrollmentID string `json:"enrollment_id"` // set to pay for a series
 	DiscountCode string `json:"discount_code"`
 	SuccessURL   string `json:"success_url"`
 	CancelURL    string `json:"cancel_url"`
@@ -738,17 +740,36 @@ func (s *Server) handleCreateCheckoutSession(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if req.ProductID == "" {
-		writeError(w, http.StatusBadRequest, "product_id is required")
-		return
-	}
 	if req.SuccessURL == "" || req.CancelURL == "" {
 		writeError(w, http.StatusBadRequest, "success_url and cancel_url are required")
 		return
 	}
+	// A series purchase sends enrollment_id; resolve it to the series' product
+	// (and validate capacity / not-already-enrolled) before charging.
+	productID := req.ProductID
+	if req.EnrollmentID != "" {
+		pid, err := s.store.EnrollmentProductForCheckout(r.Context(), u.StudioID, u.ID, req.EnrollmentID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "series not found")
+			return
+		}
+		if errors.Is(err, store.ErrAlreadyEnrolled) || errors.Is(err, store.ErrSeriesFull) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err != nil {
+			respondErr(w, err, "enrollmentCheckout")
+			return
+		}
+		productID = pid
+	}
+	if productID == "" {
+		writeError(w, http.StatusBadRequest, "product_id or enrollment_id is required")
+		return
+	}
 	out, err := s.store.CreateCheckoutPurchase(
-		r.Context(), u.StudioID, u.ID, req.ProductID, req.DiscountCode,
-		req.SuccessURL, req.CancelURL,
+		r.Context(), u.StudioID, u.ID, productID, req.DiscountCode,
+		req.SuccessURL, req.CancelURL, req.EnrollmentID,
 	)
 	if errors.Is(err, store.ErrStripeNotConfigured) {
 		writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
@@ -945,6 +966,7 @@ func (s *Server) handleListProducts(w http.ResponseWriter, r *http.Request) {
 
 type createPurchaseReq struct {
 	ProductID     string `json:"product_id"`
+	EnrollmentID  string `json:"enrollment_id"` // set to pay for a series (card path)
 	PaymentMethod string `json:"payment_method"` // 'card' | 'cash' | 'dev_stub'
 	// Optional. When set, server validates + applies the discount in the
 	// same tx as the purchase insert and stores discount_minor + discount_id
@@ -2040,6 +2062,22 @@ func (s *Server) handleAdminUpdateEnrollment(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleAdminArchiveEnrollment(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	err := s.store.ArchiveEnrollment(r.Context(), u.StudioID, u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "enrollment not found")
+		return
+	}
+	if err != nil {
+		log.Printf("archive enrollment: %v", err)
+		writeError(w, http.StatusInternalServerError, "archive error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleAdminSeriesRoster(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	id := chi.URLParam(r, "id")
@@ -2537,8 +2575,28 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if req.ProductID == "" {
-		writeError(w, http.StatusBadRequest, "product_id is required")
+	// A series purchase sends enrollment_id; resolve it to the series' product
+	// (and validate) before charging. The pending purchase is tagged with the
+	// enrollment so fulfilment enrolls the student.
+	productID := req.ProductID
+	if req.EnrollmentID != "" {
+		pid, err := s.store.EnrollmentProductForCheckout(r.Context(), u.StudioID, u.ID, req.EnrollmentID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "series not found")
+			return
+		}
+		if errors.Is(err, store.ErrAlreadyEnrolled) || errors.Is(err, store.ErrSeriesFull) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err != nil {
+			respondErr(w, err, "enrollmentCheckout")
+			return
+		}
+		productID = pid
+	}
+	if productID == "" {
+		writeError(w, http.StatusBadRequest, "product_id or enrollment_id is required")
 		return
 	}
 	if req.PaymentMethod == "" {
@@ -2554,7 +2612,7 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 	// finish on Stripe.js. The entitlement gets minted on POST /confirm.
 	if requiresStripeConfirm(req.PaymentMethod) {
 		out, err := s.store.CreatePendingPurchase(
-			r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod, req.DiscountCode,
+			r.Context(), u.StudioID, u.ID, productID, req.PaymentMethod, req.DiscountCode, req.EnrollmentID,
 		)
 		if errors.Is(err, store.ErrStripeNotConfigured) {
 			writeErrorCode(w, http.StatusConflict, "stripe_not_configured", err.Error())
@@ -2570,7 +2628,7 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 
 	// Synchronous one-shot for the non-Stripe methods.
 	purchaseID, entitlementID, err := s.store.CreatePurchase(
-		r.Context(), u.StudioID, u.ID, req.ProductID, req.PaymentMethod, req.DiscountCode,
+		r.Context(), u.StudioID, u.ID, productID, req.PaymentMethod, req.DiscountCode,
 	)
 	if err != nil {
 		respondErr(w, err, "createPurchase")

@@ -10,6 +10,7 @@ class StudioConfig {
   final String currency;
   final int freeCancelCutoffHours;
   final int bookingWindowDays; // 0 = no limit
+  final int subscriptionGraceDays; // extra days of membership access after a period ends
   final bool allowStudentPlusOne;
   final String welcomeMessage;
   final String buyLayout; // grid|list|grouped
@@ -34,6 +35,7 @@ class StudioConfig {
     required this.currency,
     required this.freeCancelCutoffHours,
     required this.bookingWindowDays,
+    required this.subscriptionGraceDays,
     required this.allowStudentPlusOne,
     required this.welcomeMessage,
     required this.buyLayout,
@@ -58,6 +60,7 @@ class StudioConfig {
     currency: j['currency'] as String,
     freeCancelCutoffHours: j['free_cancel_cutoff_hours'] as int,
     bookingWindowDays: (j['booking_window_days'] as int?) ?? 0,
+    subscriptionGraceDays: (j['subscription_grace_days'] as int?) ?? 2,
     allowStudentPlusOne: j['allow_student_plus_one'] as bool,
     welcomeMessage: j['welcome_message'] as String,
     buyLayout: j['buy_layout'] as String,
@@ -935,6 +938,9 @@ class EnrollmentSummary {
   final DateTime? endsAt;
   final String instructorName;
   final String seriesState; // open | full | enrolled
+  // Set only on the manager feed when the series has been retired; always null
+  // for students (archived series are filtered out server-side).
+  final DateTime? archivedAt;
 
   EnrollmentSummary({
     required this.id,
@@ -949,6 +955,7 @@ class EnrollmentSummary {
     required this.endsAt,
     required this.instructorName,
     required this.seriesState,
+    this.archivedAt,
   });
 
   factory EnrollmentSummary.fromJson(Map<String, dynamic> j) =>
@@ -965,7 +972,10 @@ class EnrollmentSummary {
         endsAt: _parseDate(j['ends_at']),
         instructorName: (j['instructor_name'] as String?) ?? '',
         seriesState: j['series_state'] as String,
+        archivedAt: _parseDate(j['archived_at']),
       );
+
+  bool get isArchived => archivedAt != null;
 
   int get seatsLeft => capacity - enrolledCount;
 
