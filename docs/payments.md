@@ -64,13 +64,15 @@ path so we know which secret to verify against before parsing.
 | Event | Effect |
 | --- | --- |
 | `checkout.session.completed` | Web success → mint pass, swap `cs_…`→`pi_…` |
+| `checkout.session.async_payment_succeeded` | Delayed-settlement web payment finally paid → mint pass |
+| `checkout.session.async_payment_failed` | Delayed payment failed → void pending purchase |
 | `checkout.session.expired` | Web abandoned → void pending purchase |
 | `payment_intent.succeeded` | Mobile success → mint pass |
 | `payment_intent.payment_failed` | Void pending purchase |
 | `payment_intent.canceled` | Void pending purchase |
 | `charge.refunded` | Reflect a Dashboard-initiated refund (money only) |
 | `charge.dispute.created` / `.updated` / `.closed` | Record a chargeback on the purchase + alert managers (never auto-revokes the pass) |
-| `invoice.paid` | Membership initial/renewal payment → grant/extend the rolling pass |
+| `invoice.paid` | Membership initial/renewal payment → grant/extend the rolling pass + record a `purchases` row (revenue/refund/dispute matching) + capture the PI on `subscriptions.last_payment_intent_id` |
 | `invoice.payment_failed` | Membership dunning → mark subscription `past_due` |
 | `customer.subscription.updated` | Reflect status / cancel-at-period-end / period end |
 | `customer.subscription.deleted` | Membership ended → mark `canceled`, end access |
@@ -422,7 +424,13 @@ each on a real device or simulator before relying on them:
   register → `ChargeInPerson` → `payment_intent.succeeded` webhook mints the
   pass.
 
+A runnable, step-by-step Stripe **test-mode** checklist for all of the above
+(plus web flows, refunds, async, disputes) lives in
+[`payments-device-test.md`](payments-device-test.md).
+
 ## Not built yet
 
 - **Web Apple/Google Pay** beyond what Checkout surfaces automatically.
-- **Money-only refund UI** (`RefundPurchase` endpoint exists, no button).
+- **Discount edit** (create + archive only; no `UpdateDiscount`).
+- **Standalone manager memberships list** (per-student + attention-screen only).
+- **Payouts report** (needs Stripe's live Payouts API).
