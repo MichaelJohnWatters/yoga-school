@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -17,7 +18,7 @@ type AdminEnrollmentSummary struct {
 }
 
 func (s *Store) ListAdminEnrollments(ctx context.Context, studioID string) ([]AdminEnrollmentSummary, error) {
-	rows, err := s.ListEnrollments(ctx, studioID, "")
+	rows, err := s.ListEnrollments(ctx, studioID, "", true)
 	if err != nil {
 		return nil, err
 	}
@@ -379,5 +380,44 @@ func (s *Store) UpdateAdminEnrollment(ctx context.Context, studioID, actorID, en
 	).Scan(&enrollmentTitle)
 	detail["enrollment_title"] = enrollmentTitle
 	_ = s.WriteAudit(ctx, studioID, actorID, "series_update", "enrollment", enrollmentID, detail)
+	return nil
+}
+
+// ArchiveEnrollment retires a series — the manager's escape hatch for one
+// created in error (price is otherwise locked). It's hidden from the student
+// Enrollments tab so no new sign-ups land; students already enrolled keep their
+// booked sessions, and the per-class schedule is untouched. One-way (mirrors the
+// discounts/products archive). Idempotent: archiving an already-archived series
+// is a no-op success; an unknown id is ErrNotFound.
+func (s *Store) ArchiveEnrollment(ctx context.Context, studioID, actorID, enrollmentID string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE enrollments
+		   SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE id = ? AND studio_id = ? AND archived_at IS NULL`,
+		enrollmentID, studioID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Distinguish "already archived" (success) from "no such series".
+		var exists int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM enrollments WHERE id = ? AND studio_id = ?`,
+			enrollmentID, studioID,
+		).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		return nil // already archived
+	}
+	var enrollmentTitle string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT title FROM enrollments WHERE id = ?`, enrollmentID,
+	).Scan(&enrollmentTitle)
+	_ = s.WriteAudit(ctx, studioID, actorID, "series_archive", "enrollment", enrollmentID,
+		map[string]any{"enrollment_title": enrollmentTitle})
 	return nil
 }

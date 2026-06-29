@@ -289,6 +289,7 @@ func (s *Store) ActivateThemeAs(ctx context.Context, studioID, actorID, themeID,
 type StudioConfigPatch struct {
 	FreeCancelCutoffHours *int    `json:"free_cancel_cutoff_hours,omitempty"`
 	BookingWindowDays     *int    `json:"booking_window_days,omitempty"`
+	SubscriptionGraceDays *int    `json:"subscription_grace_days,omitempty"`
 	AllowStudentPlusOne   *bool   `json:"allow_student_plus_one,omitempty"`
 	BuyLayout             *string `json:"buy_layout,omitempty"`
 	WelcomeMessage        *string `json:"welcome_message,omitempty"`
@@ -328,6 +329,13 @@ func (s *Store) UpdateStudioConfig(ctx context.Context, studioID, actorID string
 		}
 		set = append(set, "booking_window_days = ?")
 		args = append(args, *p.BookingWindowDays)
+	}
+	if p.SubscriptionGraceDays != nil {
+		if *p.SubscriptionGraceDays < 0 || *p.SubscriptionGraceDays > 30 {
+			return errors.New("subscription_grace_days must be between 0 and 30")
+		}
+		set = append(set, "subscription_grace_days = ?")
+		args = append(args, *p.SubscriptionGraceDays)
 	}
 	if p.AllowStudentPlusOne != nil {
 		v := 0
@@ -399,6 +407,9 @@ func (s *Store) UpdateStudioConfig(ctx context.Context, studioID, actorID string
 	}
 	if p.BookingWindowDays != nil {
 		detail["booking_window_days"] = *p.BookingWindowDays
+	}
+	if p.SubscriptionGraceDays != nil {
+		detail["subscription_grace_days"] = *p.SubscriptionGraceDays
 	}
 	if p.AllowStudentPlusOne != nil {
 		detail["allow_student_plus_one"] = *p.AllowStudentPlusOne

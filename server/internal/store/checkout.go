@@ -34,7 +34,7 @@ var ErrStripeNotConfigured = errors.New(
 // (local dev uses the dev_stub instant path instead).
 func (s *Store) CreateCheckoutPurchase(
 	ctx context.Context,
-	studioID, userID, productID, discountCode, successURL, cancelURL string,
+	studioID, userID, productID, discountCode, successURL, cancelURL, enrollmentID string,
 ) (*CheckoutResult, error) {
 	if s.gateway == nil {
 		return nil, fmt.Errorf("payments gateway not configured")
@@ -103,12 +103,12 @@ func (s *Store) CreateCheckoutPurchase(
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO purchases
-		  (id, studio_id, user_id, product_id, list_price_minor, amount_minor,
+		  (id, studio_id, user_id, product_id, enrollment_id, list_price_minor, amount_minor,
 		   discount_minor, discount_id, currency,
 		   payment_method, initiated_by, actor_role, status,
 		   stripe_payment_id)
-		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
-		purchaseID, studioID, userID, productID,
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
+		purchaseID, studioID, userID, productID, nullableString(enrollmentID),
 		prod.priceMinor, finalMinor, discountMinor, discountIDArg, prod.currency,
 		"card", userID, sess.ID,
 	); err != nil {

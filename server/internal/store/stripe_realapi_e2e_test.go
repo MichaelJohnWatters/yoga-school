@@ -91,7 +91,7 @@ func TestStripeRealAPI_E2E(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	// 1. Create the pending purchase → real PaymentIntent.
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("CreatePendingPurchase (real Stripe): %v", err)
 	}

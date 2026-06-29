@@ -72,9 +72,6 @@ func (s *Store) CreateCheckoutSubscription(
 	if prod.billingType != "recurring" {
 		return nil, fmt.Errorf("product %s is not a recurring membership", productID)
 	}
-	if !prod.stripePriceID.Valid || prod.stripePriceID.String == "" {
-		return nil, ErrStripeNotConfigured
-	}
 
 	keys, err := s.LoadStripeKeysForUse(ctx, studioID)
 	if err != nil {
@@ -84,6 +81,36 @@ func (s *Store) CreateCheckoutSubscription(
 		return nil, fmt.Errorf("load stripe keys: %w", err)
 	}
 
+	// The product needs a Stripe recurring Price to charge against. A membership
+	// created before Stripe was configured — most commonly the seeded "Unlimited
+	// Monthly" — has none, so mirror it now and persist the ids. Self-heals on
+	// the first purchase rather than forcing a manager to re-save the product.
+	priceID := prod.stripePriceID.String
+	if priceID == "" {
+		interval := "month"
+		_ = s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(billing_interval,'month') FROM products WHERE id = ?`,
+			productID).Scan(&interval)
+		stripeProductID, mirroredPrice, mErr := s.mirrorRecurringPrice(
+			ctx, studioID, "recurring", prod.name, prod.priceMinor, interval)
+		if mErr != nil {
+			return nil, fmt.Errorf("mirror recurring price: %w", mErr)
+		}
+		if mirroredPrice == "" {
+			// mirrorRecurringPrice only returns empty when keys are absent, but
+			// we already loaded them above — guard anyway.
+			return nil, ErrStripeNotConfigured
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE products SET stripe_product_id = ?, stripe_price_id = ?
+			 WHERE id = ? AND studio_id = ?`,
+			nullableStr(stripeProductID), mirroredPrice, productID, studioID,
+		); err != nil {
+			return nil, fmt.Errorf("persist mirrored price: %w", err)
+		}
+		priceID = mirroredPrice
+	}
+
 	customerID, err := s.ensureStripeCustomer(ctx, keys.SecretKey, studioID, userID, buyerEmail)
 	if err != nil {
 		return nil, fmt.Errorf("ensure stripe customer: %w", err)
@@ -91,7 +118,7 @@ func (s *Store) CreateCheckoutSubscription(
 
 	subID := NewID()
 	sess, err := s.gateway.CreateCheckoutSubscription(ctx, keys.SecretKey, payments.SubscriptionCheckoutParams{
-		PriceID:        prod.stripePriceID.String,
+		PriceID:        priceID,
 		CustomerID:     customerID,
 		SuccessURL:     successURL,
 		CancelURL:      cancelURL,
@@ -242,10 +269,18 @@ func (s *Store) RecordInvoicePaid(ctx context.Context, studioID string, evt paym
 
 	// Compute the new expiry from the billing-period end (+grace), falling
 	// back to the product's validity window if the event carried no period.
+	// Grace is the studio's configurable setting (Settings → Studio), defaulting
+	// to subscriptionGraceDays if the column is somehow unset.
+	graceDays := subscriptionGraceDays
+	if err := tx.QueryRowContext(ctx,
+		`SELECT subscription_grace_days FROM studios WHERE id = ?`, studioID,
+	).Scan(&graceDays); err != nil {
+		return fmt.Errorf("load grace days: %w", err)
+	}
 	var expiresAt string
 	if evt.CurrentPeriodEnd > 0 {
 		expiresAt = time.Unix(evt.CurrentPeriodEnd, 0).UTC().
-			AddDate(0, 0, subscriptionGraceDays).Format(time.RFC3339)
+			AddDate(0, 0, graceDays).Format(time.RFC3339)
 	}
 
 	if entID == "" {

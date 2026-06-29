@@ -18,7 +18,7 @@ func TestCreateCheckoutPurchase_PendingWithSessionId(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, err := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	if err != nil {
 		t.Fatalf("CreateCheckoutPurchase: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestConfirmCheckoutSessionForUser_MintsWhenPaid(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -93,7 +93,7 @@ func TestConfirmCheckoutSessionForUser_MintsWhenPaid(t *testing.T) {
 	// Another user can't confirm someone else's session.
 	other := insertOtherStudent(t, s, f.studioID)
 	out2, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sid2 string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out2.PurchaseID).Scan(&sid2)
@@ -112,7 +112,7 @@ func TestCheckoutWebhook_CompletesAndSwapsToIntent(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -152,7 +152,7 @@ func TestCheckoutWebhook_ExpiredVoids(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -176,7 +176,7 @@ func TestChargeRefundedWebhook_ReflectsMoneyNotPass(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	// A completed card purchase via PaymentSheet path.
-	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	g.intents[pending.StripePaymentID] = payments.StatusSucceeded
 	entID, _ := s.ConfirmPurchase(ctx, f.studioID, f.studentID, pending.PurchaseID)
 

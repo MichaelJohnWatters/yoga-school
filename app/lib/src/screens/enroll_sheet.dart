@@ -1,12 +1,15 @@
 // Enrollment bottom sheet — review sessions + pay-once Enroll button.
 // Mirrors yoga-enroll.jsx YEnrollSheet.
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_stripe/flutter_stripe.dart' as stripe;
 
 import '../api/api_client.dart';
 import '../api/api_error.dart';
 import '../api/models.dart';
+import '../api/web_redirect.dart';
 import '../theme/yoga_tokens.dart';
 import '../widgets/yoga_primitives.dart';
 import 'enrollments_tab.dart';
@@ -44,16 +47,77 @@ class _EnrollSheetState extends ConsumerState<EnrollSheet> {
     _detail = ref.read(apiClientProvider).getEnrollment(widget.enrollmentId);
   }
 
+  // Pay for the series through Stripe — same handshake as a one-time pass:
+  // web → hosted Checkout redirect; native → PaymentSheet. The
+  // checkout.session.completed / payment_intent.succeeded webhook enrolls the
+  // student (books every session), or refunds if the series filled meanwhile.
   Future<void> _enroll(EnrollmentDetail d) async {
     setState(() {
       _submitting = true;
       _error = null;
     });
     try {
-      await ref.read(apiClientProvider).joinEnrollment(widget.enrollmentId);
+      final api = ref.read(apiClientProvider);
+
+      if (kIsWeb) {
+        final base = Uri.base;
+        String ret(String outcome) {
+          final qp = {...base.queryParameters, 'checkout': outcome};
+          var url = base.replace(queryParameters: qp).toString();
+          if (outcome == 'success') {
+            url += '${url.contains('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}';
+          }
+          return url;
+        }
+
+        final session = await api.createCheckoutSession(
+          enrollmentId: widget.enrollmentId,
+          successUrl: ret('success'),
+          cancelUrl: ret('cancel'),
+        );
+        redirectToCheckout(session.url); // page unloads here
+        return;
+      }
+
+      // Native: PaymentSheet on a card PaymentIntent for the series.
+      final cfg = await ref.read(paymentConfigProvider.future);
+      final pending =
+          await api.createCardPurchaseIntent(enrollmentId: widget.enrollmentId);
+      stripe.Stripe.publishableKey = cfg.publishableKey;
+      await stripe.Stripe.instance.applySettings();
+      await stripe.Stripe.instance.initPaymentSheet(
+        paymentSheetParameters: stripe.SetupPaymentSheetParameters(
+          paymentIntentClientSecret: pending.clientSecret,
+          merchantDisplayName: cfg.merchantDisplayName.isEmpty
+              ? 'Yoga School'
+              : cfg.merchantDisplayName,
+        ),
+      );
+      try {
+        await stripe.Stripe.instance.presentPaymentSheet();
+      } on stripe.StripeException catch (e) {
+        if (e.error.code == stripe.FailureCode.Canceled) {
+          if (mounted) setState(() => _submitting = false);
+          return; // user dismissed
+        }
+        rethrow;
+      }
+      await api.confirmPurchase(pending.purchaseId);
       ref.invalidate(enrollmentsProvider);
       ref.invalidate(upcomingBookingsProvider);
-      if (mounted) Navigator.of(context).pop(true);
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("You're enrolled — see your sessions in Bookings."),
+        ),
+      );
+    } on BookingConflict catch (e) {
+      // e.g. "series is full" / "already enrolled in this series".
+      setState(() {
+        _submitting = false;
+        _error = e.message;
+      });
     } catch (e) {
       setState(() {
         _submitting = false;

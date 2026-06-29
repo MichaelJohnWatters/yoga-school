@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/studio52/yoga-school/server/internal/secrets"
@@ -350,6 +351,17 @@ func (s *Store) UpdateStripeCredentials(ctx context.Context, studioID, actorID s
 	}
 	_ = s.WriteAudit(ctx, studioID, actorID, "stripe_credentials_update",
 		"studio", studioID, detail)
+
+	// Now that the studio has a usable secret key, mint Stripe Prices for any
+	// recurring memberships that lack one (e.g. the seeded "Unlimited Monthly",
+	// created before Stripe was configured) so they're buyable immediately
+	// rather than self-healing on the first purchase. Best-effort: the keys are
+	// already saved, so a Stripe hiccup here must not fail the request.
+	if secretChanged && in.SecretKey != nil && *in.SecretKey != "" {
+		if err := s.backfillRecurringPrices(ctx, studioID); err != nil {
+			log.Printf("backfill recurring prices for %s: %v", studioID, err)
+		}
+	}
 
 	return s.StripeCredentialsFor(ctx, studioID)
 }
