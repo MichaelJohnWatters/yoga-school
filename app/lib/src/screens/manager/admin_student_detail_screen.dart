@@ -194,7 +194,11 @@ class _Body extends ConsumerWidget {
                                       final changed =
                                           await showCancelMembershipDialog(
                                         context: context,
-                                        entitlement: active[i],
+                                        subscriptionId:
+                                            active[i].subscriptionId!,
+                                        renewsAt: active[i].renewsAt,
+                                        cancelAtPeriodEnd:
+                                            active[i].cancelAtPeriodEnd,
                                       );
                                       if (changed == true) _afterChange(ref);
                                     },
@@ -861,18 +865,30 @@ class _EraseConfirmDialogState extends ConsumerState<_EraseConfirmDialog> {
 /// releases future bookings immediately. Returns true if anything changed.
 Future<bool?> showCancelMembershipDialog({
   required BuildContext context,
-  required WalletEntitlement entitlement,
+  required String subscriptionId,
+  required DateTime? renewsAt,
+  required bool cancelAtPeriodEnd,
 }) {
   return showDialog<bool>(
     context: context,
     barrierColor: const Color(0x80100A05),
-    builder: (_) => _CancelMembershipDialog(entitlement: entitlement),
+    builder: (_) => _CancelMembershipDialog(
+      subscriptionId: subscriptionId,
+      renewsAt: renewsAt,
+      cancelAtPeriodEnd: cancelAtPeriodEnd,
+    ),
   );
 }
 
 class _CancelMembershipDialog extends ConsumerStatefulWidget {
-  final WalletEntitlement entitlement;
-  const _CancelMembershipDialog({required this.entitlement});
+  final String subscriptionId;
+  final DateTime? renewsAt;
+  final bool cancelAtPeriodEnd;
+  const _CancelMembershipDialog({
+    required this.subscriptionId,
+    required this.renewsAt,
+    required this.cancelAtPeriodEnd,
+  });
 
   @override
   ConsumerState<_CancelMembershipDialog> createState() =>
@@ -885,8 +901,7 @@ class _CancelMembershipDialogState
   String? _error;
 
   Future<void> _run(Future<void> Function(ApiClient api, String subId) op) async {
-    final subId = widget.entitlement.subscriptionId;
-    if (subId == null) return;
+    final subId = widget.subscriptionId;
     setState(() {
       _busy = true;
       _error = null;
@@ -910,7 +925,7 @@ class _CancelMembershipDialogState
   Future<void> _resume() => _run((api, subId) => api.adminResumeSubscription(subId));
 
   String _renewLabel() {
-    final d = widget.entitlement.renewsAt?.toLocal();
+    final d = widget.renewsAt?.toLocal();
     if (d == null) return 'the end of the paid period';
     const mons = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -920,7 +935,7 @@ class _CancelMembershipDialogState
   @override
   Widget build(BuildContext context) {
     final y = context.yoga;
-    final alreadyScheduled = widget.entitlement.cancelAtPeriodEnd;
+    final alreadyScheduled = widget.cancelAtPeriodEnd;
     return Center(
       child: SizedBox(
         width: 460,
