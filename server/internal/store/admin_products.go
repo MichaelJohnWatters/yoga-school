@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/studio52/yoga-school/server/internal/payments"
@@ -532,6 +533,64 @@ func (s *Store) mirrorRecurringPrice(ctx context.Context, studioID, billingType,
 		Currency:    currency,
 		Interval:    interval,
 	})
+}
+
+// backfillRecurringPrices mints + persists a Stripe Price for every live
+// recurring product in the studio that doesn't have one yet. Called after
+// Stripe keys are saved so memberships created before configuration (most
+// commonly the seeded "Unlimited Monthly") become buyable without a manual
+// re-save. Each product is independent: one failure is logged and skipped so
+// the rest still get mirrored.
+func (s *Store) backfillRecurringPrices(ctx context.Context, studioID string) error {
+	if s.gateway == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, price_minor, COALESCE(billing_interval,'month')
+		  FROM products
+		 WHERE studio_id = ? AND billing_type = 'recurring' AND is_archived = 0
+		   AND (stripe_price_id IS NULL OR stripe_price_id = '')`,
+		studioID)
+	if err != nil {
+		return err
+	}
+	type pending struct {
+		id, name, interval string
+		priceMinor         int
+	}
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.name, &p.priceMinor, &p.interval); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, p := range todo {
+		stripeProductID, stripePriceID, err := s.mirrorRecurringPrice(
+			ctx, studioID, "recurring", p.name, p.priceMinor, p.interval)
+		if err != nil {
+			log.Printf("backfill price for product %s: %v", p.id, err)
+			continue
+		}
+		if stripePriceID == "" {
+			continue // keys not actually usable — nothing to persist
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE products SET stripe_product_id = ?, stripe_price_id = ?
+			 WHERE id = ? AND studio_id = ?`,
+			nullableStr(stripeProductID), stripePriceID, p.id, studioID,
+		); err != nil {
+			log.Printf("persist backfilled price for product %s: %v", p.id, err)
+		}
+	}
+	return nil
 }
 
 // nullableStr maps "" → nil so an empty id stores as SQL NULL.

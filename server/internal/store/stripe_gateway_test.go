@@ -239,7 +239,7 @@ func TestCreatePendingPurchase_UsesGatewayIntent(t *testing.T) {
 	s.SetPaymentGateway(g)
 	productID := seedTenPack(t, s, f)
 
-	out, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	out, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("CreatePendingPurchase: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestConfirmPurchase_VerifiesSucceededBeforeMint(t *testing.T) {
 	s.SetPaymentGateway(g)
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestConfirmByIntent_And_Confirm_ConvergeIdempotently(t *testing.T) {
 	s.SetPaymentGateway(g)
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestVoidPurchaseByIntent_OnlyTouchesPending(t *testing.T) {
 	s.SetPaymentGateway(g)
 	productID := seedTenPack(t, s, f)
 
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestVoidPurchaseByIntent_OnlyTouchesPending(t *testing.T) {
 
 	// A void on an already-completed purchase is a no-op (doesn't error,
 	// doesn't downgrade). Confirm one then try to void.
-	pending2, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending2, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	g.intents[pending2.StripePaymentID] = payments.StatusSucceeded
 	if _, err := s.ConfirmPurchase(ctx, f.studioID, f.studentID, pending2.PurchaseID); err != nil {
 		t.Fatalf("confirm2: %v", err)
@@ -374,7 +374,7 @@ func TestHandleStripeEvent_SignatureDedupAndDispatch(t *testing.T) {
 	g := &fakeGateway{intents: map[string]string{}}
 	s.SetPaymentGateway(g)
 	productID := seedTenPack(t, s, f)
-	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 
 	// Bad signature → ErrWebhookSignature (caller 400s, no fulfilment).
 	g.verifyFn = func(_ []byte, _, _ string) (payments.Event, error) {
@@ -417,8 +417,8 @@ func TestReconcilePendingPurchases(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	// Two stale pending purchases: one secretly succeeded, one abandoned.
-	good, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
-	bad, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	good, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
+	bad, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	g.intents[good.StripePaymentID] = payments.StatusSucceeded
 	g.intents[bad.StripePaymentID] = "requires_payment_method"
 	// Age both rows past the threshold.

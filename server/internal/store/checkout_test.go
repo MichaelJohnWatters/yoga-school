@@ -18,7 +18,7 @@ func TestCreateCheckoutPurchase_PendingWithSessionId(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, err := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	if err != nil {
 		t.Fatalf("CreateCheckoutPurchase: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestConfirmCheckoutSessionForUser_MintsWhenPaid(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -80,17 +80,20 @@ func TestConfirmCheckoutSessionForUser_MintsWhenPaid(t *testing.T) {
 	}
 	assertPurchaseStatus(t, s, out.PurchaseID, "completed")
 
-	// Idempotent: a second confirm (now id swapped to pi_) by the old session
-	// returns ErrNotFound — the client falls back to its entitlement poll.
-	_, _, err = s.ConfirmCheckoutSessionForUser(ctx, f.studioID, f.studentID, sessionID)
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("second confirm: want ErrNotFound, got %v", err)
+	// Idempotent: a second confirm by the old session id still resolves, even
+	// though the webhook swapped stripe_payment_id to the pi_ PaymentIntent —
+	// we re-resolve via the session's PaymentIntent and return the same
+	// entitlement, so the web success page shows instead of a "not found".
+	ent2, done2, err2 := s.ConfirmCheckoutSessionForUser(ctx, f.studioID, f.studentID, sessionID)
+	if err2 != nil || !done2 || ent2 != ent {
+		t.Fatalf("second confirm: got ent=%q done=%v err=%v, want %q/true/nil",
+			ent2, done2, err2, ent)
 	}
 
 	// Another user can't confirm someone else's session.
 	other := insertOtherStudent(t, s, f.studioID)
 	out2, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sid2 string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out2.PurchaseID).Scan(&sid2)
@@ -109,7 +112,7 @@ func TestCheckoutWebhook_CompletesAndSwapsToIntent(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -149,7 +152,7 @@ func TestCheckoutWebhook_ExpiredVoids(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	out, _ := s.CreateCheckoutPurchase(ctx, f.studioID, f.studentID, productID, "",
-		"https://app.test/success", "https://app.test/cancel")
+		"https://app.test/success", "https://app.test/cancel", "")
 	var sessionID string
 	s.db.QueryRowContext(ctx,
 		`SELECT stripe_payment_id FROM purchases WHERE id = ?`, out.PurchaseID).Scan(&sessionID)
@@ -173,7 +176,7 @@ func TestChargeRefundedWebhook_ReflectsMoneyNotPass(t *testing.T) {
 	productID := seedTenPack(t, s, f)
 
 	// A completed card purchase via PaymentSheet path.
-	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, _ := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	g.intents[pending.StripePaymentID] = payments.StatusSucceeded
 	entID, _ := s.ConfirmPurchase(ctx, f.studioID, f.studentID, pending.PurchaseID)
 

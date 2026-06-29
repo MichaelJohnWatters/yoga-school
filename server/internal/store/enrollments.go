@@ -22,30 +22,23 @@ type EnrollmentSummary struct {
 	EndsAt         string `json:"ends_at"`
 	InstructorName string `json:"instructor_name"`
 	SeriesState    string `json:"series_state"` // open | full | enrolled
+	// Set when a manager retired the series. Always null on the student feed
+	// (archived series are filtered out there); surfaced only to the manager
+	// console so it can show an "Archived" section.
+	ArchivedAt *string `json:"archived_at,omitempty"`
 }
 
-// MyEnrollmentState reports per-caller enrollment.
-func (s *Store) ListEnrollments(ctx context.Context, studioID, userID string) ([]EnrollmentSummary, error) {
-	const q = `
-		SELECT e.id, e.title, COALESCE(e.description,''), e.session_count, e.capacity,
-		       p.price_minor, st.currency,
-		       (SELECT COUNT(*) FROM enrollment_bookings eb
-		           WHERE eb.enrollment_id = e.id AND eb.status = 'active') AS enrolled,
-		       (SELECT MIN(c.starts_at) FROM classes c WHERE c.enrollment_id = e.id) AS starts_at,
-		       (SELECT MAX(c.ends_at)   FROM classes c WHERE c.enrollment_id = e.id) AS ends_at,
-		       (SELECT i.full_name FROM classes c JOIN users i ON i.id = c.instructor_id
-		          WHERE c.enrollment_id = e.id ORDER BY c.starts_at LIMIT 1) AS instructor_name,
-		       EXISTS (
-		         SELECT 1 FROM enrollment_bookings eb
-		          WHERE eb.enrollment_id = e.id
-		            AND eb.user_id = ? AND eb.status = 'active'
-		       ) AS i_am_enrolled
-		  FROM enrollments e
-		  JOIN products p ON p.id = e.product_id
-		  JOIN studios  st ON st.id = e.studio_id
-		 WHERE e.studio_id = ?
-		 ORDER BY starts_at ASC NULLS LAST`
-	// SQLite doesn't support "NULLS LAST" — workaround.
+// ListEnrollments returns the studio's series. The student feed passes
+// includeArchived=false so retired series disappear from the Enrollments tab;
+// the manager console passes true so it can show an "Archived" section.
+//
+// SQLite has no "NULLS LAST", so undated series (no scheduled classes yet) are
+// pushed to the end with a CASE in the ORDER BY.
+func (s *Store) ListEnrollments(ctx context.Context, studioID, userID string, includeArchived bool) ([]EnrollmentSummary, error) {
+	where := `WHERE e.studio_id = ?`
+	if !includeArchived {
+		where += ` AND e.archived_at IS NULL`
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.title, COALESCE(e.description,''), e.session_count, e.capacity,
 		       p.price_minor, st.currency,
@@ -59,16 +52,16 @@ func (s *Store) ListEnrollments(ctx context.Context, studioID, userID string) ([
 		         SELECT 1 FROM enrollment_bookings eb
 		          WHERE eb.enrollment_id = e.id
 		            AND eb.user_id = ? AND eb.status = 'active'
-		       ) AS i_am_enrolled
+		       ) AS i_am_enrolled,
+		       e.archived_at
 		  FROM enrollments e
 		  JOIN products p ON p.id = e.product_id
 		  JOIN studios  st ON st.id = e.studio_id
-		 WHERE e.studio_id = ?
+		 `+where+`
 		 ORDER BY CASE WHEN (SELECT MIN(c.starts_at) FROM classes c WHERE c.enrollment_id = e.id) IS NULL THEN 1 ELSE 0 END,
 		          (SELECT MIN(c.starts_at) FROM classes c WHERE c.enrollment_id = e.id) ASC`,
 		userID, studioID,
 	)
-	_ = q
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +72,13 @@ func (s *Store) ListEnrollments(ctx context.Context, studioID, userID string) ([
 			r                EnrollmentSummary
 			instructor       sql.NullString
 			startsAt, endsAt sql.NullString
+			archivedAt       sql.NullString
 			iEnrolled        int
 		)
 		if err := rows.Scan(
 			&r.ID, &r.Title, &r.Description, &r.SessionCount, &r.Capacity,
 			&r.PriceMinor, &r.Currency, &r.EnrolledCount,
-			&startsAt, &endsAt, &instructor, &iEnrolled,
+			&startsAt, &endsAt, &instructor, &iEnrolled, &archivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -96,6 +90,10 @@ func (s *Store) ListEnrollments(ctx context.Context, studioID, userID string) ([
 		}
 		if instructor.Valid {
 			r.InstructorName = instructor.String
+		}
+		if archivedAt.Valid {
+			v := archivedAt.String
+			r.ArchivedAt = &v
 		}
 		if iEnrolled != 0 {
 			r.SeriesState = "enrolled"
@@ -124,7 +122,7 @@ type EnrollmentSession struct {
 }
 
 func (s *Store) GetEnrollmentDetail(ctx context.Context, studioID, userID, enrollmentID string) (*EnrollmentDetail, error) {
-	rows, err := s.ListEnrollments(ctx, studioID, userID)
+	rows, err := s.ListEnrollments(ctx, studioID, userID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -370,4 +368,243 @@ func (s *Store) JoinEnrollment(ctx context.Context, studioID, userID, enrollment
 		return "", fmt.Errorf("audit series_join: %w", err)
 	}
 	return enrollBookingID, tx.Commit()
+}
+
+// ErrSeriesFull is returned by enrollIntoSeriesTx when the series filled between
+// checkout starting and the payment landing. The caller refunds the charge.
+var ErrSeriesFull = errors.New("series is full")
+
+// refundFullEnrollment refunds a paid series purchase that couldn't be fulfilled
+// because the series filled before the payment landed (ErrSeriesFull), marks the
+// purchase refunded, and notifies the student. Idempotent (a 'refunded' purchase
+// is a no-op). lookupStripeID finds the purchase row (the cs_ session for the web
+// path, whose swap rolled back, or the pi_ for the PaymentSheet path);
+// refundIntentID is the PaymentIntent the refund targets.
+func (s *Store) refundFullEnrollment(ctx context.Context, studioID, lookupStripeID, refundIntentID string) error {
+	var purchaseID, userID, status string
+	var amountMinor int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, status, amount_minor FROM purchases
+		 WHERE studio_id = ? AND stripe_payment_id = ?`,
+		studioID, lookupStripeID,
+	).Scan(&purchaseID, &userID, &status, &amountMinor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status == "refunded" {
+		return nil
+	}
+	keys, err := s.LoadStripeKeysForUse(ctx, studioID)
+	if err != nil {
+		return fmt.Errorf("load stripe keys: %w", err)
+	}
+	if _, err := s.gateway.Refund(ctx, keys.SecretKey, refundIntentID, 0, "seriesfull:"+purchaseID); err != nil {
+		return fmt.Errorf("refund full series: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		UPDATE purchases
+		   SET status = 'refunded', refund_amount_minor = ?,
+		       refunded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE id = ? AND status != 'refunded'`,
+		amountMinor, purchaseID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return tx.Commit() // someone else already refunded
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO notifications (id, studio_id, user_id, type, title, body, payload)
+		   VALUES (?, ?, ?, 'system', ?, ?, '{}')`,
+		NewID(), studioID, userID,
+		"Course was full — you've been refunded",
+		"The course filled up before your payment completed, so we've refunded you in full.",
+	); err != nil {
+		return err
+	}
+	if err := s.writeAuditTx(ctx, tx, studioID, userID,
+		"series_full_refund", "purchase", purchaseID,
+		map[string]any{"amount_minor": amountMinor}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ErrAlreadyEnrolled signals the student already holds an active spot.
+var ErrAlreadyEnrolled = errors.New("already enrolled in this series")
+
+// EnrollmentProductForCheckout validates that a student can start paying for a
+// series and returns the series' product id (what to charge). Best-effort
+// gate before checkout: ErrNotFound (no such series), ErrAlreadyEnrolled, or
+// ErrSeriesFull (capacity is re-checked authoritatively at fulfilment).
+func (s *Store) EnrollmentProductForCheckout(ctx context.Context, studioID, userID, enrollmentID string) (string, error) {
+	var productID string
+	var capacity, enrolled int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT e.product_id, e.capacity,
+		       (SELECT COUNT(*) FROM enrollment_bookings eb
+		         WHERE eb.enrollment_id = e.id AND eb.status = 'active')
+		  FROM enrollments e
+		 WHERE e.id = ? AND e.studio_id = ?`,
+		enrollmentID, studioID,
+	).Scan(&productID, &capacity, &enrolled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	var already int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM enrollment_bookings
+		 WHERE enrollment_id = ? AND user_id = ? AND status = 'active'`,
+		enrollmentID, userID,
+	).Scan(&already); err != nil {
+		return "", err
+	}
+	if already > 0 {
+		return "", ErrAlreadyEnrolled
+	}
+	if enrolled >= capacity {
+		return "", ErrSeriesFull
+	}
+	return productID, nil
+}
+
+// enrollIntoSeriesTx books an already-paid student into a series, completing the
+// (pending) purchase identified by purchaseID. It re-checks capacity (async
+// payment may have filled the series since checkout — returns ErrSeriesFull),
+// mints the series entitlement (unlimited, scoped to the series class type,
+// expiring after the last session), creates the enrollment_bookings row + a
+// booking per future session, flips the purchase to 'completed', and audits
+// series_join. Returns the new entitlement id.
+//
+// This is the Stripe-fulfilment counterpart to JoinEnrollment's inline sync
+// path (which still serves the emulator-gated dev_stub/comp case).
+func enrollIntoSeriesTx(ctx context.Context, s *Store, tx *sql.Tx, studioID, userID, enrollmentID, purchaseID string) (string, error) {
+	var capacity, enrolled int
+	var title string
+	err := tx.QueryRowContext(ctx, `
+		SELECT e.capacity, e.title,
+		       (SELECT COUNT(*) FROM enrollment_bookings eb
+		         WHERE eb.enrollment_id = e.id AND eb.status = 'active')
+		  FROM enrollments e
+		 WHERE e.id = ? AND e.studio_id = ?`,
+		enrollmentID, studioID,
+	).Scan(&capacity, &title, &enrolled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if enrolled >= capacity {
+		return "", ErrSeriesFull
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, class_type_id, starts_at FROM classes
+		 WHERE enrollment_id = ? AND status = 'scheduled'
+		   AND starts_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 ORDER BY starts_at ASC`, enrollmentID)
+	if err != nil {
+		return "", err
+	}
+	type sess struct{ id, classType, startsAt string }
+	var sessions []sess
+	for rows.Next() {
+		var x sess
+		if err := rows.Scan(&x.id, &x.classType, &x.startsAt); err != nil {
+			rows.Close()
+			return "", err
+		}
+		sessions = append(sessions, x)
+	}
+	rows.Close()
+	if len(sessions) == 0 {
+		return "", fmt.Errorf("no future sessions in this series")
+	}
+
+	lastStart, _ := time.Parse(time.RFC3339, sessions[len(sessions)-1].startsAt)
+	expiresAt := lastStart.Add(24 * time.Hour).Format(time.RFC3339)
+	classTypeID := sessions[0].classType
+
+	var productID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT product_id FROM purchases WHERE id = ?`, purchaseID,
+	).Scan(&productID); err != nil {
+		return "", err
+	}
+
+	entitlementID := NewID()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO entitlements
+		    (id, studio_id, user_id, source_product_id, pass_kind, label,
+		     credits_total, credits_remaining, expires_at, status)
+		    VALUES (?, ?, ?, ?, 'unlimited', ?, NULL, NULL, ?, 'active')`,
+		entitlementID, studioID, userID, productID, title, expiresAt,
+	); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO entitlement_class_types (entitlement_id, class_type_id)
+		    VALUES (?, ?)`,
+		entitlementID, classTypeID,
+	); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO enrollment_bookings
+		    (id, enrollment_id, user_id, entitlement_id, status)
+		    VALUES (?, ?, ?, ?, 'active')`,
+		NewID(), enrollmentID, userID, entitlementID,
+	); err != nil {
+		return "", err
+	}
+	for _, x := range sessions {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO bookings
+			    (id, studio_id, class_id, user_id, entitlement_id, is_plus_one,
+			     booked_by_role, cancel_cutoff_hours, status)
+			    VALUES (?, ?, ?, ?, ?, 0, 'student', 0, 'booked')`,
+			NewID(), studioID, x.id, userID, entitlementID,
+		); err != nil {
+			return "", err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE purchases SET status = 'completed', resulting_entitlement_id = ?
+		 WHERE id = ?`,
+		entitlementID, purchaseID,
+	); err != nil {
+		return "", err
+	}
+
+	var amountMinor int
+	var currency, paymentMethod string
+	_ = tx.QueryRowContext(ctx,
+		`SELECT amount_minor, currency, payment_method FROM purchases WHERE id = ?`,
+		purchaseID,
+	).Scan(&amountMinor, &currency, &paymentMethod)
+	if err := s.writeAuditTx(ctx, tx, studioID, userID,
+		"series_join", "enrollment", enrollmentID, map[string]any{
+			"enrollment_id":    enrollmentID,
+			"enrollment_title": title,
+			"sessions":         len(sessions),
+			"amount_minor":     amountMinor,
+			"currency":         currency,
+			"payment_method":   paymentMethod,
+		}); err != nil {
+		return "", fmt.Errorf("audit series_join: %w", err)
+	}
+	return entitlementID, nil
 }

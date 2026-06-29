@@ -34,7 +34,7 @@ var ErrStripeNotConfigured = errors.New(
 // (local dev uses the dev_stub instant path instead).
 func (s *Store) CreateCheckoutPurchase(
 	ctx context.Context,
-	studioID, userID, productID, discountCode, successURL, cancelURL string,
+	studioID, userID, productID, discountCode, successURL, cancelURL, enrollmentID string,
 ) (*CheckoutResult, error) {
 	if s.gateway == nil {
 		return nil, fmt.Errorf("payments gateway not configured")
@@ -103,12 +103,12 @@ func (s *Store) CreateCheckoutPurchase(
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO purchases
-		  (id, studio_id, user_id, product_id, list_price_minor, amount_minor,
+		  (id, studio_id, user_id, product_id, enrollment_id, list_price_minor, amount_minor,
 		   discount_minor, discount_id, currency,
 		   payment_method, initiated_by, actor_role, status,
 		   stripe_payment_id)
-		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
-		purchaseID, studioID, userID, productID,
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'student', 'pending', ?)`,
+		purchaseID, studioID, userID, productID, nullableString(enrollmentID),
 		prod.priceMinor, finalMinor, discountMinor, discountIDArg, prod.currency,
 		"card", userID, sess.ID,
 	); err != nil {
@@ -180,15 +180,39 @@ func (s *Store) ConfirmCheckoutSessionForUser(ctx context.Context, studioID, use
 	if s.gateway == nil {
 		return "", false, fmt.Errorf("payments gateway not configured")
 	}
-	var purchaseID, ownerID, status string
-	var entID sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, status, resulting_entitlement_id
-		  FROM purchases WHERE studio_id = ? AND stripe_payment_id = ?`,
-		studioID, sessionID,
-	).Scan(&purchaseID, &ownerID, &status, &entID)
+	lookup := func(payID string) (ownerID, status string, entID sql.NullString, err error) {
+		err = s.db.QueryRowContext(ctx, `
+			SELECT user_id, status, resulting_entitlement_id
+			  FROM purchases WHERE studio_id = ? AND stripe_payment_id = ?`,
+			studioID, payID,
+		).Scan(&ownerID, &status, &entID)
+		return
+	}
+	ownerID, status, entID, err := lookup(sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, ErrNotFound
+		// The checkout.session.completed webhook may have already fulfilled this
+		// and swapped stripe_payment_id from the cs_ session id to the pi_
+		// PaymentIntent (so refunds can target it) — leaving the cs_ lookup
+		// empty. Re-resolve via the session's PaymentIntent so we still return
+		// the minted entitlement instead of a misleading "unknown".
+		keys, kerr := s.LoadStripeKeysForUse(ctx, studioID)
+		if kerr != nil {
+			if errors.Is(kerr, ErrNotFound) {
+				return "", false, ErrStripeNotConfigured
+			}
+			return "", false, fmt.Errorf("load stripe keys: %w", kerr)
+		}
+		sess, serr := s.gateway.GetCheckoutSession(ctx, keys.SecretKey, sessionID)
+		if serr != nil {
+			return "", false, fmt.Errorf("retrieve checkout session: %w", serr)
+		}
+		if sess.IntentID == "" {
+			return "", false, ErrNotFound
+		}
+		ownerID, status, entID, err = lookup(sess.IntentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, ErrNotFound
+		}
 	}
 	if err != nil {
 		return "", false, err

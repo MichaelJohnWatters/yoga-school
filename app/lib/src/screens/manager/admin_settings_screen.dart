@@ -437,16 +437,19 @@ class _PoliciesCard extends ConsumerStatefulWidget {
 class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
   late int _cutoffHours;
   late int _bookingWindowDays;
+  late int _graceDays;
   late bool _plusOne;
   late String _buyLayout;
   late String _timezone;
   late final TextEditingController _cutoffCtrl;
   late final TextEditingController _windowCtrl;
+  late final TextEditingController _graceCtrl;
   bool _saving = false;
 
   bool get _dirty =>
       _cutoffHours != widget.studio.freeCancelCutoffHours ||
       _bookingWindowDays != widget.studio.bookingWindowDays ||
+      _graceDays != widget.studio.subscriptionGraceDays ||
       _plusOne != widget.studio.allowStudentPlusOne ||
       _buyLayout != widget.studio.buyLayout ||
       _timezone != widget.studio.timezone;
@@ -456,17 +459,20 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
     super.initState();
     _cutoffHours = widget.studio.freeCancelCutoffHours;
     _bookingWindowDays = widget.studio.bookingWindowDays;
+    _graceDays = widget.studio.subscriptionGraceDays;
     _plusOne = widget.studio.allowStudentPlusOne;
     _buyLayout = widget.studio.buyLayout;
     _timezone = widget.studio.timezone;
     _cutoffCtrl = TextEditingController(text: '$_cutoffHours');
     _windowCtrl = TextEditingController(text: '$_bookingWindowDays');
+    _graceCtrl = TextEditingController(text: '$_graceDays');
   }
 
   @override
   void dispose() {
     _cutoffCtrl.dispose();
     _windowCtrl.dispose();
+    _graceCtrl.dispose();
     super.dispose();
   }
 
@@ -478,6 +484,7 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
           .adminUpdateStudioConfig(
             freeCancelCutoffHours: _cutoffHours,
             bookingWindowDays: _bookingWindowDays,
+            subscriptionGraceDays: _graceDays,
             allowStudentPlusOne: _plusOne,
             buyLayout: _buyLayout,
             timezone: _timezone != widget.studio.timezone ? _timezone : null,
@@ -599,6 +606,67 @@ class _PoliciesCardState extends ConsumerState<_PoliciesCard> {
                       onChanged: (v) {
                         final n = int.tryParse(v);
                         if (n != null) setState(() => _bookingWindowDays = n);
+                      },
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: y.text,
+                      ),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.symmetric(vertical: 4),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    'days',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: y.muted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'MEMBERSHIP GRACE PERIOD',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: y.muted,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Extra days a membership stays active after each paid period ends, so '
+            'a slightly-late auto-renewal doesn’t lock a paying member out. '
+            '0 = cut access exactly at period end.',
+            style: TextStyle(fontSize: 12, color: y.muted),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: 150,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                border: Border.all(color: y.borderStrong),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _graceCtrl,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      onChanged: (v) {
+                        final n = int.tryParse(v);
+                        if (n != null) setState(() => _graceDays = n);
                       },
                       style: TextStyle(
                         fontSize: 13.5,

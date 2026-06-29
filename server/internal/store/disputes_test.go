@@ -28,7 +28,7 @@ func TestRecordDispute_FlagsPurchaseAndAlertsManagers(t *testing.T) {
 
 	// A completed card purchase → real pi_ + entitlement.
 	productID := seedTenPack(t, s, f)
-	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "")
+	pending, err := s.CreatePendingPurchase(ctx, f.studioID, f.studentID, productID, "card", "", "")
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}

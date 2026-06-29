@@ -68,8 +68,13 @@ func (s *Store) HandleStripeEvent(ctx context.Context, studioID string, payload 
 		// Web (hosted Checkout) one-time success — authoritative fulfilment.
 		// Only act when actually paid (async methods can complete unpaid).
 		if evt.Status == "" || evt.Status == "paid" {
-			if _, err := s.ConfirmPurchaseBySession(ctx, studioID, evt.SessionID, evt.IntentID); err != nil &&
-				!errors.Is(err, ErrNotFound) {
+			_, err := s.ConfirmPurchaseBySession(ctx, studioID, evt.SessionID, evt.IntentID)
+			if errors.Is(err, ErrSeriesFull) {
+				// Series filled before payment landed — refund + notify.
+				if rerr := s.refundFullEnrollment(ctx, studioID, evt.SessionID, evt.IntentID); rerr != nil {
+					return rerr
+				}
+			} else if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
 		}
@@ -104,8 +109,12 @@ func (s *Store) HandleStripeEvent(ctx context.Context, studioID string, payload 
 		}
 	case "payment_intent.succeeded":
 		// Mobile (PaymentSheet) success.
-		if _, err := s.ConfirmPurchaseByIntent(ctx, studioID, evt.IntentID); err != nil &&
-			!errors.Is(err, ErrNotFound) {
+		_, err := s.ConfirmPurchaseByIntent(ctx, studioID, evt.IntentID)
+		if errors.Is(err, ErrSeriesFull) {
+			if rerr := s.refundFullEnrollment(ctx, studioID, evt.IntentID, evt.IntentID); rerr != nil {
+				return rerr
+			}
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	case "payment_intent.payment_failed", "payment_intent.canceled":

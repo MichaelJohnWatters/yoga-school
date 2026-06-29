@@ -56,57 +56,86 @@ class AdminSeriesScreen extends ConsumerWidget {
               ),
               Expanded(
                 child: data.when(
-                  data: (rows) => rows.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No series scheduled yet.',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: context.yoga.muted,
-                            ),
-                          ),
-                        )
-                      : ManagerCard(
-                          child: Column(
-                            children: [
-                              if (!isNarrow) _Head(),
-                              for (var i = 0; i < rows.length; i++)
-                                if (isNarrow)
-                                  _MobileRow(
-                                    item: rows[i],
-                                    isLast: i == rows.length - 1,
-                                    onView: () => onView(rows[i].summary.id),
-                                    onEdit: () async {
-                                      final edited = await showEditSeriesDialog(
-                                        context: context,
-                                        series: rows[i].summary,
-                                      );
-                                      if (edited == true) {
-                                        ref.invalidate(
-                                            adminEnrollmentsProvider);
-                                      }
-                                    },
-                                  )
-                                else
-                                  _Row(
-                                    item: rows[i],
-                                    isLast: i == rows.length - 1,
-                                    onView: () => onView(rows[i].summary.id),
-                                    onEdit: () async {
-                                      final edited = await showEditSeriesDialog(
-                                        context: context,
-                                        series: rows[i].summary,
-                                      );
-                                      if (edited == true) {
-                                        ref.invalidate(
-                                            adminEnrollmentsProvider);
-                                      }
-                                    },
-                                  ),
-                            ],
+                  data: (all) {
+                    if (all.isEmpty) {
+                      return Center(
+                        child: Text(
+                          'No series scheduled yet.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: context.yoga.muted,
                           ),
                         ),
+                      );
+                    }
+                    final active =
+                        all.where((e) => !e.summary.isArchived).toList();
+                    final archived =
+                        all.where((e) => e.summary.isArchived).toList();
+
+                    Widget card(
+                      List<AdminEnrollmentSummary> rows, {
+                      required bool archivedSection,
+                    }) {
+                      return ManagerCard(
+                        child: Column(
+                          children: [
+                            if (!isNarrow) _Head(),
+                            for (var i = 0; i < rows.length; i++)
+                              isNarrow
+                                  ? _MobileRow(
+                                      item: rows[i],
+                                      isLast: i == rows.length - 1,
+                                      archived: archivedSection,
+                                      onView: () => onView(rows[i].summary.id),
+                                      onEdit: () =>
+                                          _edit(context, ref, rows[i].summary),
+                                      onArchive: archivedSection
+                                          ? null
+                                          : () => _archive(
+                                              context, ref, rows[i].summary),
+                                    )
+                                  : _Row(
+                                      item: rows[i],
+                                      isLast: i == rows.length - 1,
+                                      archived: archivedSection,
+                                      onView: () => onView(rows[i].summary.id),
+                                      onEdit: () =>
+                                          _edit(context, ref, rows[i].summary),
+                                      onArchive: archivedSection
+                                          ? null
+                                          : () => _archive(
+                                              context, ref, rows[i].summary),
+                                    ),
+                          ],
+                        ),
+                      );
+                    }
+
+                    return ListView(
+                      children: [
+                        if (active.isNotEmpty)
+                          card(active, archivedSection: false),
+                        if (archived.isNotEmpty) ...[
+                          const SizedBox(height: 22),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+                            child: Text(
+                              'ARCHIVED',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.6,
+                                color: context.yoga.muted,
+                              ),
+                            ),
+                          ),
+                          card(archived, archivedSection: true),
+                        ],
+                      ],
+                    );
+                  },
                   loading: () => const Center(
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
@@ -125,6 +154,55 @@ class AdminSeriesScreen extends ConsumerWidget {
     ),
     );
   }
+
+  Future<void> _edit(
+      BuildContext context, WidgetRef ref, EnrollmentSummary s) async {
+    final edited = await showEditSeriesDialog(context: context, series: s);
+    if (edited == true) ref.invalidate(adminEnrollmentsProvider);
+  }
+
+  // Retire a series created in error. One-way; students already enrolled keep
+  // their booked sessions, but it disappears from the student Enrollments tab.
+  Future<void> _archive(
+      BuildContext context, WidgetRef ref, EnrollmentSummary s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Archive series?'),
+        content: Text(
+          '"${s.title}" will be hidden from students so no new sign-ups can '
+          'happen. Anyone already enrolled keeps their booked sessions. '
+          'This can\'t be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Archive'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(apiClientProvider).adminArchiveEnrollment(s.id);
+      ref.invalidate(adminEnrollmentsProvider);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Archived "${s.title}"')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(ApiError.fromAny(e).message)),
+        );
+      }
+    }
+  }
 }
 
 /// Mobile shape — title + session count on top, the three stats inline as
@@ -132,13 +210,17 @@ class AdminSeriesScreen extends ConsumerWidget {
 class _MobileRow extends StatelessWidget {
   final AdminEnrollmentSummary item;
   final bool isLast;
+  final bool archived;
   final VoidCallback onView;
   final VoidCallback onEdit;
+  final VoidCallback? onArchive;
   const _MobileRow({
     required this.item,
     required this.isLast,
+    required this.archived,
     required this.onView,
     required this.onEdit,
+    required this.onArchive,
   });
 
   @override
@@ -149,7 +231,9 @@ class _MobileRow extends StatelessWidget {
         ? '${_short(s.startsAt!)} – ${_short(s.endsAt!)}'
         : '—';
     final attendance = item.attendancePct > 0 ? '${item.attendancePct}%' : '—';
-    return InkWell(
+    return Opacity(
+      opacity: archived ? 0.55 : 1,
+      child: InkWell(
       onTap: onView,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -193,17 +277,31 @@ class _MobileRow extends StatelessWidget {
             const SizedBox(height: 6),
             Row(
               children: [
-                GestureDetector(
-                  onTap: onEdit,
-                  child: Text(
-                    'Edit',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                      color: y.muted,
+                if (!archived) ...[
+                  GestureDetector(
+                    onTap: onEdit,
+                    child: Text(
+                      'Edit',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
                     ),
                   ),
-                ),
+                  const SizedBox(width: 16),
+                  GestureDetector(
+                    onTap: onArchive,
+                    child: Text(
+                      'Archive',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
+                    ),
+                  ),
+                ],
                 const Spacer(),
                 Text(
                   'View roster ›',
@@ -217,6 +315,7 @@ class _MobileRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -251,7 +350,7 @@ class _Head extends StatelessWidget {
           const SizedBox(width: 12),
           SizedBox(width: 110, child: Text('ATTENDANCE', style: s)),
           const SizedBox(width: 12),
-          const SizedBox(width: 140),
+          const SizedBox(width: 200),
         ],
       ),
     );
@@ -261,13 +360,17 @@ class _Head extends StatelessWidget {
 class _Row extends StatelessWidget {
   final AdminEnrollmentSummary item;
   final bool isLast;
+  final bool archived;
   final VoidCallback onView;
   final VoidCallback onEdit;
+  final VoidCallback? onArchive;
   const _Row({
     required this.item,
     required this.isLast,
+    required this.archived,
     required this.onView,
     required this.onEdit,
+    required this.onArchive,
   });
 
   @override
@@ -277,7 +380,9 @@ class _Row extends StatelessWidget {
     final dates = s.startsAt != null && s.endsAt != null
         ? '${_short(s.startsAt!)} – ${_short(s.endsAt!)}'
         : '—';
-    return Container(
+    return Opacity(
+      opacity: archived ? 0.55 : 1,
+      child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
       decoration: BoxDecoration(
         border: isLast ? null : Border(bottom: BorderSide(color: y.border)),
@@ -348,22 +453,36 @@ class _Row extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           SizedBox(
-            width: 140,
+            width: 200,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                GestureDetector(
-                  onTap: onEdit,
-                  child: Text(
-                    'Edit',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                      color: y.muted,
+                if (!archived) ...[
+                  GestureDetector(
+                    onTap: onEdit,
+                    child: Text(
+                      'Edit',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 16),
+                  const SizedBox(width: 14),
+                  GestureDetector(
+                    onTap: onArchive,
+                    child: Text(
+                      'Archive',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: y.muted,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                ],
                 GestureDetector(
                   onTap: onView,
                   child: Text(
@@ -379,6 +498,7 @@ class _Row extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }

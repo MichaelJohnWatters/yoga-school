@@ -128,6 +128,7 @@ type Studio struct {
 	Currency              string `json:"currency"`
 	FreeCancelCutoffHours int    `json:"free_cancel_cutoff_hours"`
 	BookingWindowDays     int    `json:"booking_window_days"`
+	SubscriptionGraceDays int    `json:"subscription_grace_days"`
 	AllowStudentPlusOne   bool   `json:"allow_student_plus_one"`
 	WelcomeMessage        string `json:"welcome_message"`
 	BuyLayout             string `json:"buy_layout"`
@@ -190,7 +191,8 @@ func (s *Store) StudioConfig(ctx context.Context, studioID string) (*Studio, err
 	// yet still load. Distinct join aliases keep the column list readable.
 	const q = `
 		SELECT s.id, s.name, s.timezone, s.currency,
-		       s.free_cancel_cutoff_hours, s.booking_window_days, s.allow_student_plus_one,
+		       s.free_cancel_cutoff_hours, s.booking_window_days, s.subscription_grace_days,
+		       s.allow_student_plus_one,
 		       COALESCE(s.welcome_message,''), s.buy_layout,
 		       lt.id, lt.name, lt.mode, lt.tokens, lt.splash_image_url,
 		       dt.id, dt.name, dt.mode, dt.tokens, dt.splash_image_url
@@ -211,7 +213,8 @@ func (s *Store) StudioConfig(ctx context.Context, studioID string) (*Studio, err
 	)
 	err := s.db.QueryRowContext(ctx, q, studioID).Scan(
 		&out.ID, &out.Name, &out.Timezone, &out.Currency,
-		&out.FreeCancelCutoffHours, &out.BookingWindowDays, &plusOneInt,
+		&out.FreeCancelCutoffHours, &out.BookingWindowDays, &out.SubscriptionGraceDays,
+		&plusOneInt,
 		&out.WelcomeMessage, &out.BuyLayout,
 		&out.ActiveThemeID, &out.ActiveThemeName, &out.ActiveThemeMode,
 		&lightTokens, &lightSplash,
