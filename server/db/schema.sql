@@ -314,6 +314,13 @@ CREATE TABLE IF NOT EXISTS products (
   pass_kind     TEXT NOT NULL CHECK (pass_kind IN ('credit','unlimited')),
   credits       INTEGER,
   validity_days INTEGER,
+  -- What happens when a student buys this pass while still holding a usable
+  -- one of the same product:
+  --   allow   — mint a second independent entitlement (default; stacks).
+  --   prevent — refuse the purchase up front (ErrDuplicatePass → 409).
+  --   topup   — merge into the existing pass: add credits + extend validity.
+  duplicate_policy TEXT NOT NULL DEFAULT 'allow'
+                     CHECK (duplicate_policy IN ('allow','prevent','topup')),
   -- For recurring products: how often Stripe bills. NULL for one_time.
   -- The Stripe recurring Price is created with this interval.
   billing_interval TEXT CHECK (billing_interval IN ('month','year')),
@@ -521,6 +528,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
                                                  'canceled','incomplete_expired')),
   cancel_at_period_end       INTEGER NOT NULL DEFAULT 0,
   current_period_end         TEXT,
+  -- PaymentIntent (pi_…) of the most recent paid invoice, captured from the
+  -- invoice.paid webhook. Lets a manager refund the latest membership payment
+  -- in-app. Null until the first paid invoice lands after this was added.
+  last_payment_intent_id     TEXT,
   entitlement_id             TEXT REFERENCES entitlements(id),
   currency                   TEXT NOT NULL,
   amount_minor               INTEGER NOT NULL,

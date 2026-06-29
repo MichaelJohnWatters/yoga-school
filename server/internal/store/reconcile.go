@@ -101,6 +101,82 @@ func (s *Store) ReconcilePendingPurchases(ctx context.Context, olderThan time.Du
 	return confirmed, voided, nil
 }
 
+// ReconcileStalePendingCheckouts is the safety net for WEB checkout purchases
+// (stripe_payment_id = cs_…) whose checkout.session.expired/completed webhook
+// was missed. ReconcilePendingPurchases can't help them — GetIntent doesn't
+// accept a session id. For each pending cs_ row older than minAge (use a value
+// past Stripe's 24h session lifetime so an unpaid session is definitively
+// dead), we ask Stripe how the session resolved: paid → fulfil, otherwise →
+// void. A nil gateway is a no-op.
+func (s *Store) ReconcileStalePendingCheckouts(ctx context.Context, minAge time.Duration) (confirmed, voided int, err error) {
+	if s.gateway == nil {
+		return 0, 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-minAge).Format(time.RFC3339)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT studio_id, stripe_payment_id
+		  FROM purchases
+		 WHERE status = 'pending'
+		   AND stripe_payment_id LIKE 'cs_%'
+		   AND created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	type pending struct{ studioID, sessionID string }
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.studioID, &p.sessionID); err != nil {
+			rows.Close()
+			return confirmed, voided, err
+		}
+		todo = append(todo, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return confirmed, voided, err
+	}
+	rows.Close()
+
+	keyCache := map[string]string{}
+	for _, p := range todo {
+		secret, ok := keyCache[p.studioID]
+		if !ok {
+			keys, err := s.LoadStripeKeysForUse(ctx, p.studioID)
+			if err != nil {
+				continue
+			}
+			secret = keys.SecretKey
+			keyCache[p.studioID] = secret
+		}
+		st, err := s.gateway.GetCheckoutSession(ctx, secret, p.sessionID)
+		if err != nil {
+			continue
+		}
+		if st.PaymentStatus == "paid" {
+			_, err := s.ConfirmPurchaseBySession(ctx, p.studioID, p.sessionID, st.IntentID)
+			if errors.Is(err, ErrSeriesFull) {
+				if rerr := s.refundFullEnrollment(ctx, p.studioID, p.sessionID, st.IntentID); rerr != nil {
+					continue
+				}
+			} else if err != nil && !errors.Is(err, ErrNotFound) {
+				continue
+			}
+			confirmed++
+			continue
+		}
+		// Past the session lifetime and not paid → it can never settle. Void.
+		if err := s.VoidPurchaseByIntent(ctx, p.studioID, p.sessionID,
+			"reconcile:stale_session"); err != nil && !errors.Is(err, ErrNotFound) {
+			continue
+		}
+		voided++
+	}
+	return confirmed, voided, nil
+}
+
 // SweepEntitlements retires the status flags the read path currently derives
 // lazily (see wallet.go): active passes past their expiry become 'expired', and
 // credit packs with no credits left become 'depleted'. Persisting the status

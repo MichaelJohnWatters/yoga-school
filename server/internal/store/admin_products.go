@@ -32,7 +32,7 @@ func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]Admin
 	const q = `
 		SELECT p.id, p.name, COALESCE(p.description,''), p.price_minor,
 		       s.currency, p.billing_type, p.billing_interval, p.pass_kind,
-		       p.credits, p.validity_days, p.is_hero,
+		       p.credits, p.validity_days, p.is_hero, p.duplicate_policy,
 		       p.is_archived, p.display_order
 		  FROM products p
 		  JOIN studios s ON s.id = p.studio_id
@@ -56,7 +56,7 @@ func (s *Store) ListAdminProducts(ctx context.Context, studioID string) ([]Admin
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Description, &p.PriceMinor,
 			&p.Currency, &p.BillingType, &interval, &p.PassKind,
-			&credits, &validity, &heroInt, &archInt, &p.DisplayOrder,
+			&credits, &validity, &heroInt, &p.DuplicatePolicy, &archInt, &p.DisplayOrder,
 		); err != nil {
 			return nil, err
 		}
@@ -199,7 +199,13 @@ type AdminProductInput struct {
 	ValidityDays    *int     `json:"validity_days,omitempty"`
 	IsHero          *bool    `json:"is_hero,omitempty"`
 	DisplayOrder    *int     `json:"display_order,omitempty"`
+	DuplicatePolicy *string  `json:"duplicate_policy,omitempty"` // allow | prevent | topup
 	ClassTypeIDs    []string `json:"class_type_ids,omitempty"`
+}
+
+// validDuplicatePolicy guards the enum at the API boundary.
+func validDuplicatePolicy(p string) bool {
+	return p == "allow" || p == "prevent" || p == "topup"
 }
 
 func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string, in AdminProductInput) (string, error) {
@@ -222,6 +228,13 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string
 	}
 	if *in.PassKind != "credit" && *in.PassKind != "unlimited" {
 		return "", errors.New("pass_kind must be credit|unlimited")
+	}
+	dupPolicy := "allow"
+	if in.DuplicatePolicy != nil {
+		if !validDuplicatePolicy(*in.DuplicatePolicy) {
+			return "", errors.New("duplicate_policy must be allow|prevent|topup")
+		}
+		dupPolicy = *in.DuplicatePolicy
 	}
 
 	// Recurring products bill on an interval (default monthly). One-time
@@ -279,11 +292,11 @@ func (s *Store) CreateAdminProduct(ctx context.Context, studioID, actorID string
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO products
 		  (id, studio_id, name, description, price_minor, billing_type, billing_interval,
-		   pass_kind, credits, validity_days, is_hero, display_order, is_archived,
+		   pass_kind, credits, validity_days, duplicate_policy, is_hero, display_order, is_archived,
 		   stripe_product_id, stripe_price_id)
-		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
 		id, studioID, *in.Name, description, *in.PriceMinor, *in.BillingType, interval,
-		*in.PassKind, credits, validity, hero, order,
+		*in.PassKind, credits, validity, dupPolicy, hero, order,
 		nullableStr(stripeProductID), nullableStr(stripePriceID),
 	)
 	if err != nil {
@@ -434,6 +447,13 @@ func (s *Store) UpdateAdminProduct(ctx context.Context, studioID, actorID, produ
 	if in.DisplayOrder != nil {
 		set = append(set, "display_order = ?")
 		args = append(args, *in.DisplayOrder)
+	}
+	if in.DuplicatePolicy != nil {
+		if !validDuplicatePolicy(*in.DuplicatePolicy) {
+			return errors.New("duplicate_policy must be allow|prevent|topup")
+		}
+		set = append(set, "duplicate_policy = ?")
+		args = append(args, *in.DuplicatePolicy)
 	}
 	if len(set) > 0 {
 		args = append(args, productID, studioID)

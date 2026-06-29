@@ -152,6 +152,30 @@ func mapStoreError(err error) SafeError {
 			code:   "class_already_started",
 			msg:    "Class has already started.",
 		}
+	case errors.Is(err, store.ErrAlreadyEnrolled):
+		return simpleSafe{
+			status: http.StatusConflict,
+			code:   "already_enrolled",
+			msg:    "This student is already enrolled in the series.",
+		}
+	case errors.Is(err, store.ErrSeriesFull):
+		return simpleSafe{
+			status: http.StatusConflict,
+			code:   "series_full",
+			msg:    "This series is full.",
+		}
+	case errors.Is(err, store.ErrAlreadySubscribed):
+		return simpleSafe{
+			status: http.StatusConflict,
+			code:   "already_subscribed",
+			msg:    "You already have this membership.",
+		}
+	case errors.Is(err, store.ErrDuplicatePass):
+		return simpleSafe{
+			status: http.StatusConflict,
+			code:   "duplicate_pass",
+			msg:    "You already have this pass.",
+		}
 	case errors.Is(err, store.ErrAlreadyBooked):
 		return simpleSafe{
 			status: http.StatusConflict,

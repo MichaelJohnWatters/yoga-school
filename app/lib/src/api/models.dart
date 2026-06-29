@@ -397,6 +397,7 @@ class Product {
   final int? credits;
   final int? validityDays;
   final bool isHero;
+  final String duplicatePolicy; // allow | prevent | topup
   final List<String> classTypeIds;
   final List<String> disciplines;
 
@@ -412,6 +413,7 @@ class Product {
     required this.credits,
     required this.validityDays,
     required this.isHero,
+    required this.duplicatePolicy,
     required this.classTypeIds,
     required this.disciplines,
   });
@@ -428,6 +430,7 @@ class Product {
     credits: j['credits'] as int?,
     validityDays: j['validity_days'] as int?,
     isHero: j['is_hero'] as bool,
+    duplicatePolicy: (j['duplicate_policy'] as String?) ?? 'allow',
     classTypeIds: ((j['class_type_ids'] as List?) ?? const []).cast<String>(),
     disciplines: ((j['disciplines'] as List?) ?? const []).cast<String>(),
   );
@@ -1543,6 +1546,7 @@ class AdminProduct {
   final bool isHero;
   final bool isArchived;
   final int displayOrder;
+  final String duplicatePolicy; // allow | prevent | topup
   final List<String> classTypeIds;
   final List<String> disciplines;
   final AdminProductUsage usage;
@@ -1561,6 +1565,7 @@ class AdminProduct {
     required this.isHero,
     required this.isArchived,
     required this.displayOrder,
+    required this.duplicatePolicy,
     required this.classTypeIds,
     required this.disciplines,
     required this.usage,
@@ -1580,6 +1585,7 @@ class AdminProduct {
     isHero: j['is_hero'] as bool,
     isArchived: j['is_archived'] as bool,
     displayOrder: j['display_order'] as int,
+    duplicatePolicy: (j['duplicate_policy'] as String?) ?? 'allow',
     classTypeIds: ((j['class_type_ids'] as List?) ?? const []).cast<String>(),
     disciplines: ((j['disciplines'] as List?) ?? const []).cast<String>(),
     usage: AdminProductUsage.fromJson(j['usage'] as Map<String, dynamic>),
@@ -2172,6 +2178,14 @@ class WalletEntitlement {
   /// detect "you already own this pass" warnings.
   final String? sourceProductId;
 
+  /// Set when this pass is backed by a membership subscription, so the manager
+  /// can cancel it properly (at renewal / now) rather than just voiding the
+  /// pass. Null for one-off passes.
+  final String? subscriptionId;
+  final String? subscriptionStatus;
+  final DateTime? renewsAt;
+  final bool cancelAtPeriodEnd;
+
   WalletEntitlement({
     required this.id,
     required this.label,
@@ -2183,7 +2197,13 @@ class WalletEntitlement {
     required this.createdAt,
     required this.disciplines,
     required this.sourceProductId,
+    this.subscriptionId,
+    this.subscriptionStatus,
+    this.renewsAt,
+    this.cancelAtPeriodEnd = false,
   });
+
+  bool get isMembership => subscriptionId != null;
 
   factory WalletEntitlement.fromJson(Map<String, dynamic> j) =>
       WalletEntitlement(
@@ -2199,6 +2219,12 @@ class WalletEntitlement {
         createdAt: DateTime.parse(j['created_at'] as String),
         disciplines: ((j['disciplines'] as List?) ?? const []).cast<String>(),
         sourceProductId: j['source_product_id'] as String?,
+        subscriptionId: j['subscription_id'] as String?,
+        subscriptionStatus: j['subscription_status'] as String?,
+        renewsAt: (j['renews_at'] as String?)?.let(
+          (s) => s.isEmpty ? null : DateTime.tryParse(s),
+        ),
+        cancelAtPeriodEnd: (j['cancel_at_period_end'] as bool?) ?? false,
       );
 
   bool get isActive => status == 'active';
