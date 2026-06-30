@@ -553,7 +553,12 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 	}
 	defer tx.Rollback()
 
-	// Cancel upcoming bookings that used this entitlement.
+	// Cancel upcoming bookings that used this entitlement. Capture which classes
+	// lost a seat first so we can offer them to waitlists after commit.
+	freed, err := futureBookedClassesTx(ctx, tx, entitlementID)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE bookings
 		   SET status = 'cancelled',
@@ -609,6 +614,7 @@ func (s *Store) VoidEntitlement(ctx context.Context, studioID, actorID, entitlem
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	s.promoteWaitlistForFreedClasses(studioID, freed)
 	return &VoidResult{RefundedMinor: refunded, Currency: currency}, nil
 }
 

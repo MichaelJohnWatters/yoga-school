@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/studio52/yoga-school/server/internal/payments"
@@ -407,6 +409,7 @@ func (s *Store) RecordInvoiceFailed(ctx context.Context, studioID string, evt pa
 	defer tx.Rollback()
 
 	var rowID, entID string
+	var freed []string
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, COALESCE(entitlement_id,'') FROM subscriptions
 		 WHERE studio_id = ? AND stripe_subscription_id = ?`,
@@ -436,17 +439,28 @@ func (s *Store) RecordInvoiceFailed(ctx context.Context, studioID string, evt pa
 		// membership (mirrors the manager Void path). A later successful retry
 		// reactivates the pass but does NOT restore these seats — they'd
 		// re-book (and the freed seats may be gone).
-		if err := cancelFutureBookingsTx(ctx, tx, entID); err != nil {
-			return err
+		var ferr error
+		if freed, ferr = cancelFutureBookingsTx(ctx, tx, entID); ferr != nil {
+			return ferr
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.promoteWaitlistForFreedClasses(studioID, freed)
+	return nil
 }
 
 // cancelFutureBookingsTx cancels a member's still-upcoming bookings funded by an
 // entitlement (classes that haven't started yet). Same shape as VoidEntitlement
-// so payment-failure and manager-void revoke access consistently.
-func cancelFutureBookingsTx(ctx context.Context, tx *sql.Tx, entitlementID string) error {
+// so payment-failure and manager-void revoke access consistently. Returns the
+// class ids whose seats were freed so the caller can offer them to waitlists
+// after the tx commits.
+func cancelFutureBookingsTx(ctx context.Context, tx *sql.Tx, entitlementID string) ([]string, error) {
+	freed, err := futureBookedClassesTx(ctx, tx, entitlementID)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE bookings
 		   SET status = 'cancelled',
@@ -458,9 +472,61 @@ func cancelFutureBookingsTx(ctx context.Context, tx *sql.Tx, entitlementID strin
 		      WHERE c.id = bookings.class_id
 		        AND c.starts_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		   )`, entitlementID); err != nil {
-		return fmt.Errorf("cancel future bookings: %w", err)
+		return nil, fmt.Errorf("cancel future bookings: %w", err)
 	}
-	return nil
+	return freed, nil
+}
+
+// futureBookedClassesTx lists the classes (one per booked seat) a still-active
+// entitlement holds future bookings in — the seats a cancel/void is about to
+// free.
+func futureBookedClassesTx(ctx context.Context, tx *sql.Tx, entitlementID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT b.class_id FROM bookings b
+		  JOIN classes c ON c.id = b.class_id
+		 WHERE b.entitlement_id = ? AND b.status = 'booked'
+		   AND c.starts_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')`, entitlementID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// promoteWaitlistForFreedClasses offers each freed seat to that class's waitlist,
+// async + detached so the caller's request doesn't block on N notifications.
+// One offer per entry. Mirrors CancelBooking's auto-promote; benign
+// "waitlist empty" / "class full" just move on to the next class.
+func (s *Store) promoteWaitlistForFreedClasses(studioID string, classIDs []string) {
+	if len(classIDs) == 0 {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		for _, classID := range classIDs {
+			_, err := s.PromoteWaitlist(ctx, studioID, "", classID)
+			if err == nil {
+				continue
+			}
+			msg := err.Error()
+			if msg == "waitlist is empty" || msg == "class is full" {
+				continue
+			}
+			if errors.Is(err, sql.ErrConnDone) ||
+				strings.Contains(msg, "database is closed") {
+				return // process shutdown raced us
+			}
+			log.Printf("auto-promote after entitlement cancel (class=%s): %v", classID, err)
+		}
+	}()
 }
 
 // UpdateSubscriptionStatus reflects customer.subscription.updated: status,
@@ -827,19 +893,21 @@ func (s *Store) AdminCancelSubscription(ctx context.Context, studioID, actorID, 
 			 WHERE id = ?`, subID); err != nil {
 			return err
 		}
+		var freed []string
 		if entID != "" {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE entitlements SET status = 'expired' WHERE id = ? AND status = 'active'`,
 				entID); err != nil {
 				return err
 			}
-			if err := cancelFutureBookingsTx(ctx, tx, entID); err != nil {
+			if freed, err = cancelFutureBookingsTx(ctx, tx, entID); err != nil {
 				return err
 			}
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		s.promoteWaitlistForFreedClasses(studioID, freed)
 	}
 	return s.WriteAudit(ctx, studioID, actorID, "subscription_cancel",
 		"subscription", subID, map[string]any{"on_behalf_of": ownerID, "immediate": immediate})
