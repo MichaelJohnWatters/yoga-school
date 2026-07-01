@@ -176,6 +176,12 @@ func mapStoreError(err error) SafeError {
 			code:   "duplicate_pass",
 			msg:    "You already have this pass.",
 		}
+	case errors.Is(err, store.ErrMembershipNotReady):
+		return simpleSafe{
+			status: http.StatusConflict,
+			code:   "membership_not_ready",
+			msg:    "This membership isn't available to buy yet — please check back shortly.",
+		}
 	case errors.Is(err, store.ErrAlreadyBooked):
 		return simpleSafe{
 			status: http.StatusConflict,

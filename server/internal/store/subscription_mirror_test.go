@@ -5,11 +5,10 @@ import (
 	"testing"
 )
 
-// A recurring product created before Stripe was configured (e.g. the seeded
-// "Unlimited Monthly") has no stripe_price_id. Buying it must mirror the Price
-// on the fly, persist it, and charge against the new id — not fail with
-// ErrStripeNotConfigured.
-func TestSubscriptionCheckout_LazyMirrorsMissingPrice(t *testing.T) {
+// A recurring product with no mirrored Stripe Price can't be checked out by a
+// student — minting the Price is a manager action, never a side effect of a
+// purchase. Checkout refuses (ErrMembershipNotReady) and creates nothing.
+func TestSubscriptionCheckout_RefusesWhenPriceMissing(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	f := newFixture(t, s)
@@ -17,8 +16,7 @@ func TestSubscriptionCheckout_LazyMirrorsMissingPrice(t *testing.T) {
 	g := &fakeGateway{intents: map[string]string{}}
 	s.SetPaymentGateway(g)
 
-	// Seed a recurring product with NO stripe ids (the seeded-then-configured
-	// situation).
+	// Recurring product with NO stripe ids.
 	productID := NewID()
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO products
@@ -28,31 +26,19 @@ func TestSubscriptionCheckout_LazyMirrorsMissingPrice(t *testing.T) {
 		t.Fatalf("seed product: %v", err)
 	}
 
-	out, err := s.CreateCheckoutSubscription(ctx, f.studioID, f.studentID, productID,
-		"https://app/ok", "https://app/no")
-	if err != nil {
-		t.Fatalf("checkout should self-heal, got: %v", err)
+	if _, err := s.CreateCheckoutSubscription(ctx, f.studioID, f.studentID, productID,
+		"https://app/ok", "https://app/no"); err != ErrMembershipNotReady {
+		t.Fatalf("checkout err = %v, want ErrMembershipNotReady", err)
 	}
 
-	// It minted a Price and charged against it.
-	if g.lastSubCheckout.PriceID == "" {
-		t.Fatal("checkout did not use a mirrored price id")
+	// No Price was minted as a side effect of the student's attempt.
+	if g.lastPrice.ProductName != "" {
+		t.Error("student checkout must not create a Stripe Price")
 	}
-
-	// And persisted it so the next purchase reuses it.
-	var priceID, prodID *string
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT stripe_price_id, stripe_product_id FROM products WHERE id = ?`,
-		productID).Scan(&priceID, &prodID); err != nil {
-		t.Fatalf("read product: %v", err)
-	}
-	if priceID == nil || *priceID == "" {
-		t.Fatal("stripe_price_id was not persisted after checkout")
-	}
-	if *priceID != g.lastSubCheckout.PriceID {
-		t.Errorf("persisted price %q != charged price %q", *priceID, g.lastSubCheckout.PriceID)
-	}
-	if out.SubscriptionID == "" {
-		t.Error("expected a subscription id")
+	var priceID *string
+	s.db.QueryRowContext(ctx,
+		`SELECT stripe_price_id FROM products WHERE id = ?`, productID).Scan(&priceID)
+	if priceID != nil && *priceID != "" {
+		t.Errorf("product should still have no Price, got %q", *priceID)
 	}
 }
