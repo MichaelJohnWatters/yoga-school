@@ -9,6 +9,15 @@ setup from §0.
 Conventions: ✅ = expected result. DB checks use the dev SQLite at
 `server/dev.db` — run them with `sqlite3 server/dev.db "…"`.
 
+> **Already automated** (no manual run needed): the membership money path —
+> §6.4 PaymentIntent capture, §6.5 invoice→purchase recording, and §8's refund
+> round-trip — is covered by `TestStripeRealAPI_MembershipE2E`. It hits live
+> Stripe test mode server-side (no browser/reader) and replays Stripe's real
+> `invoice.paid` event through our handler. Run it with test keys in `.env`:
+> `cd server && go test -tags stripe_e2e -run MembershipE2E ./internal/store/`.
+> The manual §6–§8 steps below remain useful as a UI sanity check, but if that
+> test passes, the capture/recording/refund are proven.
+
 ---
 
 ## 0. Setup (once)

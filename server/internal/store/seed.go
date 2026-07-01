@@ -69,7 +69,7 @@ const (
 	ThemeSlate     = "th_slate"
 	ThemeSage      = "th_sage"
 	ThemeCitrus    = "th_citrus"
-	ThemeNoir      = "th_noir"      // dark-mode preset
+	ThemeNoir      = "th_noir" // dark-mode preset
 	ThemeRose      = "th_rose"
 	ThemeOcean     = "th_ocean"
 	ThemeForest    = "th_forest"
@@ -244,6 +244,9 @@ func (s *Store) seedStatics(ctx context.Context) error {
 			   'All yoga + reformer, every day, for a month.', 8800, 'recurring', 'unlimited', NULL, 30, 1, 0)`,
 			[]any{ProductUnlimitedMonthly, StudioID},
 		},
+		// Real (test-mode) memberships are seeded post-Stripe-config via the
+		// dev-only /dev/seed-membership endpoint (Tilt: yoga-seed-membership),
+		// so dev always exercises real Stripe rather than fake subscription rows.
 		{
 			`INSERT OR IGNORE INTO products
 			 (id, studio_id, name, description, price_minor, billing_type, pass_kind, credits, validity_days, is_hero, display_order)

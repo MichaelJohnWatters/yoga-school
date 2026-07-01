@@ -160,8 +160,15 @@ func TestInstructorPayRate_OverridesDefaultInReport(t *testing.T) {
 	}
 
 	// Plant one past class taught by this instructor in the current month.
+	// Anchor to the report's own month start (computed in the studio's
+	// timezone) so the test is stable on a month boundary — "2h ago" in UTC
+	// can fall outside the studio-tz month window otherwise.
 	classID := NewID()
+	monthStart := startOfMonthIn(time.Now(), s.StudioLocation(ctx, f.studioID))
 	start := time.Now().UTC().Add(-2 * time.Hour)
+	if start.Before(monthStart) {
+		start = monthStart.UTC().Add(1 * time.Minute) // just inside the month window, in the past
+	}
 	end := start.Add(1 * time.Hour)
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO classes
