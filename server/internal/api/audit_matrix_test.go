@@ -442,6 +442,17 @@ var auditMatrix = []auditCase{
 		},
 	},
 	{
+		name:           "discount_update",
+		expectedAction: "discount_update",
+		build: func(t *testing.T, r *testRig) (string, string, any) {
+			id := seedDiscount(t, r)
+			return http.MethodPatch, "/admin/discounts/" + id, map[string]any{
+				"kind":  "percent",
+				"value": 15,
+			}
+		},
+	},
+	{
 		name:           "discount_archive",
 		expectedAction: "discount_archive",
 		build: func(t *testing.T, r *testRig) (string, string, any) {

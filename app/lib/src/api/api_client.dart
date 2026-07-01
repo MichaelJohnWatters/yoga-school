@@ -1667,6 +1667,38 @@ class ApiClient {
     return AdminDiscount.fromJson(r.data!);
   }
 
+  /// Overwrites a discount with the full desired state (the edit sheet pre-fills
+  /// then re-submits). Omitted optional fields clear to null server-side.
+  Future<AdminDiscount> adminUpdateDiscount({
+    required String id,
+    String? code,
+    required String kind,
+    required int value,
+    String? appliesToProductId,
+    DateTime? validFrom,
+    DateTime? validTo,
+    int? maxUses,
+    int? maxUsesPerUser,
+    String notes = '',
+  }) async {
+    final r = await _dio.patch<Map<String, dynamic>>(
+      '/admin/discounts/$id',
+      data: {
+        if (code != null && code.isNotEmpty) 'code': code,
+        'kind': kind,
+        'value': value,
+        if (appliesToProductId != null && appliesToProductId.isNotEmpty)
+          'applies_to_product_id': appliesToProductId,
+        if (validFrom != null) 'valid_from': validFrom.toUtc().toIso8601String(),
+        if (validTo != null) 'valid_to': validTo.toUtc().toIso8601String(),
+        if (maxUses != null) 'max_uses': maxUses,
+        if (maxUsesPerUser != null) 'max_uses_per_user': maxUsesPerUser,
+        if (notes.isNotEmpty) 'notes': notes,
+      },
+    );
+    return AdminDiscount.fromJson(r.data!);
+  }
+
   Future<void> adminArchiveDiscount(String id) async {
     await _dio.delete<void>('/admin/discounts/$id');
   }

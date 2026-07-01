@@ -173,6 +173,7 @@ func (s *Server) Routes() http.Handler {
 			r.Delete("/admin/promotions/{id}", s.handleAdminArchivePromotion)
 			r.Get("/admin/discounts", s.handleAdminListDiscounts)
 			r.Post("/admin/discounts", s.handleAdminCreateDiscount)
+			r.Patch("/admin/discounts/{id}", s.handleAdminUpdateDiscount)
 			r.Delete("/admin/discounts/{id}", s.handleAdminArchiveDiscount)
 			r.Post("/admin/purchases/{id}/refund", s.handleAdminRefundPurchase)
 			r.Get("/admin/subscriptions", s.handleAdminListSubscriptions)
@@ -3166,6 +3167,22 @@ func (s *Server) handleAdminCreateDiscount(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	in, err := discountInputFromReq(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	d, err := s.store.CreateDiscount(r.Context(), u.StudioID, u.ID, in)
+	if err != nil {
+		respondValidation(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, d)
+}
+
+// discountInputFromReq maps the JSON request onto the store input, parsing the
+// RFC3339 window bounds. Shared by create + update.
+func discountInputFromReq(req createDiscountReq) (store.DiscountCreate, error) {
 	in := store.DiscountCreate{
 		Code:               req.Code,
 		Kind:               req.Kind,
@@ -3178,25 +3195,43 @@ func (s *Server) handleAdminCreateDiscount(w http.ResponseWriter, r *http.Reques
 	if req.ValidFrom != nil && *req.ValidFrom != "" {
 		t, err := time.Parse(time.RFC3339, *req.ValidFrom)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "valid_from: invalid RFC3339 time")
-			return
+			return in, fmt.Errorf("valid_from: invalid RFC3339 time")
 		}
 		in.ValidFrom = &t
 	}
 	if req.ValidTo != nil && *req.ValidTo != "" {
 		t, err := time.Parse(time.RFC3339, *req.ValidTo)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "valid_to: invalid RFC3339 time")
-			return
+			return in, fmt.Errorf("valid_to: invalid RFC3339 time")
 		}
 		in.ValidTo = &t
 	}
-	d, err := s.store.CreateDiscount(r.Context(), u.StudioID, u.ID, in)
+	return in, nil
+}
+
+func (s *Server) handleAdminUpdateDiscount(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	id := chi.URLParam(r, "id")
+	var req createDiscountReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	in, err := discountInputFromReq(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	d, err := s.store.UpdateDiscount(r.Context(), u.StudioID, u.ID, id, in)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "discount not found")
+		return
+	}
 	if err != nil {
 		respondValidation(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, d)
+	writeJSON(w, http.StatusOK, d)
 }
 
 func (s *Server) handleAdminArchiveDiscount(w http.ResponseWriter, r *http.Request) {
