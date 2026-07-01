@@ -67,6 +67,7 @@ func (s *Server) Routes() http.Handler {
 	// Dev-only: point a studio at Stripe test keys so the checkout
 	// integration test can create a real Checkout Session. Same emulator gate.
 	r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
+	r.Post("/dev/seed-membership", s.handleDevSeedMembership)
 
 	// Stripe webhook — PUBLIC (no auth middleware): Stripe calls this
 	// server-to-server, and the handler proves the request is genuine by
@@ -3363,6 +3364,36 @@ func (s *Server) handleDevConfigureStripe(w http.ResponseWriter, r *http.Request
 	if err := s.store.ConfigureTestStripeKeys(r.Context(), body.StudioID,
 		body.SecretKey, body.PublishableKey, body.WebhookSecret); err != nil {
 		respondErr(w, err, "configureStripe")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDevSeedMembership creates a real Stripe test-mode subscription for a
+// seeded student so dev exercises real Stripe (not placeholder rows). Same
+// emulator-only gate as the other /dev routes. The webhook fulfils it.
+func (s *Server) handleDevSeedMembership(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body struct {
+		StudioID  string `json:"studio_id"`
+		Email     string `json:"email"`
+		ProductID string `json:"product_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.StudioID == "" {
+		body.StudioID = "s52"
+	}
+	if body.Email == "" {
+		body.Email = "maya@studio52.dev"
+	}
+	if body.ProductID == "" {
+		body.ProductID = store.ProductUnlimitedMonthly
+	}
+	if err := s.store.DevSeedRealMembership(r.Context(), body.StudioID, body.Email, body.ProductID); err != nil {
+		respondErr(w, err, "devSeedMembership")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

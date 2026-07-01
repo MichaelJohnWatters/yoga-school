@@ -657,12 +657,14 @@ func (s *Store) AdminResumeSubscription(ctx context.Context, studioID, actorID, 
 	if !stripeSubID.Valid || stripeSubID.String == "" {
 		return fmt.Errorf("subscription not yet active")
 	}
-	keys, err := s.stripeKeys(ctx, studioID)
-	if err != nil {
-		return err
-	}
-	if err := s.gateway.ResumeSubscription(ctx, keys.SecretKey, stripeSubID.String); err != nil {
-		return fmt.Errorf("resume subscription: %w", err)
+	if !isStubSubscription(stripeSubID.String) {
+		keys, err := s.stripeKeys(ctx, studioID)
+		if err != nil {
+			return err
+		}
+		if err := s.gateway.ResumeSubscription(ctx, keys.SecretKey, stripeSubID.String); err != nil {
+			return fmt.Errorf("resume subscription: %w", err)
+		}
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE subscriptions SET cancel_at_period_end = 0,
@@ -961,17 +963,30 @@ func (s *Store) AdminRefundMembership(ctx context.Context, studioID, actorID, su
 
 // ===== shared helpers ====================================================
 
+// isStubSubscription reports whether a Stripe subscription id is a local
+// placeholder (manual / comp / seeded membership) rather than a real Stripe
+// subscription. Real Stripe ids are sub_<random>; ours use the sub_stub_
+// prefix. Pairs with a pi_stub_ payment id so refunds no-op too.
+func isStubSubscription(stripeSubID string) bool {
+	return strings.HasPrefix(stripeSubID, "sub_stub_")
+}
+
 func (s *Store) cancelSubscription(ctx context.Context, studioID, userID, subID string, atPeriodEnd bool) error {
 	stripeSubID, _, err := s.loadOwnedSubscription(ctx, studioID, userID, subID)
 	if err != nil {
 		return err
 	}
-	keys, err := s.stripeKeys(ctx, studioID)
-	if err != nil {
-		return err
-	}
-	if err := s.gateway.CancelSubscription(ctx, keys.SecretKey, stripeSubID, atPeriodEnd); err != nil {
-		return fmt.Errorf("cancel subscription: %w", err)
+	// Stub (manual / comp / seeded) memberships aren't billed through Stripe —
+	// skip the gateway call and just update local state. Real Stripe sub ids
+	// never start with sub_stub_. Mirrors the pi_stub_ refund bypass.
+	if !isStubSubscription(stripeSubID) {
+		keys, err := s.stripeKeys(ctx, studioID)
+		if err != nil {
+			return err
+		}
+		if err := s.gateway.CancelSubscription(ctx, keys.SecretKey, stripeSubID, atPeriodEnd); err != nil {
+			return fmt.Errorf("cancel subscription: %w", err)
+		}
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE subscriptions SET cancel_at_period_end = 1,

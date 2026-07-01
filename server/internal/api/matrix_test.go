@@ -27,6 +27,7 @@ var (
 		"POST /dev/reset-test-state": true,
 		"POST /dev/fill-class":       true,
 		"POST /dev/configure-stripe": true,
+		"POST /dev/seed-membership":  true,
 		// Load-balancer probe — must be reachable without a token.
 		// See handleHealthz for the rationale (and the prod checklist
 		// item about firewalling the port off the public internet).

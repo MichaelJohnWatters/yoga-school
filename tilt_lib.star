@@ -261,7 +261,25 @@ exit 0
     # as a belt-and-braces safety net.
     local_resource(
         'yoga-configure-stripe',
-        cmd=cd + './scripts/configure-stripe-dev.sh',
+        # After wiring the keys, chain the real-membership seed so dev comes up
+        # with a genuine test-mode subscription (not a placeholder). Triggered,
+        # not inlined, for the same serial-slot reason as above.
+        cmd=cd + './scripts/configure-stripe-dev.sh && ' +
+            'for i in 1 2 3 4 5 6 7 8 9 10; do tilt trigger yoga-seed-membership 2>/dev/null && break; sleep 0.5; done',
+        resource_deps=['yoga-server'],
+        labels=['yoga-school'],
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=False,
+        allow_parallel=True,
+    )
+
+    # Creates a real Stripe test-mode membership for a seeded student (via
+    # /dev/seed-membership) once Stripe is configured, so the Memberships screen
+    # + membership actions have genuine data. Self-skips without keys. The
+    # invoice.paid webhook (yoga-stripe-webhook) fulfils it.
+    local_resource(
+        'yoga-seed-membership',
+        cmd=cd + './scripts/seed-membership-dev.sh',
         resource_deps=['yoga-server'],
         labels=['yoga-school'],
         trigger_mode=TRIGGER_MODE_MANUAL,
