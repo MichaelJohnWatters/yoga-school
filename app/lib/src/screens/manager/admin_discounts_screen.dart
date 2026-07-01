@@ -100,6 +100,7 @@ class _List extends ConsumerWidget {
                           d: active[i],
                           isLast: i == active.length - 1,
                           onArchive: () => _archive(context, ref, active[i]),
+                          onEdit: () => _edit(context, ref, active[i]),
                         ),
                     ],
                   ),
@@ -162,6 +163,16 @@ class _List extends ConsumerWidget {
       }
     }
   }
+
+  Future<void> _edit(BuildContext context, WidgetRef ref, AdminDiscount d) async {
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _CreateDiscountSheet(existing: d),
+    );
+    if (saved == true) ref.invalidate(adminDiscountsProvider);
+  }
 }
 
 class _EmptyHint extends StatelessWidget {
@@ -185,10 +196,12 @@ class _DiscountRow extends StatelessWidget {
   final AdminDiscount d;
   final bool isLast;
   final VoidCallback? onArchive;
+  final VoidCallback? onEdit;
   const _DiscountRow({
     required this.d,
     required this.isLast,
     required this.onArchive,
+    this.onEdit,
   });
 
   @override
@@ -244,6 +257,12 @@ class _DiscountRow extends StatelessWidget {
               ],
             ),
           ),
+          if (onEdit != null)
+            IconButton(
+              onPressed: onEdit,
+              icon: Icon(Icons.edit_outlined, size: 18, color: y.muted),
+              tooltip: 'Edit',
+            ),
           if (onArchive != null)
             IconButton(
               onPressed: onArchive,
@@ -257,7 +276,8 @@ class _DiscountRow extends StatelessWidget {
 }
 
 class _CreateDiscountSheet extends ConsumerStatefulWidget {
-  const _CreateDiscountSheet();
+  final AdminDiscount? existing; // null = create; set = edit
+  const _CreateDiscountSheet({this.existing});
 
   @override
   ConsumerState<_CreateDiscountSheet> createState() =>
@@ -273,6 +293,20 @@ class _CreateDiscountSheetState extends ConsumerState<_CreateDiscountSheet> {
   String _kind = 'percent';
   bool _submitting = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    if (e != null) {
+      _code.text = e.code ?? '';
+      _kind = e.kind;
+      _value.text = '${e.value}';
+      if (e.maxUses != null) _maxUses.text = '${e.maxUses}';
+      if (e.maxUsesPerUser != null) _maxPerUser.text = '${e.maxUsesPerUser}';
+      _notes.text = e.notes;
+    }
+  }
 
   @override
   void dispose() {
@@ -316,7 +350,7 @@ class _CreateDiscountSheetState extends ConsumerState<_CreateDiscountSheet> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'New discount',
+                  widget.existing == null ? 'New discount' : 'Edit discount',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w800,
@@ -428,7 +462,9 @@ class _CreateDiscountSheetState extends ConsumerState<_CreateDiscountSheet> {
                 ],
                 const SizedBox(height: 16),
                 YButton(
-                  label: _submitting ? 'Saving…' : 'Create discount',
+                  label: _submitting
+                      ? 'Saving…'
+                      : (widget.existing == null ? 'Create discount' : 'Save changes'),
                   onTap: _submitting ? null : _submit,
                 ),
               ],
@@ -448,14 +484,29 @@ class _CreateDiscountSheetState extends ConsumerState<_CreateDiscountSheet> {
       final value = _kind == 'comp' ? 0 : int.tryParse(_value.text.trim()) ?? 0;
       final maxUses = int.tryParse(_maxUses.text.trim());
       final maxPerUser = int.tryParse(_maxPerUser.text.trim());
-      await ref.read(apiClientProvider).adminCreateDiscount(
-            code: _code.text.trim().isEmpty ? null : _code.text.trim(),
-            kind: _kind,
-            value: value,
-            maxUses: maxUses,
-            maxUsesPerUser: maxPerUser,
-            notes: _notes.text.trim(),
-          );
+      final code = _code.text.trim().isEmpty ? null : _code.text.trim();
+      final api = ref.read(apiClientProvider);
+      final existing = widget.existing;
+      if (existing == null) {
+        await api.adminCreateDiscount(
+          code: code,
+          kind: _kind,
+          value: value,
+          maxUses: maxUses,
+          maxUsesPerUser: maxPerUser,
+          notes: _notes.text.trim(),
+        );
+      } else {
+        await api.adminUpdateDiscount(
+          id: existing.id,
+          code: code,
+          kind: _kind,
+          value: value,
+          maxUses: maxUses,
+          maxUsesPerUser: maxPerUser,
+          notes: _notes.text.trim(),
+        );
+      }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       setState(() {

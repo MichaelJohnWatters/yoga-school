@@ -172,6 +172,65 @@ func (s *Store) CreateDiscount(ctx context.Context, studioID, actorID string, in
 	return s.GetDiscount(ctx, studioID, id)
 }
 
+// UpdateDiscount overwrites a (non-archived) discount rule with the full input
+// shape — the edit UI pre-fills the current values, so every column is set (or
+// cleared to NULL) from `in`, avoiding sparse-patch ambiguity. Past purchases
+// that already used the discount are unaffected; only future lookups see the
+// new terms. Audited discount_update.
+func (s *Store) UpdateDiscount(ctx context.Context, studioID, actorID, id string, in DiscountCreate) (*Discount, error) {
+	if err := validateDiscountInput(in); err != nil {
+		return nil, err
+	}
+	var (
+		codePtr, productPtr, fromPtr, toPtr any
+		maxUses, maxPerUser                 any
+	)
+	if in.Code != nil {
+		v := strings.ToUpper(strings.TrimSpace(*in.Code))
+		if v == "" {
+			return nil, fmt.Errorf("code: cannot be blank")
+		}
+		codePtr = v
+	}
+	if in.AppliesToProductID != nil && *in.AppliesToProductID != "" {
+		productPtr = *in.AppliesToProductID
+	}
+	if in.ValidFrom != nil {
+		fromPtr = in.ValidFrom.UTC().Format(time.RFC3339)
+	}
+	if in.ValidTo != nil {
+		toPtr = in.ValidTo.UTC().Format(time.RFC3339)
+	}
+	if in.MaxUses != nil {
+		maxUses = *in.MaxUses
+	}
+	if in.MaxUsesPerUser != nil {
+		maxPerUser = *in.MaxUsesPerUser
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE discounts
+		   SET code = ?, kind = ?, value = ?, applies_to_product_id = ?,
+		       valid_from = ?, valid_to = ?, max_uses = ?, max_uses_per_user = ?,
+		       notes = ?
+		 WHERE id = ? AND studio_id = ? AND archived_at IS NULL`,
+		codePtr, in.Kind, in.Value, productPtr,
+		fromPtr, toPtr, maxUses, maxPerUser,
+		strings.TrimSpace(in.Notes), id, studioID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update discount: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	auditDetail := map[string]any{"kind": in.Kind, "value": in.Value}
+	if codePtr != nil {
+		auditDetail["code"] = codePtr
+	}
+	_ = s.WriteAudit(ctx, studioID, actorID, "discount_update", "discount", id, auditDetail)
+	return s.GetDiscount(ctx, studioID, id)
+}
+
 // ArchiveDiscount retires a discount. Past purchases that used it stay
 // linked — only future code lookups skip it.
 func (s *Store) ArchiveDiscount(ctx context.Context, studioID, actorID, id string) error {
