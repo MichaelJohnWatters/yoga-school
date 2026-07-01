@@ -45,34 +45,24 @@ func (s *Store) DevSeedRealMembership(ctx context.Context, studioID, email, prod
 		return fmt.Errorf("load stripe keys: %w", err)
 	}
 
-	// Product snapshot + ensure it has a Stripe recurring Price to charge against.
-	var name, currency string
+	// Product snapshot. The Stripe recurring Price must already exist — creating
+	// it is a manager action (product save / key-save backfill), and
+	// yoga-configure-stripe runs that backfill before this seeder. We require it
+	// rather than mint one here, keeping Price creation manager-only.
+	var currency string
 	var priceMinor int
-	var priceID, interval sql.NullString
+	var priceID sql.NullString
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT p.name, p.price_minor, st.currency, p.stripe_price_id,
-		       COALESCE(p.billing_interval,'month')
+		SELECT p.price_minor, st.currency, p.stripe_price_id
 		  FROM products p JOIN studios st ON st.id = p.studio_id
 		 WHERE p.id = ? AND p.studio_id = ? AND p.billing_type = 'recurring'`,
 		productID, studioID,
-	).Scan(&name, &priceMinor, &currency, &priceID, &interval); err != nil {
+	).Scan(&priceMinor, &currency, &priceID); err != nil {
 		return fmt.Errorf("load recurring product: %w", err)
 	}
 	stripePriceID := priceID.String
 	if stripePriceID == "" {
-		sp, prid, err := s.mirrorRecurringPrice(ctx, studioID, "recurring", name, priceMinor, interval.String)
-		if err != nil {
-			return fmt.Errorf("mirror price: %w", err)
-		}
-		if prid == "" {
-			return ErrStripeNotConfigured
-		}
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE products SET stripe_product_id = ?, stripe_price_id = ? WHERE id = ?`,
-			nullableStr(sp), prid, productID); err != nil {
-			return err
-		}
-		stripePriceID = prid
+		return fmt.Errorf("recurring product %s has no Stripe price — run configure-stripe (backfill) first", productID)
 	}
 
 	customerID, err := s.ensureStripeCustomer(ctx, keys.SecretKey, studioID, userID, email)

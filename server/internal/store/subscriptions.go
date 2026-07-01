@@ -46,6 +46,13 @@ type Subscription struct {
 // checkout) does NOT block, so they can always retry.
 var ErrAlreadySubscribed = errors.New("already subscribed to this membership")
 
+// ErrMembershipNotReady means a recurring product has no mirrored Stripe Price
+// yet, so it can't be checked out. Minting the Price is a manager action (saving
+// the product, or saving Stripe keys → backfill) — never a side effect of a
+// student purchase. A manager must re-save the product while Stripe is configured.
+var ErrMembershipNotReady = errors.New(
+	"this membership isn't set up for checkout yet — a manager needs to save it")
+
 // CreateCheckoutSubscription is the membership buy surface: it ensures a Stripe
 // Customer for the buyer, records a pending subscription row, and creates a
 // hosted Checkout Session in subscription mode against the product's recurring
@@ -105,34 +112,14 @@ func (s *Store) CreateCheckoutSubscription(
 		return nil, fmt.Errorf("load stripe keys: %w", err)
 	}
 
-	// The product needs a Stripe recurring Price to charge against. A membership
-	// created before Stripe was configured — most commonly the seeded "Unlimited
-	// Monthly" — has none, so mirror it now and persist the ids. Self-heals on
-	// the first purchase rather than forcing a manager to re-save the product.
+	// The product must already have a Stripe recurring Price to charge against.
+	// Creating that Price is a MANAGER action — it happens when the product is
+	// saved (mirrorRecurringPrice) or when Stripe keys are saved
+	// (backfillRecurringPrices). A student buying must never be able to mint a
+	// catalogue object, so if it's somehow missing we refuse rather than create.
 	priceID := prod.stripePriceID.String
 	if priceID == "" {
-		interval := "month"
-		_ = s.db.QueryRowContext(ctx,
-			`SELECT COALESCE(billing_interval,'month') FROM products WHERE id = ?`,
-			productID).Scan(&interval)
-		stripeProductID, mirroredPrice, mErr := s.mirrorRecurringPrice(
-			ctx, studioID, "recurring", prod.name, prod.priceMinor, interval)
-		if mErr != nil {
-			return nil, fmt.Errorf("mirror recurring price: %w", mErr)
-		}
-		if mirroredPrice == "" {
-			// mirrorRecurringPrice only returns empty when keys are absent, but
-			// we already loaded them above — guard anyway.
-			return nil, ErrStripeNotConfigured
-		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE products SET stripe_product_id = ?, stripe_price_id = ?
-			 WHERE id = ? AND studio_id = ?`,
-			nullableStr(stripeProductID), mirroredPrice, productID, studioID,
-		); err != nil {
-			return nil, fmt.Errorf("persist mirrored price: %w", err)
-		}
-		priceID = mirroredPrice
+		return nil, ErrMembershipNotReady
 	}
 
 	customerID, err := s.ensureStripeCustomer(ctx, keys.SecretKey, studioID, userID, buyerEmail)
