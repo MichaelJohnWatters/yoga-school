@@ -44,7 +44,7 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(cors)
+	r.Use(newCORS())
 
 	// Liveness + readiness in one — a deploy platform (Fly, k8s, ALB,
 	// whatever) pings /healthz and gates traffic on a 2xx. We include a
@@ -936,7 +936,7 @@ func (s *Server) handleConfirmCheckoutSession(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusOK, map[string]any{"status": "pending"})
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
 	if err != nil {
 		log.Printf("get entitlement after checkout confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -2685,7 +2685,7 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, err, "createPurchase")
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
 	if err != nil {
 		log.Printf("get entitlement: %v", err)
 		writeError(w, http.StatusInternalServerError, "purchase succeeded but entitlement load failed")
@@ -2715,7 +2715,7 @@ func (s *Server) handleConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 		respondValidation(w, err)
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
 	if err != nil {
 		log.Printf("get entitlement after confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -3757,17 +3757,44 @@ func minorToDecimal(minor int) string {
 	return s
 }
 
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+// newCORS builds the CORS middleware. CORS_ALLOWED_ORIGINS (comma-separated)
+// locks the browser surface to known front-ends: only a listed Origin is
+// reflected back, and Vary: Origin is set so caches don't cross the responses.
+// Unset keeps the permissive "*" — acceptable here because auth is a Bearer
+// token, not a cookie (so "*" carries no CSRF/ambient-credential risk), and it
+// keeps local dev frictionless. Set it in production.
+func newCORS() func(http.Handler) http.Handler {
+	var allowed []string
+	if raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowed = append(allowed, o)
+			}
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(allowed) == 0 {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Add("Vary", "Origin")
+				origin := r.Header.Get("Origin")
+				for _, o := range allowed {
+					if o == origin {
+						w.Header().Set("Access-Control-Allow-Origin", origin)
+						break
+					}
+				}
+			}
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // handleHealthz answers the load balancer's "are you alive?" probe.
