@@ -19,6 +19,7 @@ import 'src/api/web_redirect.dart';
 import 'src/firebase_options.dart';
 import 'src/screens/buy_screen.dart' show productsProvider;
 import 'src/screens/customer_display.dart';
+import 'src/screens/email_verification_screen.dart';
 import 'src/screens/desktop/desktop_shell.dart';
 import 'src/screens/desktop/responsive.dart';
 import 'src/screens/manager/manager_shell.dart';
@@ -130,6 +131,13 @@ class YogaApp extends ConsumerWidget {
       home: user.when(
         data: (u) {
           if (u == null) return const SignInScreen();
+          // Gate on a verified email in release builds — the server refuses
+          // unverified tokens with 403. Skipped in debug, where the app uses
+          // the Auth emulator (emailVerified is false there) and the server
+          // skips the check too.
+          if (!kDebugMode && !u.emailVerified) {
+            return EmailVerificationScreen(user: u);
+          }
           return CheckoutReturnHandler(child: _SignedInRoot(boot: boot));
         },
         loading: () => const SplashScreen(),

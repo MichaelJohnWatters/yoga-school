@@ -482,11 +482,17 @@ CREATE TABLE IF NOT EXISTS studio_stripe_credentials (
 -- flaps); we record each processed event id so a redelivery is a cheap no-op
 -- on top of the already-idempotent ConfirmPurchase. event_id is Stripe's
 -- evt_… string (app-assigned, no AUTOINCREMENT — portable to Postgres).
+--
+-- The key is (studio_id, event_id), not event_id alone: Stripe guarantees event
+-- ids are unique per account, not across accounts, so two studios (distinct
+-- Stripe accounts) could legitimately emit the same evt_ id. A global key would
+-- let one studio's event silently suppress another's fulfilment.
 CREATE TABLE IF NOT EXISTS processed_stripe_events (
-  event_id      TEXT PRIMARY KEY,
   studio_id     TEXT NOT NULL REFERENCES studios(id),
+  event_id      TEXT NOT NULL,
   event_type    TEXT NOT NULL,
-  processed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  processed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (studio_id, event_id)
 );
 
 -- ===== Memberships (recurring subscriptions) =============================

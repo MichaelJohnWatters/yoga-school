@@ -148,7 +148,7 @@ func TestPastBookings_IncludesCancelledAndAttended(t *testing.T) {
 	// for historical fixtures we mint the final state in SQL.
 	cBookingID := f.insertCancelledLateSeat(t, s, cancelled, ent)
 	aBookingID := f.insertBookedSeat(t, s, attended, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", aBookingID, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", aBookingID, "attended", "manual"); err != nil {
 		t.Fatalf("mark attended: %v", err)
 	}
 

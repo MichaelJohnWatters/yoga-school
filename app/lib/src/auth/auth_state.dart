@@ -28,6 +28,11 @@ class AuthService {
   /// the server's /me handler can read it from the token's `name` claim
   /// when it auto-provisions the student row. The auth-state stream fires
   /// on success and the rest of the bootstrap takes over.
+  ///
+  /// We immediately send a verification email: the server rejects tokens whose
+  /// email isn't verified (identity is keyed on the email claim, so an
+  /// unverified address can't be trusted), so the user must confirm the link
+  /// before the API will serve them.
   Future<UserCredential> createAccount({
     required String email,
     required String password,
@@ -45,10 +50,36 @@ class AuthService {
       // the very first /me request after sign-up sees the new name.
       await cred.user?.getIdToken(true);
     }
+    await cred.user?.sendEmailVerification();
     return cred;
   }
 
   Future<void> signOut() => _auth.signOut();
+
+  /// Whether the signed-in user has confirmed their email. False when signed
+  /// out. The UI gates entry to the app on this (the server does too, with a
+  /// 403), and offers [sendVerificationEmail] + [reloadUser] to recover.
+  bool get emailVerified => _auth.currentUser?.emailVerified ?? false;
+
+  /// (Re)send the verification link to the current user's email. Safe to call
+  /// from a "resend" button; Firebase rate-limits repeated sends.
+  Future<void> sendVerificationEmail() =>
+      _auth.currentUser?.sendEmailVerification() ?? Future.value();
+
+  /// Reload the user from Firebase and return whether the email is now
+  /// verified. Call after the user says they've clicked the link; on a true
+  /// result force-refresh the ID token so the next request carries the
+  /// verified bit, then let the auth-state stream drive the app forward.
+  Future<bool> reloadUser() async {
+    final u = _auth.currentUser;
+    if (u == null) return false;
+    await u.reload();
+    final verified = _auth.currentUser?.emailVerified ?? false;
+    if (verified) {
+      await _auth.currentUser?.getIdToken(true);
+    }
+    return verified;
+  }
 
   /// Fetch a fresh ID token. Used by the Dio interceptor for every request.
   /// Returns null if the user signed out between the request being queued

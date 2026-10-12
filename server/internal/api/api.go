@@ -312,6 +312,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "invalid id token")
 			return
 		}
+		if errors.Is(err, auth.ErrEmailNotVerified) {
+			writeError(w, http.StatusForbidden,
+				"email not verified — check your inbox for a verification link, then sign in again")
+			return
+		}
 		if err != nil {
 			log.Printf("verify: %v", err)
 			writeError(w, http.StatusInternalServerError, "auth error")
@@ -1226,7 +1231,7 @@ func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request) {
 	if via == "" {
 		via = "manual"
 	}
-	err := s.store.MarkAttendance(r.Context(), u.ID, bookingID, status, via)
+	err := s.store.MarkAttendance(r.Context(), u.StudioID, u.ID, bookingID, status, via)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "booking not found")
 		return
