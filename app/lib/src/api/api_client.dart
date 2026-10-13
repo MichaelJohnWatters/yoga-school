@@ -1828,7 +1828,18 @@ class _AuthInterceptor extends Interceptor {
   // bare Dio() that would silently skip any future security interceptor
   // (e.g. cert pinning or header redaction).
   final Dio _client;
-  bool _retrying = false;
+
+  // In-flight forced token refresh, shared across all requests. When several
+  // requests 401 at once (e.g. the parallel bootstrap after a silent token
+  // expiry), the first kicks off one getIdToken(true) and the rest await the
+  // same future instead of each forcing their own refresh — and, crucially,
+  // each still gets to retry (the old single `_retrying` bool let the first
+  // 401 win and dropped every sibling's retry, surfacing spurious 401s).
+  Future<String?>? _refresh;
+
+  // Per-request marker so a retried request that 401s again isn't retried
+  // forever. Lives on RequestOptions.extra, which Dio carries through fetch().
+  static const _retriedKey = '__authRetried';
 
   @override
   Future<void> onRequest(
@@ -1851,24 +1862,25 @@ class _AuthInterceptor extends Interceptor {
     ErrorInterceptorHandler handler,
   ) async {
     final res = err.response;
-    if (res?.statusCode == 401 && !_retrying) {
+    final alreadyRetried = err.requestOptions.extra[_retriedKey] == true;
+    if (res?.statusCode == 401 && !alreadyRetried) {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        _retrying = true;
         try {
-          final fresh = await user.getIdToken(true);
+          // Coalesce concurrent refreshes; clear the slot when done so the
+          // next expiry refreshes again.
+          final fresh = await (_refresh ??=
+              user.getIdToken(true).whenComplete(() => _refresh = null));
           if (fresh != null) {
-            // Retry through the configured client. _retrying guards against a
-            // loop if the refreshed token still 401s.
-            final retried = await _client.fetch<dynamic>(
-              err.requestOptions..headers['Authorization'] = 'Bearer $fresh',
-            );
+            // Retry through the configured client so BaseOptions + interceptors
+            // apply. onRequest re-attaches the (now-fresh) token; the marker
+            // prevents a second retry if it still 401s.
+            final opts = err.requestOptions..extra[_retriedKey] = true;
+            final retried = await _client.fetch<dynamic>(opts);
             return handler.resolve(retried);
           }
         } catch (_) {
           // fall through to original error
-        } finally {
-          _retrying = false;
         }
       }
     }

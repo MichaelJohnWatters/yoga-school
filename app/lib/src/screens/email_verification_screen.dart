@@ -171,8 +171,8 @@ class _EmailVerificationScreenState
                     Text(
                       _error!,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Color(0xFFA33B2E),
+                      style: TextStyle(
+                        color: y.danger,
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                       ),

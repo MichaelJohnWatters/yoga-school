@@ -935,6 +935,11 @@ func (s *Store) GetEntitlement(ctx context.Context, studioID, userID, id string)
 		  FROM entitlements WHERE id = ? AND studio_id = ? AND user_id = ?`,
 		id, studioID, userID,
 	).Scan(&out.ID, &out.Label, &out.PassKind, &creditsT, &creditsR, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No row for this (id, studio, user) — surface as ErrNotFound so the
+		// handler can answer 404 rather than a 500.
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

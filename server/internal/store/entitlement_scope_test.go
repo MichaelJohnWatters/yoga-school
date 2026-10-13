@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 )
@@ -23,13 +22,13 @@ func TestGetEntitlement_ScopedToOwner(t *testing.T) {
 		t.Fatalf("owner read: %v", err)
 	}
 
-	// Wrong studio → no rows.
-	if _, err := s.GetEntitlement(ctx, "other-studio", f.studentID, entID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("cross-studio read: want sql.ErrNoRows, got %v", err)
+	// Wrong studio → not found.
+	if _, err := s.GetEntitlement(ctx, "other-studio", f.studentID, entID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-studio read: want ErrNotFound, got %v", err)
 	}
 
-	// Wrong user → no rows.
-	if _, err := s.GetEntitlement(ctx, f.studioID, "other-user", entID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("cross-user read: want sql.ErrNoRows, got %v", err)
+	// Wrong user → not found.
+	if _, err := s.GetEntitlement(ctx, f.studioID, "other-user", entID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user read: want ErrNotFound, got %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 
 	firebase "firebase.google.com/go/v4"
@@ -82,10 +83,18 @@ func Verify(ctx context.Context, c *auth.Client, idToken string) (*Verified, err
 		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 	email, _ := tok.Claims["email"].(string)
-	emailVerified, _ := tok.Claims["email_verified"].(bool)
+	emailVerified, ok := tok.Claims["email_verified"].(bool)
 	name, _ := tok.Claims["name"].(string)
 	picture, _ := tok.Claims["picture"].(string)
 	if !emailVerified && os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") == "" {
+		// Distinguish "present and false" (normal unverified account) from
+		// "absent or wrong type" — the latter would lock out a provider that
+		// legitimately omits the claim (custom token / some SAML/OIDC), so log
+		// it with the UID (not the email) to keep the lockout diagnosable.
+		if !ok {
+			log.Printf("auth: uid=%s token has no boolean email_verified claim (got %T) — rejecting as unverified",
+				tok.UID, tok.Claims["email_verified"])
+		}
 		return nil, ErrEmailNotVerified
 	}
 	return &Verified{

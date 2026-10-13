@@ -41,6 +41,18 @@ func TestCORS_AllowlistReflectsOnlyListedOrigins(t *testing.T) {
 		}
 	})
 
+	t.Run("normalization: trailing slash + case in env still matches", func(t *testing.T) {
+		t.Setenv("CORS_ALLOWED_ORIGINS", "https://App.Studio52.com/")
+		h := newCORS()(ok)
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Origin", "https://app.studio52.com")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://app.studio52.com" {
+			t.Fatalf("normalized match: ACAO = %q, want the browser's origin reflected", got)
+		}
+	})
+
 	t.Run("unlisted origin not reflected", func(t *testing.T) {
 		t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.studio52.com")
 		h := newCORS()(ok)

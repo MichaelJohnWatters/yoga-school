@@ -937,6 +937,10 @@ func (s *Server) handleConfirmCheckoutSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement after checkout confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -2686,6 +2690,10 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement: %v", err)
 		writeError(w, http.StatusInternalServerError, "purchase succeeded but entitlement load failed")
@@ -2716,6 +2724,10 @@ func (s *Server) handleConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement after confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -3764,11 +3776,14 @@ func minorToDecimal(minor int) string {
 // token, not a cookie (so "*" carries no CSRF/ambient-credential risk), and it
 // keeps local dev frictionless. Set it in production.
 func newCORS() func(http.Handler) http.Handler {
-	var allowed []string
+	// Normalise both the configured list and the incoming Origin so a cosmetic
+	// difference (trailing slash, letter case) doesn't silently lock out a
+	// legit front-end — the #1 CORS-allowlist support footgun.
+	allowed := map[string]bool{}
 	if raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); raw != "" {
 		for _, o := range strings.Split(raw, ",") {
-			if o = strings.TrimSpace(o); o != "" {
-				allowed = append(allowed, o)
+			if n := normalizeOrigin(o); n != "" {
+				allowed[n] = true
 			}
 		}
 	}
@@ -3779,10 +3794,15 @@ func newCORS() func(http.Handler) http.Handler {
 			} else {
 				w.Header().Add("Vary", "Origin")
 				origin := r.Header.Get("Origin")
-				for _, o := range allowed {
-					if o == origin {
+				if origin != "" {
+					if allowed[normalizeOrigin(origin)] {
+						// Reflect the Origin exactly as sent (the browser matches
+						// byte-for-byte); normalisation is only for the lookup.
 						w.Header().Set("Access-Control-Allow-Origin", origin)
-						break
+					} else {
+						// Logged so a misconfigured CORS_ALLOWED_ORIGINS is
+						// diagnosable instead of a silent browser-side failure.
+						log.Printf("cors: origin %q not in CORS_ALLOWED_ORIGINS — blocked", origin)
 					}
 				}
 			}
@@ -3795,6 +3815,14 @@ func newCORS() func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// normalizeOrigin lowercases and drops a trailing slash so an operator's
+// "https://App.Example/" in CORS_ALLOWED_ORIGINS matches the browser's
+// "https://app.example". Scheme and host are case-insensitive; a browser
+// Origin never carries a path, so trimming a stray slash is safe.
+func normalizeOrigin(o string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o), "/"))
 }
 
 // handleHealthz answers the load balancer's "are you alive?" probe.

@@ -66,6 +66,10 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
   final Color muted;
   final Color border;
   final Color borderStrong;
+  /// Error / destructive text colour. Fixed across light+dark (a muted red)
+  /// so every screen reads errors the same way — replaces the 0xFFA33B2E hex
+  /// that had been copy-pasted across auth/booking/profile screens.
+  final Color danger;
   final List<BoxShadow> shadow;
   final double radiusCard;
   final double radiusChip;
@@ -86,6 +90,7 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
     required this.muted,
     required this.border,
     required this.borderStrong,
+    required this.danger,
     required this.shadow,
     required this.radiusCard,
     required this.radiusChip,
@@ -145,6 +150,7 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
       muted: t.textMuted,
       border: border,
       borderStrong: borderStrong,
+      danger: const Color(0xFFA33B2E),
       shadow: shadow,
       radiusCard: radius,
       radiusChip: 999,
@@ -178,6 +184,7 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
     Color? muted,
     Color? border,
     Color? borderStrong,
+    Color? danger,
     List<BoxShadow>? shadow,
     double? radiusCard,
     double? radiusChip,
@@ -198,6 +205,7 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
         muted: muted ?? this.muted,
         border: border ?? this.border,
         borderStrong: borderStrong ?? this.borderStrong,
+        danger: danger ?? this.danger,
         shadow: shadow ?? this.shadow,
         radiusCard: radiusCard ?? this.radiusCard,
         radiusChip: radiusChip ?? this.radiusChip,
@@ -222,6 +230,7 @@ class YogaTokens extends ThemeExtension<YogaTokens> {
       muted: Color.lerp(muted, other.muted, t)!,
       border: Color.lerp(border, other.border, t)!,
       borderStrong: Color.lerp(borderStrong, other.borderStrong, t)!,
+      danger: Color.lerp(danger, other.danger, t)!,
       shadow: t < 0.5 ? shadow : other.shadow,
       radiusCard: lerpDouble(radiusCard, other.radiusCard, t)!,
       radiusChip: lerpDouble(radiusChip, other.radiusChip, t)!,
