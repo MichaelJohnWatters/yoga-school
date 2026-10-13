@@ -28,11 +28,61 @@ class EmailVerificationScreen extends ConsumerStatefulWidget {
 }
 
 class _EmailVerificationScreenState
-    extends ConsumerState<EmailVerificationScreen> {
+    extends ConsumerState<EmailVerificationScreen> with WidgetsBindingObserver {
   bool _sending = false;
   bool _checking = false;
   String? _error;
   String? _notice;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The user most likely clicked the verification link in a browser while the
+    // app was backgrounded. Re-check on resume so they aren't stranded here
+    // having to also remember to tap "continue".
+    if (state == AppLifecycleState.resumed && !_checking) {
+      _refreshVerified(silent: true);
+    }
+  }
+
+  /// Reload the user and, if now verified, re-subscribe the auth stream so the
+  /// root gate advances into the app. `silent` suppresses error/"still not
+  /// verified" feedback for the automatic on-resume check.
+  Future<void> _refreshVerified({required bool silent}) async {
+    try {
+      final verified = await ref.read(authServiceProvider).reloadUser();
+      if (!mounted) return;
+      if (verified) {
+        // reloadUser already force-refreshed the ID token; invalidating the
+        // provider re-subscribes authStateChanges, which replays the now-
+        // verified user so the root gate moves on.
+        ref.invalidate(firebaseUserProvider);
+        return;
+      }
+      if (!silent) {
+        setState(() => _error =
+            "Still not verified — click the link in the email, then try again.");
+      }
+    } catch (_) {
+      // Network / transient failure. Surface it only for an explicit tap; the
+      // on-resume auto-check fails quietly and leaves the buttons for a retry.
+      if (mounted && !silent) {
+        setState(() => _error =
+            'Could not reach the server — check your connection and try again.');
+      }
+    }
+  }
 
   Future<void> _resend() async {
     setState(() {
@@ -60,16 +110,7 @@ class _EmailVerificationScreenState
       _notice = null;
     });
     try {
-      final verified = await ref.read(authServiceProvider).reloadUser();
-      if (!mounted) return;
-      if (verified) {
-        // reloadUser already force-refreshed the ID token. Re-subscribe to the
-        // auth stream so the root gate re-reads emailVerified and moves on.
-        ref.invalidate(firebaseUserProvider);
-        return;
-      }
-      setState(() =>
-          _error = "Still not verified — click the link in the email, then try again.");
+      await _refreshVerified(silent: false);
     } finally {
       if (mounted) setState(() => _checking = false);
     }

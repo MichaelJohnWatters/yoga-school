@@ -49,13 +49,17 @@ class ApiClient {
   String get origin => Uri.parse(_dio.options.baseUrl).origin;
 
   factory ApiClient.create() {
-    // Guard against shipping a release build still pointed at the dev proxy:
-    // that would leak Bearer ID tokens to localhost on the user's device.
-    assert(
-      !kReleaseMode || _baseUrl != _devBaseUrl,
-      'Release build is using the dev base URL — pass '
-      '--dart-define=API_BASE_URL=<prod origin>/api/v1',
-    );
+    // Fail fast if a release build was compiled without the prod API origin:
+    // it would otherwise leak Bearer ID tokens to localhost on the user's
+    // device. This MUST be a runtime throw, not an assert — asserts are
+    // stripped from release builds, which is exactly the build we need to
+    // catch.
+    if (kReleaseMode && _baseUrl == _devBaseUrl) {
+      throw StateError(
+        'Release build is using the dev base URL — pass '
+        '--dart-define=API_BASE_URL=<prod origin>/api/v1',
+      );
+    }
     final dio = Dio(
       BaseOptions(
         baseUrl: _baseUrl,
