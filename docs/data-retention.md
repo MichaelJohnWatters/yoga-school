@@ -56,11 +56,15 @@ not appear in any staff-facing listing (`erased_at IS NULL` filters).
 ## Backups
 
 Erasure operates on the live database. Personal data may persist in encrypted
-backups until they rotate out of the retention window. Backups are retained for
-**[FILL IN: e.g. 30 days]** and are not restored selectively; an erased subject
-is removed from backups by normal rotation within that window. This is an
+backups until they rotate out of the retention window. Backups are taken by
+[Litestream](../server/litestream.yml) (continuous replication of the SQLite DB
+to object storage) and are retained for **30 days**, after which they rotate out
+automatically (the `retention: 720h` setting, kept in step with the object
+store's own lifecycle rule). Backups are not restored selectively; an erased
+subject is removed from backups by normal rotation within that window. This is an
 accepted approach under ICO guidance provided the window is documented and
-backups are not used to repopulate live data.
+backups are not used to repopulate live data. Restore procedure:
+[ops-runbook.md](ops-runbook.md).
 
 ## Subject rights handling
 
@@ -72,6 +76,6 @@ backups are not used to repopulate live data.
   screen (`DELETE /admin/students/{id}`), logged as `user_erased`.
 - **Statutory response time** — **one calendar month** from request.
 
-> **Note:** Items in **[FILL IN]** are operational decisions for the studio
-> owner to confirm (backup window length, named DPO/contact). Everything else
-> reflects what the code does today.
+> **Note:** The backup window is now set (30 days, Litestream). The remaining
+> operational decision for the studio owner is the named DPO / data-protection
+> contact. Everything else reflects what the code does today.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,16 @@ func main() {
 	bootstrapAPI := flag.Bool("bootstrap-api", false,
 		"seed a minimal bootstrap then build the rest through the real audited "+
 			"store methods (populates audit_log); applied after migrate")
+	// Production onboarding: stand up ONE empty studio + its owner (no demo
+	// data), then exit. The command you run once per new customer deploy.
+	bootstrapStudio := flag.Bool("bootstrap-studio", false,
+		"provision one empty studio + owner (prod onboarding) then exit; applied after migrate")
+	studioName := flag.String("studio-name", "", "studio display name (with -bootstrap-studio)")
+	studioTZ := flag.String("studio-tz", "", "studio IANA timezone (default Europe/London)")
+	studioCurrency := flag.String("studio-currency", "", "studio ISO 4217 currency (default GBP)")
+	studioWelcome := flag.String("studio-welcome", "", "studio welcome message (optional)")
+	ownerEmail := flag.String("owner-email", "", "owner's sign-in email (with -bootstrap-studio)")
+	ownerName := flag.String("owner-name", "", "owner's display name (optional)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -72,7 +83,41 @@ func main() {
 			}
 			log.Printf("applied bootstrap-api seed")
 		}
+		if *bootstrapStudio {
+			sid, oid, err := st.ProvisionStudio(ctx, store.StudioBootstrapInput{
+				Name:           *studioName,
+				Timezone:       *studioTZ,
+				Currency:       *studioCurrency,
+				WelcomeMessage: *studioWelcome,
+				OwnerEmail:     *ownerEmail,
+				OwnerName:      *ownerName,
+			})
+			if err != nil {
+				log.Fatalf("bootstrap-studio: %v", err)
+			}
+			log.Printf("provisioned studio %s with owner %s <%s>", sid, oid, *ownerEmail)
+		}
 		return
+	}
+
+	// Production hardening: when APP_ENV=production, refuse to serve if any
+	// dev-only gate is active or CORS isn't locked down. Fail loud at boot so a
+	// misconfig can't silently ship dev behaviour (unauthenticated /dev routes,
+	// verbose error bodies, emulator auth, or wildcard CORS). Applies only to the
+	// serving path — the -migrate/-bootstrap flows return above.
+	if os.Getenv("APP_ENV") == "production" {
+		var bad []string
+		for _, k := range []string{"FIREBASE_AUTH_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "DEV_VERBOSE_ERRORS"} {
+			if os.Getenv(k) != "" {
+				bad = append(bad, k+" must be unset")
+			}
+		}
+		if os.Getenv("CORS_ALLOWED_ORIGINS") == "" {
+			bad = append(bad, "CORS_ALLOWED_ORIGINS must be set")
+		}
+		if len(bad) > 0 {
+			log.Fatalf("APP_ENV=production refuses to boot: %s", strings.Join(bad, "; "))
+		}
 	}
 
 	app, err := auth.NewApp(ctx)

@@ -12,7 +12,16 @@
 #   priya@studio52.dev / dev123456   (manager)
 # The sign-in screen has a dev dropdown that populates these for you.
 
-.PHONY: go flutter firebase seed-firebase reset analyze check-leaks check-tls caddy macos
+.PHONY: go flutter firebase seed-firebase reset analyze check-leaks check-tls caddy macos deploy-api deploy-web
+
+# --- Production deploy (one studio per deploy; see fly.toml + scripts/) -------
+# API → Fly.io; web → Firebase Hosting. deploy-web needs API_BASE_URL +
+# FIREBASE_PROJECT (see scripts/deploy-web.sh).
+deploy-api:
+	./scripts/deploy-api.sh
+
+deploy-web:
+	./scripts/deploy-web.sh
 
 # Firebase CLI requires Node ≥ 20.
 NODE_BIN := $(HOME)/.nvm/versions/node/v20.20.1/bin

@@ -42,32 +42,34 @@ func NewServer(s *store.Store, fb *fbauth.Client) *Server {
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(metricsMiddleware)
 	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(newRecoverer()) // panic → 500 + counter + optional ERROR_WEBHOOK alert
 	r.Use(newCORS())
 
-	// Liveness + readiness in one — a deploy platform (Fly, k8s, ALB,
-	// whatever) pings /healthz and gates traffic on a 2xx. We include a
-	// trivial DB ping so "DB is unreachable" trips the health check too,
-	// triggering a restart rather than letting the API serve 500s.
-	// Unauthenticated by design: the prober isn't logging in.
+	// Health & observability (portfolio deploy standard). All unauthenticated
+	// — probers and scrapers don't log in.
+	//   /healthz — liveness: process is up, no deps. Fly's check uses this; a
+	//              DB blip must NOT restart-loop the single SQLite machine.
+	//   /readyz  — readiness: DB reachable. For load balancers / uptime checks.
+	//   /metrics — Prometheus-text request counters (aggregate; no PII).
 	r.Get("/healthz", s.handleHealthz)
+	r.Get("/readyz", s.handleReadyz)
+	r.Get("/metrics", handleMetrics)
 
-	// Dev-only test reset endpoint. Lets integration tests wipe
-	// non-seed bookings/purchases/etc. between scenarios so each test
-	// starts from a clean baseline without restarting the server. Gated
-	// by the presence of FIREBASE_AUTH_EMULATOR_HOST — when we're talking
-	// to the real Firebase, this route refuses with 404. Unauthenticated
-	// on purpose: tests don't carry a token before they've signed in.
-	r.Post("/dev/reset-test-state", s.handleDevResetTestState)
-	// Companion to reset — fills a target class to capacity by booking
-	// in eligible seed students. Used by the join-waitlist test to
-	// guarantee the under-test student lands on a full class.
-	r.Post("/dev/fill-class", s.handleDevFillClass)
-	// Dev-only: point a studio at Stripe test keys so the checkout
-	// integration test can create a real Checkout Session. Same emulator gate.
-	r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
-	r.Post("/dev/seed-membership", s.handleDevSeedMembership)
+	// Dev-only test endpoints. Lets integration tests wipe non-seed state,
+	// fill classes, and point a studio at Stripe test keys between scenarios.
+	// They are only *registered* when FIREBASE_AUTH_EMULATOR_HOST is set — in
+	// production the emulator is never set, so these routes don't exist at all
+	// (not even a 404 handler), giving prod zero dev surface-area. The handlers
+	// keep their own emulator check as defence-in-depth. Unauthenticated on
+	// purpose: tests don't carry a token before they've signed in.
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") != "" {
+		r.Post("/dev/reset-test-state", s.handleDevResetTestState)
+		r.Post("/dev/fill-class", s.handleDevFillClass)
+		r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
+		r.Post("/dev/seed-membership", s.handleDevSeedMembership)
+	}
 
 	// Stripe webhook — PUBLIC (no auth middleware): Stripe calls this
 	// server-to-server, and the handler proves the request is genuine by
@@ -980,7 +982,7 @@ func (s *Server) handleListProducts(w http.ResponseWriter, r *http.Request) {
 
 type createPurchaseReq struct {
 	ProductID     string `json:"product_id"`
-	EnrollmentID  string `json:"enrollment_id"` // set to pay for a series (card path)
+	EnrollmentID  string `json:"enrollment_id"`  // set to pay for a series (card path)
 	PaymentMethod string `json:"payment_method"` // 'card' | 'cash' | 'dev_stub'
 	// Optional. When set, server validates + applies the discount in the
 	// same tx as the purchase insert and stores discount_minor + discount_id
@@ -3835,18 +3837,11 @@ func normalizeOrigin(o string) string {
 // Short context timeout — the prober itself runs on a tight schedule,
 // and an answer that takes 30s is worse than no answer (it ties up
 // goroutines + makes the prober think we're slow rather than down).
+// handleHealthz is pure liveness: the process is up and serving. No DB ping —
+// readiness (DB reachability) lives at /readyz. Keeping liveness dependency-
+// free stops a transient DB issue from restart-looping the machine. Fly's
+// health check uses this endpoint.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	if err := s.store.DB().PingContext(ctx); err != nil {
-		// Plain text body — the prober just reads the status code, but
-		// curling /healthz in incident triage gives the operator a hint
-		// of WHY it's down.
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("db ping failed: " + err.Error() + "\n"))
-		return
-	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))

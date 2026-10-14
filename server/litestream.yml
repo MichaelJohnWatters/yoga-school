@@ -1,0 +1,22 @@
+# Litestream: continuously replicate the SQLite DB to object storage so a lost
+# Fly volume doesn't mean lost customer/payment data. Supports point-in-time
+# restore. Enabled only when LITESTREAM_BUCKET is set (see docker-entrypoint.sh);
+# otherwise the server runs without backups (dev / not-yet-configured).
+#
+# Provide via Fly secrets (S3 or any S3-compatible store — e.g. Backblaze B2,
+# Cloudflare R2, Tigris on Fly):
+#   LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY  (read automatically)
+#   LITESTREAM_BUCKET, LITESTREAM_ENDPOINT, LITESTREAM_REGION
+#
+# Retention is 30 days — keep this in step with docs/data-retention.md and the
+# object store's own lifecycle rule.
+dbs:
+  - path: /data/prod.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: prod.db
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        retention: 720h
+        snapshot-interval: 24h
