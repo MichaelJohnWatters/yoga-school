@@ -33,6 +33,16 @@ func main() {
 	bootstrapAPI := flag.Bool("bootstrap-api", false,
 		"seed a minimal bootstrap then build the rest through the real audited "+
 			"store methods (populates audit_log); applied after migrate")
+	// Production onboarding: stand up ONE empty studio + its owner (no demo
+	// data), then exit. The command you run once per new customer deploy.
+	bootstrapStudio := flag.Bool("bootstrap-studio", false,
+		"provision one empty studio + owner (prod onboarding) then exit; applied after migrate")
+	studioName := flag.String("studio-name", "", "studio display name (with -bootstrap-studio)")
+	studioTZ := flag.String("studio-tz", "", "studio IANA timezone (default Europe/London)")
+	studioCurrency := flag.String("studio-currency", "", "studio ISO 4217 currency (default GBP)")
+	studioWelcome := flag.String("studio-welcome", "", "studio welcome message (optional)")
+	ownerEmail := flag.String("owner-email", "", "owner's sign-in email (with -bootstrap-studio)")
+	ownerName := flag.String("owner-name", "", "owner's display name (optional)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -72,6 +82,20 @@ func main() {
 				log.Fatalf("bootstrap-api: %v", err)
 			}
 			log.Printf("applied bootstrap-api seed")
+		}
+		if *bootstrapStudio {
+			sid, oid, err := st.ProvisionStudio(ctx, store.StudioBootstrapInput{
+				Name:           *studioName,
+				Timezone:       *studioTZ,
+				Currency:       *studioCurrency,
+				WelcomeMessage: *studioWelcome,
+				OwnerEmail:     *ownerEmail,
+				OwnerName:      *ownerName,
+			})
+			if err != nil {
+				log.Fatalf("bootstrap-studio: %v", err)
+			}
+			log.Printf("provisioned studio %s with owner %s <%s>", sid, oid, *ownerEmail)
 		}
 		return
 	}
