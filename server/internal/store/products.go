@@ -919,7 +919,12 @@ type EntitlementSnapshot struct {
 	ExpiresAt        string `json:"expires_at,omitempty"`
 }
 
-func (s *Store) GetEntitlement(ctx context.Context, id string) (*EntitlementSnapshot, error) {
+// GetEntitlement loads an entitlement snapshot, scoped to its owner. The
+// studioID + userID filter is defensive: today every caller passes an id that
+// a user-scoped function just produced, but scoping here means a future caller
+// that forwards a client-supplied id can't turn this into a cross-user /
+// cross-tenant read. A mismatch resolves zero rows → sql.ErrNoRows.
+func (s *Store) GetEntitlement(ctx context.Context, studioID, userID, id string) (*EntitlementSnapshot, error) {
 	var (
 		out                EntitlementSnapshot
 		creditsT, creditsR sql.NullInt64
@@ -927,8 +932,14 @@ func (s *Store) GetEntitlement(ctx context.Context, id string) (*EntitlementSnap
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, label, pass_kind, credits_total, credits_remaining, expires_at
-		  FROM entitlements WHERE id = ?`, id,
+		  FROM entitlements WHERE id = ? AND studio_id = ? AND user_id = ?`,
+		id, studioID, userID,
 	).Scan(&out.ID, &out.Label, &out.PassKind, &creditsT, &creditsR, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No row for this (id, studio, user) — surface as ErrNotFound so the
+		// handler can answer 404 rather than a 500.
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

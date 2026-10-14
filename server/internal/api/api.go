@@ -44,7 +44,7 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(cors)
+	r.Use(newCORS())
 
 	// Liveness + readiness in one — a deploy platform (Fly, k8s, ALB,
 	// whatever) pings /healthz and gates traffic on a 2xx. We include a
@@ -310,6 +310,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		v, err := s.verify(r.Context(), token)
 		if errors.Is(err, auth.ErrInvalidToken) {
 			writeError(w, http.StatusUnauthorized, "invalid id token")
+			return
+		}
+		if errors.Is(err, auth.ErrEmailNotVerified) {
+			writeError(w, http.StatusForbidden,
+				"email not verified — check your inbox for a verification link, then sign in again")
 			return
 		}
 		if err != nil {
@@ -931,7 +936,11 @@ func (s *Server) handleConfirmCheckoutSession(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusOK, map[string]any{"status": "pending"})
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement after checkout confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -1226,7 +1235,7 @@ func (s *Server) handleMarkAttendance(w http.ResponseWriter, r *http.Request) {
 	if via == "" {
 		via = "manual"
 	}
-	err := s.store.MarkAttendance(r.Context(), u.ID, bookingID, status, via)
+	err := s.store.MarkAttendance(r.Context(), u.StudioID, u.ID, bookingID, status, via)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "booking not found")
 		return
@@ -2680,7 +2689,11 @@ func (s *Server) handleCreatePurchase(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, err, "createPurchase")
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement: %v", err)
 		writeError(w, http.StatusInternalServerError, "purchase succeeded but entitlement load failed")
@@ -2710,7 +2723,11 @@ func (s *Server) handleConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 		respondValidation(w, err)
 		return
 	}
-	ent, err := s.store.GetEntitlement(r.Context(), entitlementID)
+	ent, err := s.store.GetEntitlement(r.Context(), u.StudioID, u.ID, entitlementID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "entitlement not found")
+		return
+	}
 	if err != nil {
 		log.Printf("get entitlement after confirm: %v", err)
 		writeError(w, http.StatusInternalServerError, "confirm succeeded but entitlement load failed")
@@ -3752,17 +3769,60 @@ func minorToDecimal(minor int) string {
 	return s
 }
 
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+// newCORS builds the CORS middleware. CORS_ALLOWED_ORIGINS (comma-separated)
+// locks the browser surface to known front-ends: only a listed Origin is
+// reflected back, and Vary: Origin is set so caches don't cross the responses.
+// Unset keeps the permissive "*" — acceptable here because auth is a Bearer
+// token, not a cookie (so "*" carries no CSRF/ambient-credential risk), and it
+// keeps local dev frictionless. Set it in production.
+func newCORS() func(http.Handler) http.Handler {
+	// Normalise both the configured list and the incoming Origin so a cosmetic
+	// difference (trailing slash, letter case) doesn't silently lock out a
+	// legit front-end — the #1 CORS-allowlist support footgun.
+	allowed := map[string]bool{}
+	if raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if n := normalizeOrigin(o); n != "" {
+				allowed[n] = true
+			}
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(allowed) == 0 {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Add("Vary", "Origin")
+				origin := r.Header.Get("Origin")
+				if origin != "" {
+					if allowed[normalizeOrigin(origin)] {
+						// Reflect the Origin exactly as sent (the browser matches
+						// byte-for-byte); normalisation is only for the lookup.
+						w.Header().Set("Access-Control-Allow-Origin", origin)
+					} else {
+						// Logged so a misconfigured CORS_ALLOWED_ORIGINS is
+						// diagnosable instead of a silent browser-side failure.
+						log.Printf("cors: origin %q not in CORS_ALLOWED_ORIGINS — blocked", origin)
+					}
+				}
+			}
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// normalizeOrigin lowercases and drops a trailing slash so an operator's
+// "https://App.Example/" in CORS_ALLOWED_ORIGINS matches the browser's
+// "https://app.example". Scheme and host are case-insensitive; a browser
+// Origin never carries a path, so trimming a stray slash is safe.
+func normalizeOrigin(o string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o), "/"))
 }
 
 // handleHealthz answers the load balancer's "are you alive?" probe.

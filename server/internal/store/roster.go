@@ -328,9 +328,10 @@ func (s *Store) CheckinScan(ctx context.Context, studioID, actorID, token string
 // outcome on the other two transitions.
 //
 // actorID identifies the staff member who marked attendance — pass "" only for
-// system-triggered transitions (none today). studioID is taken from the
-// booking row so callers don't need to pre-resolve it.
-func (s *Store) MarkAttendance(ctx context.Context, actorID, bookingID, status, via string) error {
+// system-triggered transitions (none today). studioID scopes the mutation to
+// the caller's studio: a booking in another tenant resolves zero rows and
+// returns ErrNotFound, so staff can't flip bookings outside their own studio.
+func (s *Store) MarkAttendance(ctx context.Context, studioID, actorID, bookingID, status, via string) error {
 	if status != "attended" && status != "no_show" && status != "booked" {
 		return fmt.Errorf("invalid attendance status: %s", status)
 	}
@@ -349,8 +350,8 @@ func (s *Store) MarkAttendance(ctx context.Context, actorID, bookingID, status, 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE bookings
 		   SET status = ?, attendance_marked_by = ?, outcome = ?
-		 WHERE id = ? AND status != 'cancelled'`,
-		status, actualVia, outcome, bookingID,
+		 WHERE id = ? AND studio_id = ? AND status != 'cancelled'`,
+		status, actualVia, outcome, bookingID, studioID,
 	)
 	if err != nil {
 		return err
@@ -359,19 +360,20 @@ func (s *Store) MarkAttendance(ctx context.Context, actorID, bookingID, status, 
 	if n == 0 {
 		return ErrNotFound
 	}
-	// Resolve studio + the human-readable context for the audit row in one
-	// hop. Renders as "marked attended · <user> · <class>" in the Activity
-	// log without the UI having to follow IDs.
+	// Resolve the human-readable context for the audit row in one hop. Renders
+	// as "marked attended · <user> · <class>" in the Activity log without the
+	// UI having to follow IDs. studioID is the caller's — the UPDATE above
+	// already confirmed the booking belongs to it.
 	var (
-		studioID, userID, userName, classID, classTitle string
+		userID, userName, classID, classTitle string
 	)
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT b.studio_id, b.user_id, u.full_name, c.id, COALESCE(c.title,'')
+		SELECT b.user_id, u.full_name, c.id, COALESCE(c.title,'')
 		  FROM bookings b
 		  JOIN users   u ON u.id = b.user_id
 		  JOIN classes c ON c.id = b.class_id
 		 WHERE b.id = ?`, bookingID,
-	).Scan(&studioID, &userID, &userName, &classID, &classTitle); err == nil && studioID != "" {
+	).Scan(&userID, &userName, &classID, &classTitle); err == nil {
 		_ = s.WriteAudit(ctx, studioID, actorID, "attendance_mark", "booking", bookingID, map[string]any{
 			"status":      status,
 			"via":         via,

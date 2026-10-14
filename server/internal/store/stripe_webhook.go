@@ -42,10 +42,12 @@ func (s *Store) HandleStripeEvent(ctx context.Context, studioID string, payload 
 		return fmt.Errorf("%w: %v", ErrWebhookSignature, err)
 	}
 
-	// Already processed? Cheap no-op.
+	// Already processed? Cheap no-op. Scoped to the studio: event ids are only
+	// unique within a Stripe account, so dedup must be per-studio.
 	var seen int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM processed_stripe_events WHERE event_id = ?`, evt.ID,
+		`SELECT COUNT(*) FROM processed_stripe_events WHERE studio_id = ? AND event_id = ?`,
+		studioID, evt.ID,
 	).Scan(&seen); err != nil {
 		return fmt.Errorf("dedup lookup: %w", err)
 	}
@@ -164,10 +166,10 @@ func (s *Store) HandleStripeEvent(ctx context.Context, studioID string, payload 
 	// Record only after successful handling: if fulfilment 5xx'd above we want
 	// Stripe to retry (and the dedup row absent so the retry runs).
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO processed_stripe_events (event_id, studio_id, event_type)
+		INSERT INTO processed_stripe_events (studio_id, event_id, event_type)
 		VALUES (?, ?, ?)
-		ON CONFLICT(event_id) DO NOTHING`,
-		evt.ID, studioID, evt.Type,
+		ON CONFLICT(studio_id, event_id) DO NOTHING`,
+		studioID, evt.ID, evt.Type,
 	); err != nil {
 		return fmt.Errorf("record processed event: %w", err)
 	}

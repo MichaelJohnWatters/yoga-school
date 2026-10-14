@@ -23,7 +23,7 @@ func attendPast(t *testing.T, s *Store, f fixture, ent string, pastHours int) st
 	// the booked row directly — these fixtures represent classes that were
 	// booked while still future and have since happened.
 	bookingID := f.insertBookedSeat(t, s, class, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bookingID, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bookingID, "attended", "manual"); err != nil {
 		t.Fatalf("mark attended: %v", err)
 	}
 	return bookingID
@@ -204,7 +204,7 @@ func TestAchievements_EarlyBird(t *testing.T) {
 	morning := time.Date(time.Now().UTC().Year(), 1, 5, 6, 0, 0, 0, time.UTC)
 	class := f.insertClass(t, s, morning, 10)
 	bid := f.insertBookedSeat(t, s, class, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bid, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bid, "attended", "manual"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -229,7 +229,7 @@ func TestAchievements_NightOwl(t *testing.T) {
 	evening := time.Date(time.Now().UTC().Year(), 1, 5, 19, 30, 0, 0, time.UTC)
 	class := f.insertClass(t, s, evening, 10)
 	bid := f.insertBookedSeat(t, s, class, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bid, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bid, "attended", "manual"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,7 +283,7 @@ func TestAchievements_VarietyAcrossDisciplines(t *testing.T) {
 		t.Fatal(err)
 	}
 	bid := f.insertBookedSeat(t, s, reformerClass, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bid, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bid, "attended", "manual"); err != nil {
 		t.Fatal(err)
 	}
 

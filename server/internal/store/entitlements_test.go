@@ -161,7 +161,7 @@ func TestMarkAttendance_NoShowSetsOutcome(t *testing.T) {
 	class := f.insertClass(t, s, time.Now().UTC().Add(-2*time.Hour), 10)
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
 	bookingID := f.insertBookedSeat(t, s, class, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bookingID, "no_show", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bookingID, "no_show", "manual"); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
 	var outcome string
@@ -175,7 +175,7 @@ func TestMarkAttendance_NoShowSetsOutcome(t *testing.T) {
 	}
 
 	// Undo back to booked clears the outcome.
-	if err := s.MarkAttendance(ctx, "actor-test", bookingID, "booked", ""); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bookingID, "booked", ""); err != nil {
 		t.Fatalf("undo: %v", err)
 	}
 	if err := s.db.QueryRowContext(ctx,

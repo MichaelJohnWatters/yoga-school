@@ -152,7 +152,7 @@ func (s *Store) seedTransactionsAPI(ctx context.Context, rep *seedReport) error 
 	if bookingID, err := s.seedPastBookingFixture(ctx, UserMaya, grant.EntitlementID); err != nil {
 		return err
 	} else if bookingID != "" {
-		if err := s.MarkAttendance(ctx, manager, bookingID, "attended", "manual"); err != nil {
+		if err := s.MarkAttendance(ctx, StudioID, manager, bookingID, "attended", "manual"); err != nil {
 			return fmt.Errorf("mark attendance: %w", err)
 		}
 	}
@@ -481,7 +481,7 @@ func (s *Store) seedAttendanceHistoryAPI(ctx context.Context, manager string, re
 				status = "no_show"
 			}
 			n++
-			if err := s.MarkAttendance(ctx, manager, bookingID, status, "manual"); err != nil {
+			if err := s.MarkAttendance(ctx, StudioID, manager, bookingID, status, "manual"); err != nil {
 				rep.note("history mark", err)
 			}
 		}

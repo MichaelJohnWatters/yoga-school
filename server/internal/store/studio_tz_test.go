@@ -104,7 +104,7 @@ func TestMyAttendance_HonoursStudioTZ(t *testing.T) {
 	classID := f.insertClass(t, s, sydPast, 10)
 	ent := f.insertEntitlement(t, s, "unlimited", 0)
 	bookingID := f.insertBookedSeat(t, s, classID, ent)
-	if err := s.MarkAttendance(ctx, "actor-test", bookingID, "attended", "manual"); err != nil {
+	if err := s.MarkAttendance(ctx, f.studioID, "actor-test", bookingID, "attended", "manual"); err != nil {
 		t.Fatal(err)
 	}
 

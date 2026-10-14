@@ -272,8 +272,8 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           if (_error != null) ...[
             Text(
               _error!,
-              style: const TextStyle(
-                color: Color(0xFFA33B2E),
+              style: TextStyle(
+                color: y.danger,
                 fontSize: 13,
                 fontWeight: FontWeight.w600,
               ),

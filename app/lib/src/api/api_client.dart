@@ -28,6 +28,13 @@ import 'models.dart';
 // dev/prod parity wins.
 const _devBaseUrl = 'https://localhost:5443/api/v1';
 
+// Production base URL is injected at build time:
+//   flutter build … --dart-define=API_BASE_URL=https://api.yourstudio.app/api/v1
+// Falls back to the dev proxy when unset (local dev / tests). Release builds
+// MUST supply it — see the assert in ApiClient.create — otherwise a shipped
+// binary would send authenticated traffic (Bearer ID tokens) to localhost.
+const _baseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: _devBaseUrl);
+
 class ApiClient {
   final Dio _dio;
   ApiClient(this._dio);
@@ -42,16 +49,30 @@ class ApiClient {
   String get origin => Uri.parse(_dio.options.baseUrl).origin;
 
   factory ApiClient.create() {
+    // Fail fast if a release build was compiled without the prod API origin:
+    // it would otherwise leak Bearer ID tokens to localhost on the user's
+    // device. This MUST be a runtime throw, not an assert — asserts are
+    // stripped from release builds, which is exactly the build we need to
+    // catch.
+    if (kReleaseMode && _baseUrl == _devBaseUrl) {
+      throw StateError(
+        'Release build is using the dev base URL — pass '
+        '--dart-define=API_BASE_URL=<prod origin>/api/v1',
+      );
+    }
     final dio = Dio(
       BaseOptions(
-        baseUrl: _devBaseUrl,
+        baseUrl: _baseUrl,
         connectTimeout: const Duration(seconds: 5),
         receiveTimeout: const Duration(seconds: 5),
       ),
     );
-    dio.interceptors.add(_AuthInterceptor());
+    dio.interceptors.add(_AuthInterceptor(dio));
     if (kDebugMode) {
-      dio.interceptors.add(LogInterceptor(responseBody: false));
+      // responseBody off AND requestHeader off: the Authorization header
+      // carries the Firebase ID token (a bearer credential); never write it
+      // to the console, even in debug logs that could be scraped from logcat.
+      dio.interceptors.add(LogInterceptor(responseBody: false, requestHeader: false));
     }
     return ApiClient(dio);
   }
@@ -1800,7 +1821,25 @@ class ApiClient {
 /// Injects the current Firebase ID token on every outgoing request. On 401,
 /// forces a token refresh and retries once (handles silent expiry).
 class _AuthInterceptor extends Interceptor {
-  bool _retrying = false;
+  _AuthInterceptor(this._client);
+
+  // The owning Dio, so a 401 retry goes back through the configured
+  // BaseOptions (base URL, timeouts) and every interceptor — rather than a
+  // bare Dio() that would silently skip any future security interceptor
+  // (e.g. cert pinning or header redaction).
+  final Dio _client;
+
+  // In-flight forced token refresh, shared across all requests. When several
+  // requests 401 at once (e.g. the parallel bootstrap after a silent token
+  // expiry), the first kicks off one getIdToken(true) and the rest await the
+  // same future instead of each forcing their own refresh — and, crucially,
+  // each still gets to retry (the old single `_retrying` bool let the first
+  // 401 win and dropped every sibling's retry, surfacing spurious 401s).
+  Future<String?>? _refresh;
+
+  // Per-request marker so a retried request that 401s again isn't retried
+  // forever. Lives on RequestOptions.extra, which Dio carries through fetch().
+  static const _retriedKey = '__authRetried';
 
   @override
   Future<void> onRequest(
@@ -1823,22 +1862,25 @@ class _AuthInterceptor extends Interceptor {
     ErrorInterceptorHandler handler,
   ) async {
     final res = err.response;
-    if (res?.statusCode == 401 && !_retrying) {
+    final alreadyRetried = err.requestOptions.extra[_retriedKey] == true;
+    if (res?.statusCode == 401 && !alreadyRetried) {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        _retrying = true;
         try {
-          final fresh = await user.getIdToken(true);
+          // Coalesce concurrent refreshes; clear the slot when done so the
+          // next expiry refreshes again.
+          final fresh = await (_refresh ??=
+              user.getIdToken(true).whenComplete(() => _refresh = null));
           if (fresh != null) {
-            final retried = await Dio().fetch<dynamic>(
-              err.requestOptions..headers['Authorization'] = 'Bearer $fresh',
-            );
+            // Retry through the configured client so BaseOptions + interceptors
+            // apply. onRequest re-attaches the (now-fresh) token; the marker
+            // prevents a second retry if it still 401s.
+            final opts = err.requestOptions..extra[_retriedKey] = true;
+            final retried = await _client.fetch<dynamic>(opts);
             return handler.resolve(retried);
           }
         } catch (_) {
           // fall through to original error
-        } finally {
-          _retrying = false;
         }
       }
     }

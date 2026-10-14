@@ -19,6 +19,7 @@ import 'src/api/web_redirect.dart';
 import 'src/firebase_options.dart';
 import 'src/screens/buy_screen.dart' show productsProvider;
 import 'src/screens/customer_display.dart';
+import 'src/screens/email_verification_screen.dart';
 import 'src/screens/desktop/desktop_shell.dart';
 import 'src/screens/desktop/responsive.dart';
 import 'src/screens/manager/manager_shell.dart';
@@ -40,12 +41,20 @@ import 'src/theme/yoga_theme.dart';
 import 'src/theme/yoga_tokens.dart';
 import 'src/auth/auth_state.dart';
 
+/// Single source of truth for "are we talking to the Firebase Auth emulator?"
+/// It drives BOTH the emulator wiring below AND the email-verification gate in
+/// YogaApp, so the two can't drift: when the emulator is in play the server
+/// also skips the email_verified check (FIREBASE_AUTH_EMULATOR_HOST), so the
+/// client must skip the gate too. Keeping it one constant stops a future edit
+/// from moving one without the other.
+const bool kUseAuthEmulator = kDebugMode;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  if (kDebugMode) {
+  if (kUseAuthEmulator) {
     // Dev: route Firebase Auth at the local emulator on :9099.
     await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
     // Dev-only diagnostic — KEEP THIS. Replaces Flutter's default red
@@ -130,6 +139,13 @@ class YogaApp extends ConsumerWidget {
       home: user.when(
         data: (u) {
           if (u == null) return const SignInScreen();
+          // Gate on a verified email unless we're on the Auth emulator — the
+          // server refuses unverified tokens with 403, except when it's on the
+          // emulator (where emailVerified is always false). kUseAuthEmulator is
+          // the shared flag so client and server stay in lockstep.
+          if (!kUseAuthEmulator && !u.emailVerified) {
+            return EmailVerificationScreen(user: u);
+          }
           return CheckoutReturnHandler(child: _SignedInRoot(boot: boot));
         },
         loading: () => const SplashScreen(),
