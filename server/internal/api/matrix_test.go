@@ -32,6 +32,10 @@ var (
 		// See handleHealthz for the rationale (and the prod checklist
 		// item about firewalling the port off the public internet).
 		"GET /healthz": true,
+		// Readiness probe + metrics scrape — also unauthenticated (firewall
+		// /metrics off the public internet if desired).
+		"GET /readyz":  true,
+		"GET /metrics": true,
 		// Stripe webhook — Stripe calls this server-to-server with no bearer
 		// token. It authenticates by verifying the Stripe-Signature header
 		// against the studio's webhook secret (see handleStripeWebhook), so a
