@@ -1,0 +1,42 @@
+# Fly.io config for ONE studio's API (one deploy per studio — rename `app` and
+# the volume per customer). SQLite is single-writer, so exactly one machine.
+#
+# Before first deploy (per studio):
+#   fly apps create <app>
+#   fly volumes create yoga_data --size 1 --region <region>
+#   fly secrets set STRIPE_KEY_ENC_MASTER=$(openssl rand -hex 32) \
+#       FIREBASE_PROJECT_ID=<proj> FIREBASE_STORAGE_BUCKET=<bucket> \
+#       CORS_ALLOWED_ORIGINS=https://<web-domain> \
+#       GOOGLE_APPLICATION_CREDENTIALS=/data/firebase-sa.json
+#   (upload the service-account JSON to /data/firebase-sa.json once)
+
+app = "yoga-REPLACE-ME"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "server/Dockerfile"
+
+[env]
+  APP_ENV = "production"
+  # Everything else is injected via `fly secrets set` (see header). With
+  # APP_ENV=production the server refuses to boot unless CORS_ALLOWED_ORIGINS
+  # is set and no dev gates are present (see cmd/server/main.go).
+
+[[mounts]]
+  source = "yoga_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # SQLite single-writer: never stop/scale beyond one machine.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
