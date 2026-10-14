@@ -10,6 +10,7 @@ import '../api/api_error.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../auth/auth_state.dart';
 import '../theme/yoga_tokens.dart';
@@ -102,6 +103,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _mode = _isSignUp ? _AuthMode.signIn : _AuthMode.signUp;
       _error = null;
     });
+  }
+
+  // Opens a legal page served as a static file by the web host, resolved
+  // relative to the current origin (e.g. https://app.studio.com/privacy.html).
+  Future<void> _openLegal(String page) async {
+    await launchUrl(Uri.base.resolve(page), mode: LaunchMode.platformDefault);
   }
 
   Future<void> _submit() async {
@@ -316,6 +323,34 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                   ],
                 ),
               ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Center(
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 6,
+              children: [
+                Text(
+                  _isSignUp
+                      ? 'By creating an account you agree to our'
+                      : 'Our',
+                  style: TextStyle(fontSize: 11.5, color: y.muted),
+                ),
+                GestureDetector(
+                  onTap: () => _openLegal('terms.html'),
+                  child: Text('Terms',
+                      style: TextStyle(
+                          fontSize: 11.5, fontWeight: FontWeight.w700, color: y.primary)),
+                ),
+                Text('and', style: TextStyle(fontSize: 11.5, color: y.muted)),
+                GestureDetector(
+                  onTap: () => _openLegal('privacy.html'),
+                  child: Text('Privacy Policy',
+                      style: TextStyle(
+                          fontSize: 11.5, fontWeight: FontWeight.w700, color: y.primary)),
+                ),
+              ],
             ),
           ),
         ],
