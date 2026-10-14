@@ -1,0 +1,51 @@
+name: CI
+
+# Gates every push and PR: a regression in the Go backend or the Flutter app
+# fails here instead of reaching a customer deploy. Mirrors the local checks
+# (go vet / go test / govulncheck, dart analyze / flutter test).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    name: Go backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Pins to the toolchain in server/go.mod (1.26.9) — no duplicated version.
+          go-version-file: server/go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  app:
+    name: Flutter app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # stable currently ships Dart >= 3.9, matching pubspec's sdk: ^3.9.2.
+          channel: stable
+      - name: Pub get
+        run: flutter pub get
+      - name: Analyze
+        run: dart analyze
+      - name: Test
+        run: flutter test
