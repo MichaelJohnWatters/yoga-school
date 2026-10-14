@@ -1,5 +1,23 @@
 # yoga-school
 
+A white-label yoga studio platform: a Flutter student app (mobile + web) and a
+manager console, over a Go backend. Each studio configures a token-based theme
+and runs scheduling, bookings, course series (enrollments), passes &
+memberships, Stripe payments, and a front-desk POS from one codebase.
+
+- **`app/`** — Flutter client (Riverpod + Dio, Hanken Grotesk via `google_fonts`).
+  The student app and manager console share one token-driven design system.
+- **`server/`** — Go backend (chi router, SQLite via modernc) with
+  Stripe-backed payments and webhook-authoritative fulfilment.
+- **`docs/`** — architecture docs; start with [docs/payments.md](docs/payments.md).
+- **`design_handoff_yoga_school/`** — the authoritative design brief and full
+  engineering spec (API, schema, business rules).
+
+> **Status:** active development. The theming system is the core architectural
+> primitive; single payments (tickets + packs) and recurring memberships are
+> wired to real Stripe (webhook-authoritative). For the path to a public,
+> paying-customer deploy see [docs/launch-checklist.md](docs/launch-checklist.md).
+
 ## Local dev — TLS proxy
 
 Dev mirrors prod-shape TLS via [mkcert](https://github.com/FiloSottile/mkcert) +
@@ -106,8 +124,10 @@ webhook event list to register, config, and the e2e tests.
 - [ ] Set `STRIPE_KEY_ENC_MASTER` (hex → 32 bytes) and register the per-studio
   webhook `…/stripe/webhook/{studioID}` with the events listed in
   docs/payments.md. Without the master key the server runs in dev_stub mode.
-- [ ] Rolling direct-debit / subscriptions are **not** built — the "Unlimited
-  Monthly" product is a one-time 30-day pass, not a real Stripe Subscription.
+- [ ] Recurring memberships ARE built (real Stripe Subscriptions: hosted
+  Checkout in subscription mode, `invoice.paid` grants/extends the rolling pass,
+  dunning + cancel reflected). Validate the membership web flow in test mode
+  before go-live — see docs/payments-device-test.md and docs/go-live-stripe.md.
 - [ ] FCM dispatch falls back to log-only when the auth emulator is
   active (`cmd/server/main.go:65-78`). In prod the messaging client
   needs real Firebase credentials.
