@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -73,6 +74,26 @@ func main() {
 			log.Printf("applied bootstrap-api seed")
 		}
 		return
+	}
+
+	// Production hardening: when APP_ENV=production, refuse to serve if any
+	// dev-only gate is active or CORS isn't locked down. Fail loud at boot so a
+	// misconfig can't silently ship dev behaviour (unauthenticated /dev routes,
+	// verbose error bodies, emulator auth, or wildcard CORS). Applies only to the
+	// serving path — the -migrate/-bootstrap flows return above.
+	if os.Getenv("APP_ENV") == "production" {
+		var bad []string
+		for _, k := range []string{"FIREBASE_AUTH_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "DEV_VERBOSE_ERRORS"} {
+			if os.Getenv(k) != "" {
+				bad = append(bad, k+" must be unset")
+			}
+		}
+		if os.Getenv("CORS_ALLOWED_ORIGINS") == "" {
+			bad = append(bad, "CORS_ALLOWED_ORIGINS must be set")
+		}
+		if len(bad) > 0 {
+			log.Fatalf("APP_ENV=production refuses to boot: %s", strings.Join(bad, "; "))
+		}
 	}
 
 	app, err := auth.NewApp(ctx)

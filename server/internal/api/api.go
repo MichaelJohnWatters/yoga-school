@@ -53,21 +53,19 @@ func (s *Server) Routes() http.Handler {
 	// Unauthenticated by design: the prober isn't logging in.
 	r.Get("/healthz", s.handleHealthz)
 
-	// Dev-only test reset endpoint. Lets integration tests wipe
-	// non-seed bookings/purchases/etc. between scenarios so each test
-	// starts from a clean baseline without restarting the server. Gated
-	// by the presence of FIREBASE_AUTH_EMULATOR_HOST — when we're talking
-	// to the real Firebase, this route refuses with 404. Unauthenticated
-	// on purpose: tests don't carry a token before they've signed in.
-	r.Post("/dev/reset-test-state", s.handleDevResetTestState)
-	// Companion to reset — fills a target class to capacity by booking
-	// in eligible seed students. Used by the join-waitlist test to
-	// guarantee the under-test student lands on a full class.
-	r.Post("/dev/fill-class", s.handleDevFillClass)
-	// Dev-only: point a studio at Stripe test keys so the checkout
-	// integration test can create a real Checkout Session. Same emulator gate.
-	r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
-	r.Post("/dev/seed-membership", s.handleDevSeedMembership)
+	// Dev-only test endpoints. Lets integration tests wipe non-seed state,
+	// fill classes, and point a studio at Stripe test keys between scenarios.
+	// They are only *registered* when FIREBASE_AUTH_EMULATOR_HOST is set — in
+	// production the emulator is never set, so these routes don't exist at all
+	// (not even a 404 handler), giving prod zero dev surface-area. The handlers
+	// keep their own emulator check as defence-in-depth. Unauthenticated on
+	// purpose: tests don't carry a token before they've signed in.
+	if os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") != "" {
+		r.Post("/dev/reset-test-state", s.handleDevResetTestState)
+		r.Post("/dev/fill-class", s.handleDevFillClass)
+		r.Post("/dev/configure-stripe", s.handleDevConfigureStripe)
+		r.Post("/dev/seed-membership", s.handleDevSeedMembership)
+	}
 
 	// Stripe webhook — PUBLIC (no auth middleware): Stripe calls this
 	// server-to-server, and the handler proves the request is genuine by
