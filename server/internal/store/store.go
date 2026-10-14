@@ -69,7 +69,11 @@ func (s *Store) dispatchPush(userID, notifType, title, body, payloadJSON string)
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	// journal_mode(WAL): required by Litestream (it streams the WAL to object
+	// storage for continuous backup — see litestream.yml) and it also lets
+	// readers run concurrently with the single writer. Harmless/ignored for an
+	// in-memory DB. foreign_keys + a 5s busy_timeout as before.
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, err
 	}

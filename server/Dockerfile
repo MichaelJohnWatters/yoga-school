@@ -19,11 +19,17 @@ FROM alpine:3.20
 # tzdata: studios have IANA timezones.
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 10001 app
+# Litestream for continuous SQLite backup to object storage (M4).
+ARG LITESTREAM_VERSION=0.3.13
+ADD https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz /tmp/ls.tgz
+RUN tar -C /usr/local/bin -xzf /tmp/ls.tgz litestream && rm /tmp/ls.tgz
+
 WORKDIR /app
 COPY --from=build /out/server /app/server
 # schema.sql must live at /app/db/schema.sql so projectRoot() (walks up from CWD
 # looking for db/schema.sql) resolves it when the entrypoint runs `-migrate`.
 COPY server/db/schema.sql /app/db/schema.sql
+COPY server/litestream.yml /etc/litestream.yml
 COPY server/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh && mkdir -p /data && chown app /data
 USER app

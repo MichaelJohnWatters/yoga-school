@@ -1,11 +1,25 @@
 #!/bin/sh
-# Container entrypoint: apply the schema (idempotent — CREATE TABLE IF NOT
-# EXISTS) against the SQLite file on the mounted volume, then serve. Running
-# -migrate here (not as a Fly release_command) guarantees the volume at /data is
-# mounted when migration writes. M4 wraps this with Litestream for backups.
+# Container entrypoint.
+#
+# When Litestream is configured (LITESTREAM_BUCKET set): restore the DB from
+# object storage if the volume is empty (fresh machine / lost volume), apply the
+# schema, then serve *under* litestream so every write is streamed to the
+# backup. When it isn't configured, just migrate-then-serve (dev / pre-backup).
+#
+# -migrate runs here (not as a Fly release_command) so the /data volume is
+# guaranteed mounted when the migration writes.
 set -e
 
 DB="${DB_PATH:-/data/prod.db}"
+LS_CONFIG="/etc/litestream.yml"
 
-/app/server -migrate -db "$DB"
-exec /app/server -db "$DB" -addr :8080
+if [ -n "${LITESTREAM_BUCKET:-}" ]; then
+  # Restore only if there's no local DB yet AND a replica exists — a brand-new
+  # studio with no backup yet is a clean no-op.
+  litestream restore -if-db-not-exists -if-replica-exists -config "$LS_CONFIG" "$DB"
+  /app/server -migrate -db "$DB"
+  exec litestream replicate -config "$LS_CONFIG" -exec "/app/server -db $DB -addr :8080"
+else
+  /app/server -migrate -db "$DB"
+  exec /app/server -db "$DB" -addr :8080
+fi
